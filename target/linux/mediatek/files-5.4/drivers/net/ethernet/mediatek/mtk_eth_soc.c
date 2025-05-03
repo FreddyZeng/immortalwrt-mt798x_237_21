@@ -27,9 +27,23 @@
 #include "mtk_eth_dbg.h"
 #include "mtk_eth_reset.h"
 
+#include <linux/ip.h>           // For struct iphdr and ip_hdr()
+#include <linux/skbuff.h>       // For struct sk_buff
+#include <linux/netdevice.h>    // For dev_net() and networking functions
+#include <linux/if_ether.h>     // For ETH_P_IP
+#include <linux/byteorder/generic.h>  // For htonl(), htons(), ntohl()
+#include <net/netfilter/nf_conntrack.h> // For nf_ct_* functions and conntrack structures
+#include <net/netfilter/nf_conntrack_tuple.h> // For struct nf_conntrack_tuple
+#include <net/netfilter/nf_conntrack_core.h> // For nf_conntrack_find_get()
+#include <linux/netfilter.h>    // For netfilter definitions
+#include <linux/pkt_sched.h>    // For TC_PRIO_MAX, TC_PRIO_INTERACTIVE
+#include <net/ip.h>             // For ip_send_check()
+
 #if defined(CONFIG_NET_MEDIATEK_HNAT) || defined(CONFIG_NET_MEDIATEK_HNAT_MODULE)
 #include "mtk_hnat/nf_hnat_mtk.h"
 #endif
+
+
 static struct mtk_eth *sg_eth;
 static int mtk_msg_level = -1;
 atomic_t reset_lock = ATOMIC_INIT(0);
@@ -2937,13 +2951,14 @@ static int mtk_hw_init(struct mtk_eth *eth, u32 type)
 
 	if (MTK_HAS_CAPS(eth->soc->caps, MTK_NETSYS_V2)) {
 		/* PSE Free Queue Flow Control  */
-		mtk_w32(eth, 0x01fa01f4, PSE_FQFC_CFG2);
+//		mtk_w32(eth, 0x01fa01f4, PSE_FQFC_CFG2);
+		mtk_w32(eth, 0xffffffff, PSE_FQFC_CFG2);
 
 		/* PSE should not drop port8 and port9 packets */
-		mtk_w32(eth, 0x00000300, PSE_DROP_CFG);
+		mtk_w32(eth, 0xffffffff, PSE_DROP_CFG);
 
 		/* PSE config input queue threshold */
-		mtk_w32(eth, 0x001a000e, PSE_IQ_REV(1));
+		mtk_w32(eth, 0x031a000e, PSE_IQ_REV(1));
 		mtk_w32(eth, 0x01ff001a, PSE_IQ_REV(2));
 		mtk_w32(eth, 0x000e01ff, PSE_IQ_REV(3));
 		mtk_w32(eth, 0x000e000e, PSE_IQ_REV(4));
@@ -2953,7 +2968,7 @@ static int mtk_hw_init(struct mtk_eth *eth, u32 type)
 		mtk_w32(eth, 0x002a000e, PSE_IQ_REV(8));
 
 		/* PSE config output queue threshold */
-		mtk_w32(eth, 0x000f000a, PSE_OQ_TH(1));
+		mtk_w32(eth, 0x032f000a, PSE_OQ_TH(1));
 		mtk_w32(eth, 0x001a000f, PSE_OQ_TH(2));
 		mtk_w32(eth, 0x000f001a, PSE_OQ_TH(3));
 		mtk_w32(eth, 0x01ff000f, PSE_OQ_TH(4));

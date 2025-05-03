@@ -736,6 +736,8 @@ setup_model()
 	xiaomi,redmi-router-ax6000* |\
 	bananapi,bpi-r3mini* |\
 	netcore,n60 |\
+	netcore,n60-pro |\
+	ruijie,rg-x60-pro* |\
 	glinet,gl-mt6000|\
 	jdcloud,re-cp-03 |\
 	tplink,tl-xdr608* |\

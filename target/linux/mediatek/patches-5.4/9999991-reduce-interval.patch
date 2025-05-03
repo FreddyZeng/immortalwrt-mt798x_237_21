@@ -1,0 +1,406 @@
+diff --git a/include/uapi/linux/netfilter_ipv4.h b/include/uapi/linux/netfilter_ipv4.h
+index 155e77d6a..2d233c865 100644
+--- a/include/uapi/linux/netfilter_ipv4.h
++++ b/include/uapi/linux/netfilter_ipv4.h
+@@ -28,7 +28,7 @@
+ #endif /* ! __KERNEL__ */
+ 
+ enum nf_ip_hook_priorities {
+-	NF_IP_PRI_FIRST = INT_MIN,
++	NF_IP_PRI_FIRST = INT_MIN + 10,
+ 	NF_IP_PRI_RAW_BEFORE_DEFRAG = -450,
+ 	NF_IP_PRI_CONNTRACK_DEFRAG = -400,
+ 	NF_IP_PRI_RAW = -300,
+diff --git a/net/core/dev.c b/net/core/dev.c
+index 4f39d9720..c5da86ea4 100644
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -3685,6 +3685,7 @@ struct netdev_queue *netdev_core_pick_tx(struct net_device *dev,
+ 		queue_index = netdev_cap_txqueue(dev, queue_index);
+ 	}
+ 
++
+ 	skb_set_queue_mapping(skb, queue_index);
+ 	return netdev_get_tx_queue(dev, queue_index);
+ }
+@@ -3982,6 +3983,7 @@ static int get_rps_cpu(struct net_device *dev, struct sk_buff *skb,
+ 	if (skb_rx_queue_recorded(skb)) {
+ 		u16 index = skb_get_rx_queue(skb);
+ 
++
+ 		if (unlikely(index >= dev->real_num_rx_queues)) {
+ 			WARN_ONCE(dev->real_num_rx_queues > 1,
+ 				  "%s received packet on queue %u, but number "
+@@ -4439,6 +4441,7 @@ static int netif_rx_internal(struct sk_buff *skb)
+ 		rcu_read_lock();
+ 
+ 		cpu = get_rps_cpu(skb->dev, skb, &rflow);
++
+ 		if (cpu < 0)
+ 			cpu = smp_processor_id();
+ 
+diff --git a/net/sched/sch_cake.c b/net/sched/sch_cake.c
+index a43661432..660f80431 100644
+--- a/net/sched/sch_cake.c
++++ b/net/sched/sch_cake.c
+@@ -70,8 +70,15 @@
+ #include <net/tcp.h>
+ #include <net/flow_dissector.h>
+ 
++#include <linux/if.h>
++#include <linux/in6.h>         // 用于网络接口定义
++#include <linux/net.h>  // 包含校验和相关定义
++#include <linux/spinlock.h>
++
+ #if IS_ENABLED(CONFIG_NF_CONNTRACK)
++#include <net/netfilter/nf_conntrack.h>
+ #include <net/netfilter/nf_conntrack_core.h>
++#include <net/netfilter/nf_conntrack_tuple.h>
+ #endif
+ 
+ #define CAKE_SET_WAYS (8)
+@@ -197,6 +204,8 @@ struct cake_tin_data {
+ }; /* number of tins is small, so size of this struct doesn't matter much */
+ 
+ struct cake_sched_data {
++//	spinlock_t conntrack_lock;  // 用于保护连接跟踪的自旋锁
++
+ 	struct tcf_proto __rcu *filter_list; /* optional external classifier */
+ 	struct tcf_block *block;
+ 	struct cake_tin_data *tins;
+@@ -312,14 +321,14 @@ static const u8 precedence[] = {
+ };
+ 
+ static const u8 diffserv8[] = {
+-	2, 0, 1, 2, 4, 2, 2, 2,
+-	1, 2, 1, 2, 1, 2, 1, 2,
++	2, 2, 1, 2, 4, 2, 2, 2,
++	0, 2, 1, 2, 1, 2, 1, 2,
+ 	5, 2, 4, 2, 4, 2, 4, 2,
+ 	3, 2, 3, 2, 3, 2, 3, 2,
+-	6, 2, 3, 2, 3, 2, 3, 2,
+-	6, 2, 2, 2, 6, 2, 6, 2,
+-	7, 2, 2, 2, 2, 2, 2, 2,
+-	7, 2, 2, 2, 2, 2, 2, 2,
++	5, 2, 3, 2, 3, 2, 3, 2,
++	5, 2, 2, 2, 5, 2, 7, 2,
++	6, 2, 2, 2, 2, 2, 2, 2,
++	6, 2, 2, 2, 2, 2, 2, 2,
+ };
+ 
+ static const u8 diffserv4[] = {
+@@ -1614,6 +1623,113 @@ static u8 cake_handle_diffserv(struct sk_buff *skb, bool wash)
+ 	}
+ }
+ 
++// 判断IP地址是否在指定范围内
++// 判断IP地址是否在指定范围内
++static bool is_ip_in_range_k(__be32 ip)
++{
++	// 提取前三个字节（固定为 192.168.110）
++	__be32 prefix = htonl((192 << 24) | (168 << 16) | (110 << 8));
++
++	// 提取 IP 的最后一个字节
++	__be32 last_byte = ip & htonl(0xFF); // 获取 IP 地址的最后一个字节
++
++	// 判断前三个字节是否匹配且最后一个字节在 10 到 39 之间
++	return (ip >> 24) == (prefix >> 24) && last_byte >= 10 && last_byte <= 39;
++}
++
++
++
++// 从tuple中检查src和dst IP
++static bool tuple_ips_in_range_k(const struct nf_conntrack_tuple *tuple)
++{
++	if (!tuple) {
++		return false;
++	}
++
++	if (is_ip_in_range_k(tuple->src.u3.ip) || is_ip_in_range_k(tuple->dst.u3.ip))
++		return true;
++	return false;
++}
++
++static bool is_nat_target_ip_ipv4_k(struct sk_buff *skb, struct cake_sched_data *q)
++{
++	struct iphdr *iph;
++	struct nf_conn *ct = NULL;
++	enum ip_conntrack_info ctinfo;
++	const struct nf_conntrack_tuple *tuple_origin = NULL, *tuple_reply = NULL;
++	struct nf_conntrack_tuple skb_tuple;
++	const struct nf_conntrack_tuple_hash *hash;
++	bool ret = false;
++
++	// 检查是否为 IPv4 数据包
++	if (skb_protocol(skb, true) != htons(ETH_P_IP)) {
++		return false;  // 如果不是 IPv4 数据包，返回 false
++	}
++
++	iph = ip_hdr(skb);
++	if (iph) {
++		// 直接检查 IPv4 头部中的源和目的地址
++		if (is_ip_in_range_k(iph->saddr) || is_ip_in_range_k(iph->daddr)) {
++			pr_info("Packet source or destination IP is in range\n");
++			ret = true;
++			return ret;
++		}
++	}
++
++	// 获取自旋锁，保护连接跟踪的操作
++	//spin_lock_bh(&q->conntrack_lock);
++
++	// 尝试获取连接跟踪记录
++	ct = nf_ct_get(skb, &ctinfo);
++	if (ct) {
++		// 获取连接跟踪的原始元组和回复元组
++		tuple_origin = nf_ct_tuple(ct, IP_CT_DIR_ORIGINAL);
++		tuple_reply = nf_ct_tuple(ct, IP_CT_DIR_REPLY);
++
++		// 检查元组是否在指定的 IP 范围内
++		if (tuple_ips_in_range_k(tuple_origin) || tuple_ips_in_range_k(tuple_reply)) {
++			pr_info("Connection tuple is in range\n");
++			ret = true;
++			goto out;
++		}
++	} else {
++		// 如果没有找到连接跟踪记录，尝试根据数据包获取元组
++		if (nf_ct_get_tuplepr(skb, skb_network_offset(skb),
++				NFPROTO_IPV4, dev_net(skb->dev),
++				&skb_tuple)) {
++			pr_info("Trying to find tuple from skb\n");
++			hash = nf_conntrack_find_get(dev_net(skb->dev),
++										  &nf_ct_zone_dflt,
++										  &skb_tuple);
++			if (hash) {
++				ct = nf_ct_tuplehash_to_ctrack(hash);
++				if (ct) {
++					tuple_origin = nf_ct_tuple(ct, IP_CT_DIR_ORIGINAL);
++					tuple_reply = nf_ct_tuple(ct, IP_CT_DIR_REPLY);
++
++					if (tuple_ips_in_range_k(tuple_origin) || tuple_ips_in_range_k(tuple_reply)) {
++						pr_info("Found matching tuple from skb\n");
++						ret = true;
++						goto out;
++					}
++				}
++			}
++		}
++	}
++
++out:
++	// 确保释放连接跟踪对象
++	if (ct) {
++		nf_ct_put(ct);
++	}
++
++	// 释放自旋锁
++	//spin_unlock_bh(&q->conntrack_lock);
++
++	return ret;
++}
++
++
+ static struct cake_tin_data *cake_select_tin(struct Qdisc *sch,
+ 					     struct sk_buff *skb)
+ {
+@@ -1622,6 +1738,53 @@ static struct cake_tin_data *cake_select_tin(struct Qdisc *sch,
+ 	bool wash;
+ 	u8 dscp;
+ 
++//	struct ipv6hdr _ipv6h;
++//	struct iphdr *iph;
++//	struct ipv6hdr *ipv6h;
++//	u32 pkt_len;
++	u8 highest_priority_tin;
++
++//	int protocol;
++	bool is_priority_ip;
++
++	if (q->tin_cnt > 1) {
++		highest_priority_tin = q->tin_cnt - 1; /* diffserv8 中通常是 7 */
++	}
++
++	is_priority_ip = is_nat_target_ip_ipv4_k(skb, q);
++
++	if (is_priority_ip) {
++		return &q->tins[highest_priority_tin];
++	}
++
++//	/* 首先获取 IP 头 */
++//	iph = cake_get_iphdr(skb, &_ipv6h);
++//
++//	/* 添加包大小检查 - 只处理小于 300 字节的包 */
++//	pkt_len = qdisc_pkt_len(skb);
++//
++//	if (iph && pkt_len < 300) {
++//		highest_priority_tin = q->tin_cnt - 1; /* diffserv8 中通常是 7 */
++//
++//		/* 检查数据包类型并根据队列类型分配优先级 */
++//		if (iph->version == 4) {
++//			protocol = iph->protocol;
++//			if (protocol == IPPROTO_UDP || protocol == IPPROTO_ICMP) {
++//			    /* 小 UDP 包或 ICMP 包分配到最高优先级 */
++//				return &q->tins[highest_priority_tin];
++//			}
++//		} else if (iph->version == 6) {
++//		/* IPv6 处理：直接使用 _ipv6h */
++//			ipv6h = &_ipv6h;
++//			protocol = ipv6h->nexthdr;
++//			if (protocol == IPPROTO_UDP || protocol == IPPROTO_ICMPV6) {
++//			    /* 小 UDP IPv6 包或 ICMPv6 包分配到最高优先级 */
++//				return &q->tins[highest_priority_tin];
++//			}
++//		}
++//	}
++
++
+ 	/* Tin selection: Default to diffserv-based selection, allow overriding
+ 	 * using firewall marks or skb->priority. Call DSCP parsing early if
+ 	 * wash is enabled, otherwise defer to below to skip unneeded parsing.
+@@ -1634,19 +1797,35 @@ static struct cake_tin_data *cake_select_tin(struct Qdisc *sch,
+ 	if (q->tin_mode == CAKE_DIFFSERV_BESTEFFORT)
+ 		tin = 0;
+ 
+-	else if (mark && mark <= q->tin_cnt)
+-		tin = q->tin_order[mark - 1];
++	else if (skb->priority == TC_PRIO_MAX) {
++		tin = highest_priority_tin;
++	}
+ 
+ 	else if (TC_H_MAJ(skb->priority) == sch->handle &&
+ 		 TC_H_MIN(skb->priority) > 0 &&
+-		 TC_H_MIN(skb->priority) <= q->tin_cnt)
++		 TC_H_MIN(skb->priority) <= q->tin_cnt) {
+ 		tin = q->tin_order[TC_H_MIN(skb->priority) - 1];
++		if (tin == highest_priority_tin) {
++			tin = highest_priority_tin - 1;
++		}
++	}
++
++	else if (mark && mark <= q->tin_cnt) {
++		tin = q->tin_order[mark - 1];
++		if (tin == highest_priority_tin) {
++			tin = highest_priority_tin - 1;
++		}
++	}
+ 
+ 	else {
+ 		if (!wash)
+ 			dscp = cake_handle_diffserv(skb, wash);
+ 		tin = q->tin_index[dscp];
+ 
++		if (tin == highest_priority_tin) {
++			tin = highest_priority_tin - 1;
++		}
++
+ 		if (unlikely(tin >= q->tin_cnt))
+ 			tin = 0;
+ 	}
+@@ -2322,7 +2501,7 @@ static int cake_config_precedence(struct Qdisc *sch)
+ 	/* convert high-level (user visible) parameters into internal format */
+ 	struct cake_sched_data *q = qdisc_priv(sch);
+ 	u32 mtu = psched_mtu(qdisc_dev(sch));
+-	u64 rate = q->rate_bps;
++	u64 rate = q->rate_bps * 9 / 10;
+ 	u32 quantum = 256;
+ 	u32 i;
+ 
+@@ -2333,10 +2512,29 @@ static int cake_config_precedence(struct Qdisc *sch)
+ 	for (i = 0; i < q->tin_cnt; i++) {
+ 		struct cake_tin_data *b = &q->tins[i];
+ 
+-		cake_set_rate(b, rate, mtu, us_to_ns(q->target),
+-			      us_to_ns(q->interval));
++		if (i > 5) {
++			if (i == 7) {
++				cake_set_rate(b, q->rate_bps * 10 / 10, mtu, us_to_ns(q->target),
++					      us_to_ns(10000));
++			} else {
++				cake_set_rate(b, rate, mtu, us_to_ns(q->target),
++					      us_to_ns(100000));
++			}
++		} else {
++			if (i == 2) {
++				cake_set_rate(b, q->rate_bps * 9 / 10, mtu, us_to_ns(q->target),
++					      us_to_ns(10000));
++			} else {
++				cake_set_rate(b, rate, mtu, us_to_ns(q->target),
++					      us_to_ns(100000));
++			}
++		}
+ 
+-		b->tin_quantum = max_t(u16, 1U, quantum);
++		if (i == 7) {
++			b->tin_quantum = 65535;
++		} else {
++			b->tin_quantum = max_t(u16, 1U, quantum);
++		}
+ 
+ 		/* calculate next class's parameters */
+ 		rate  *= 7;
+@@ -2397,8 +2595,8 @@ static int cake_config_diffserv8(struct Qdisc *sch)
+ {
+ /*	Pruned list of traffic classes for typical applications:
+  *
+- *		Network Control          (CS6, CS7)
+- *		Minimum Latency          (EF, VA, CS5, CS4)
++ *		Network Control          (EF)
++ *		Minimum Latency          (CS6, CS7, VA, CS5, CS4)
+  *		Interactive Shell        (CS2, TOS1)
+  *		Low Latency Transactions (AF2x, TOS4)
+  *		Video Streaming          (AF4x, AF3x, CS3)
+@@ -2411,7 +2609,7 @@ static int cake_config_diffserv8(struct Qdisc *sch)
+ 
+ 	struct cake_sched_data *q = qdisc_priv(sch);
+ 	u32 mtu = psched_mtu(qdisc_dev(sch));
+-	u64 rate = q->rate_bps;
++	u64 rate = q->rate_bps * 9 / 10;
+ 	u32 quantum = 256;
+ 	u32 i;
+ 
+@@ -2425,10 +2623,31 @@ static int cake_config_diffserv8(struct Qdisc *sch)
+ 	for (i = 0; i < q->tin_cnt; i++) {
+ 		struct cake_tin_data *b = &q->tins[i];
+ 
+-		cake_set_rate(b, rate, mtu, us_to_ns(q->target),
+-			      us_to_ns(q->interval));
++		if (i > 5) {
++			if (i == 7) {
++				cake_set_rate(b, q->rate_bps * 10 / 10, mtu, us_to_ns(q->target),
++					      us_to_ns(10000));
++			} else {
++				cake_set_rate(b, rate, mtu, us_to_ns(q->target),
++					      us_to_ns(100000));
++			}
++		} else {
++			if (i == 2) {
++				cake_set_rate(b, q->rate_bps * 9 / 10, mtu, us_to_ns(q->target),
++					      us_to_ns(100000));
++			} else {
++				cake_set_rate(b, rate, mtu, us_to_ns(q->target),
++					      us_to_ns(100000));
++			}
++		}
+ 
+-		b->tin_quantum = max_t(u16, 1U, quantum);
++		if (i == 7) {
++			b->tin_quantum = 65535;
++		} else if (i == 2) {
++			b->tin_quantum = 65535;
++		} else {
++			b->tin_quantum = max_t(u16, 1U, quantum);
++		}
+ 
+ 		/* calculate next class's parameters */
+ 		rate  *= 7;
+@@ -2717,8 +2936,8 @@ static int cake_init(struct Qdisc *sch, struct nlattr *opt,
+ 
+ 	q->rate_bps = 0; /* unlimited by default */
+ 
+-	q->interval = 100000; /* 100ms default */
+-	q->target   =   5000; /* 5ms: codel RFC argues
++	q->interval = 10000; /* 100ms default */
++	q->target   =   3000; /* 5ms: codel RFC argues
+ 			       * for 5 to 10% of interval
+ 			       */
+ 	q->rate_flags |= CAKE_FLAG_SPLIT_GSO;

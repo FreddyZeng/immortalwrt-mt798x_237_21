@@ -1319,8 +1319,8 @@ void dbg_dump_entry(struct seq_file *m, struct foe_entry *entry,
 
 	if (IS_IPV4_HNAPT(entry)) {
 		seq_printf(m,
-			   "NAPT(%d): %pI4:%d->%pI4:%d => %pI4:%d->%pI4:%d\n",
-			   index, &saddr, entry->ipv4_hnapt.sport, &daddr,
+			   "NAPT(%d): qid(%d): %pI4:%d->%pI4:%d => %pI4:%d->%pI4:%d\n",
+			   index, entry->ipv4_hnapt.iblk2.qid, &saddr, entry->ipv4_hnapt.sport, &daddr,
 			   entry->ipv4_hnapt.dport, &nsaddr,
 			   entry->ipv4_hnapt.new_sport, &ndaddr,
 			   entry->ipv4_hnapt.new_dport);

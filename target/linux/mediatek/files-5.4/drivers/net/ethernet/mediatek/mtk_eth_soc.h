@@ -46,9 +46,9 @@
 #define MTK_HW_LRO_DMA_SIZE	8
 
 #define	MTK_MAX_LRO_RX_LENGTH		(4096 * 3)
-#define	MTK_MAX_LRO_IP_CNT		2
+#define	MTK_MAX_LRO_IP_CNT		1
 #define	MTK_HW_LRO_TIMER_UNIT		1	/* 20 us */
-#define	MTK_HW_LRO_REFRESH_TIME		50000	/* 1 sec. */
+#define	MTK_HW_LRO_REFRESH_TIME		500	/* 1 sec. */
 #define	MTK_HW_LRO_AGG_TIME		10	/* 200us */
 #define	MTK_HW_LRO_AGE_TIME		50	/* 1ms */
 #define	MTK_HW_LRO_MAX_AGG_CNT		64

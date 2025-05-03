@@ -27,6 +27,21 @@
 #include <net/netfilter/nf_conntrack.h>
 #include <net/netfilter/nf_conntrack_acct.h>
 
+#include <linux/types.h>      // 用于 uint32_t, uint8_t 等类型
+#include <linux/if.h>         // 用于网络接口定义
+#include <linux/in.h>         // 用于网络接口定义
+#include <linux/in6.h>         // 用于网络接口定义
+#include <linux/seq_file.h>   // 用于 seq_file 结构
+#include <linux/net.h>  // 包含校验和相关定义
+#include <linux/pkt_sched.h>
+#include <linux/skbuff.h>
+#include <linux/netdevice.h>
+#include <linux/if_ether.h>
+
+#include <net/netfilter/nf_conntrack.h>
+#include <net/netfilter/nf_conntrack_core.h>
+#include <net/netfilter/nf_conntrack_tuple.h>
+
 #include "nf_hnat_mtk.h"
 #include "hnat.h"
 
@@ -1406,6 +1421,91 @@ struct foe_entry ppe_fill_info_blk(struct ethhdr *eth, struct foe_entry entry,
 	return entry;
 }
 
+/**
+ * 输入: TOS字节（IP头部的第二字节）
+ */
+static uint8_t dscp_to_queue(uint8_t tos) {
+    uint8_t dscp = tos >> 2;  // 提取高6位为DSCP
+    uint8_t queue = 5;  // 初始化队列值
+    uint8_t offset = 0;
+
+    // 不断尝试，每次减少1，直到找到匹配或DSCP值减到0
+    while (dscp >= 0) {  // DSCP最大值为63(6位二进制)
+        if (dscp == 46) {
+            queue = 0;
+            offset = 0;  // EF - 实时语音流，最高优先级
+            break;
+        } else if (dscp == 46) {
+            queue = 0;
+            offset = 0;  // EF - 实时语音流，最高优先级
+            break;
+        } else if (dscp == 45) {
+            queue = 1;
+            offset = 0;  // EF - 实时语音流，最高优先级
+            break;
+        } else if (dscp == 44) {
+            queue = 2;
+            offset = 0;
+            break;
+        } else if (dscp == 43) {
+            queue = 3;
+            offset = 0;
+            break;
+        } else if (dscp == 42) {
+            queue = 4;
+            offset = 0;
+            break;
+        } else if (dscp == 41) {
+            queue = 5;
+            offset = 0;
+            break;
+        } else if (dscp == 56) {
+            queue = 5;
+            offset = 1;  // CS7 - 网络管理流
+            break;
+        } else if (dscp == 48) {
+            queue = 5;
+            offset = 1;  // CS6 - 网络控制流
+            break;
+        } else if (dscp == 40) {
+            queue = 5;
+            offset = 2;  // CS5 - 视频会议，关键业务应用
+            break;
+        } else if (dscp >= 32 && dscp <= 39) {
+            queue = 5;
+            offset = 3;  // AF4x - 高优视频流
+            break;
+        } else if (dscp >= 24 && dscp <= 31) {
+            queue = 5;
+            offset = 4;  // AF3x - 普通视频流
+            break;
+        } else if (dscp >= 16 && dscp <= 23) {
+            queue = 5;
+            offset = 5;  // AF2x - 网页、应用、交互
+            break;
+        } else if (dscp >= 8 && dscp <= 15) {
+            queue = 5;
+            offset = 7;  // AF1x / CS1 - 背景任务，低优先级流
+            break;
+        } else if (dscp == 0) {
+            queue = 5;
+            offset = 6;  // CS0 - 默认流量，正常优先级
+            break;
+        }
+
+        dscp--;
+    }
+
+    queue = queue + offset;
+
+    return queue;
+}
+
+// 判断 DSCP 是否为默认白名单（只允许 CS0 使用默认队列）
+static inline bool is_default_whitelist(uint8_t dscp) {
+    return (dscp == 0);  // 可以在此扩展更多白名单，例如 dscp == 4 等
+}
+
 static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 				     const struct net_device *dev,
 				     struct foe_entry *foe,
@@ -1422,7 +1522,7 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 	enum ip_conntrack_info ctinfo;
 	u32 gmac = NR_DISCARD;
 	int udp = 0;
-	u32 qid = 0;
+	u32 qid = 43;
 	int port_id = 0;
 	int mape = 0;
 	u8  dscp = 0;
@@ -1723,6 +1823,8 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 					entry.ipv4_hnapt.iblk2.qid =
 						(hnat_priv->data->version == MTK_HNAT_V4) ?
 						 skb->mark & 0x7f : skb->mark & 0xf;
+
+					entry.ipv4_hnapt.iblk2.qid = qid;
 					entry.ipv4_hnapt.iblk2.fqos = 1;
 				}
 
@@ -1771,6 +1873,9 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 			entry.ipv6_6rd.dscp = iph->tos;
 			entry.ipv6_6rd.per_flow_6rd_id = 1;
 			entry.ipv6_6rd.vlan1 = hw_path->vlan_id;
+
+			dscp = iph->tos;
+
 			if (hnat_priv->data->per_flow_accounting)
 				entry.ipv6_6rd.iblk2.mibf = 1;
 			break;
@@ -1839,10 +1944,32 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 	else if (IS_PPPQ_MODE && (IS_DSA_1G_LAN(dev) || IS_DSA_WAN(dev)))
 		qid = port_id & MTK_QDMA_TX_MASK;
 	else
-		qid = 0;
-	if ((IS_HQOS_MODE) && (dscp!=0) &&(hnat_priv->dscp_en))
-		qid = (dscp>>2)& (MTK_QDMA_TX_MASK);
-		
+		qid = 43;
+
+
+
+    if (IS_HQOS_MODE && (hnat_priv->dscp_en)) {
+
+	qid = dscp_to_queue(dscp);
+
+	    if (!IS_WAN(dev) && strncmp(dev->name, "apcli", 5) != 0 && strncmp(dev->name, "ifb4apcli", 9) != 0) {
+		    qid = qid + 32;
+	    }
+
+		// 强制覆盖默认的队列0
+		if (IS_IPV4_HNAPT(&entry) || IS_IPV4_HNAT(&entry)) {
+			entry.ipv4_hnapt.iblk2.qid = qid;
+		} else if (IS_IPV4_DSLITE(&entry) || IS_IPV4_MAPE(&entry) || IS_IPV4_MAPT(&entry)) {
+			entry.ipv4_dslite.iblk2.qid = qid;
+		} else if (IS_IPV6_5T_ROUTE(&entry)) {
+			entry.ipv6_5t_route.iblk2.qid = qid;
+		} else if (IS_IPV6_3T_ROUTE(&entry)) {
+			entry.ipv6_3t_route.iblk2.qid = qid;
+		} else if (IS_IPV6_6RD(&entry)) {
+			entry.ipv6_6rd.iblk2.qid = qid;
+		}
+    }
+
 	if (IS_IPV4_GRP(foe)) {
 		entry.ipv4_hnapt.iblk2.dp = gmac;
 		entry.ipv4_hnapt.iblk2.port_mg =
@@ -1851,9 +1978,11 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 		if (qos_toggle) {
 			if (hnat_priv->data->version == MTK_HNAT_V4) {
 				entry.ipv4_hnapt.iblk2.qid = qid & 0x7f;
+				entry.ipv4_hnapt.iblk2.qid = qid;
 			} else {
 				/* qid[5:0]= port_mg[1:0]+ qid[3:0] */
 				entry.ipv4_hnapt.iblk2.qid = qid & 0xf;
+				entry.ipv4_hnapt.iblk2.qid = qid;
 				if (hnat_priv->data->version != MTK_HNAT_V1)
 					entry.ipv4_hnapt.iblk2.port_mg |=
 						((qid >> 4) & 0x3);
@@ -1886,9 +2015,11 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 		if (qos_toggle) {
 			if (hnat_priv->data->version == MTK_HNAT_V4) {
 				entry.ipv6_5t_route.iblk2.qid = qid & 0x7f;
+				entry.ipv6_5t_route.iblk2.qid = qid;
 			} else {
 				/* qid[5:0]= port_mg[1:0]+ qid[3:0] */
 				entry.ipv6_5t_route.iblk2.qid = qid & 0xf;
+				entry.ipv6_5t_route.iblk2.qid = qid;
 				if (hnat_priv->data->version != MTK_HNAT_V1)
 					entry.ipv6_5t_route.iblk2.port_mg |=
 								((qid >> 4) & 0x3);
