@@ -8549,3 +8549,6 @@ CONFIG_PACKAGE_proto-bonding=y
 CONFIG_PACKAGE_kmod-8021q=y
 CONFIG_PACKAGE_kmod-bridge=y
 CONFIG_PACKAGE_kmod-fast-classifier=y
+
+CONFIG_PACKAGE_zerotier=y
+CONFIG_PACKAGE_luci-app-zerotier=y
