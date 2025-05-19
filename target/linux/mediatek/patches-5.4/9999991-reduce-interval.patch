@@ -1,5 +1,5 @@
 diff --git a/include/uapi/linux/netfilter_ipv4.h b/include/uapi/linux/netfilter_ipv4.h
-index 155e77d6a..2d233c865 100644
+index 155e77d..2d233c8 100644
 --- a/include/uapi/linux/netfilter_ipv4.h
 +++ b/include/uapi/linux/netfilter_ipv4.h
 @@ -28,7 +28,7 @@
@@ -12,7 +12,7 @@ index 155e77d6a..2d233c865 100644
  	NF_IP_PRI_CONNTRACK_DEFRAG = -400,
  	NF_IP_PRI_RAW = -300,
 diff --git a/net/core/dev.c b/net/core/dev.c
-index 4f39d9720..c5da86ea4 100644
+index 4f39d97..c5da86e 100644
 --- a/net/core/dev.c
 +++ b/net/core/dev.c
 @@ -3685,6 +3685,7 @@ struct netdev_queue *netdev_core_pick_tx(struct net_device *dev,
@@ -40,7 +40,7 @@ index 4f39d9720..c5da86ea4 100644
  			cpu = smp_processor_id();
  
 diff --git a/net/sched/sch_cake.c b/net/sched/sch_cake.c
-index a43661432..660f80431 100644
+index a436614..f0a2ff7 100644
 --- a/net/sched/sch_cake.c
 +++ b/net/sched/sch_cake.c
 @@ -70,8 +70,15 @@
@@ -89,22 +89,28 @@ index a43661432..660f80431 100644
  };
  
  static const u8 diffserv4[] = {
-@@ -1614,6 +1623,113 @@ static u8 cake_handle_diffserv(struct sk_buff *skb, bool wash)
+@@ -1614,6 +1623,119 @@ static u8 cake_handle_diffserv(struct sk_buff *skb, bool wash)
  	}
  }
  
 +// 判断IP地址是否在指定范围内
-+// 判断IP地址是否在指定范围内
 +static bool is_ip_in_range_k(__be32 ip)
 +{
-+	// 提取前三个字节（固定为 192.168.110）
-+	__be32 prefix = htonl((192 << 24) | (168 << 16) | (110 << 8));
++    // 提取前两个字节（固定为 192.168）
++    __be32 prefix_192_168 = htonl((192 << 24) | (168 << 16));
 +
-+	// 提取 IP 的最后一个字节
-+	__be32 last_byte = ip & htonl(0xFF); // 获取 IP 地址的最后一个字节
++    // 提取 IP 的第三个字节
++    __be32 third_byte = (ip >> 8) & htonl(0xFF);
 +
-+	// 判断前三个字节是否匹配且最后一个字节在 10 到 39 之间
-+	return (ip >> 24) == (prefix >> 24) && last_byte >= 10 && last_byte <= 39;
++    // 提取 IP 的最后一个字节
++    __be32 last_byte = ip & htonl(0xFF);
++
++    // 判断前两个字节是否匹配 (192.168)
++    // 判断第三个字节是否在 110 到 119 之间
++    // 判断最后一个字节是否在 10 到 39 之间
++    return (ip & htonl(0xFFFF0000)) == prefix_192_168 &&
++           third_byte >= 110 && third_byte <= 119 &&
++           last_byte >= 10 && last_byte <= 39;
 +}
 +
 +
@@ -203,7 +209,7 @@ index a43661432..660f80431 100644
  static struct cake_tin_data *cake_select_tin(struct Qdisc *sch,
  					     struct sk_buff *skb)
  {
-@@ -1622,6 +1738,53 @@ static struct cake_tin_data *cake_select_tin(struct Qdisc *sch,
+@@ -1622,6 +1744,53 @@ static struct cake_tin_data *cake_select_tin(struct Qdisc *sch,
  	bool wash;
  	u8 dscp;
  
@@ -257,7 +263,7 @@ index a43661432..660f80431 100644
  	/* Tin selection: Default to diffserv-based selection, allow overriding
  	 * using firewall marks or skb->priority. Call DSCP parsing early if
  	 * wash is enabled, otherwise defer to below to skip unneeded parsing.
-@@ -1634,19 +1797,35 @@ static struct cake_tin_data *cake_select_tin(struct Qdisc *sch,
+@@ -1634,19 +1803,35 @@ static struct cake_tin_data *cake_select_tin(struct Qdisc *sch,
  	if (q->tin_mode == CAKE_DIFFSERV_BESTEFFORT)
  		tin = 0;
  
@@ -296,7 +302,7 @@ index a43661432..660f80431 100644
  		if (unlikely(tin >= q->tin_cnt))
  			tin = 0;
  	}
-@@ -2322,7 +2501,7 @@ static int cake_config_precedence(struct Qdisc *sch)
+@@ -2322,7 +2507,7 @@ static int cake_config_precedence(struct Qdisc *sch)
  	/* convert high-level (user visible) parameters into internal format */
  	struct cake_sched_data *q = qdisc_priv(sch);
  	u32 mtu = psched_mtu(qdisc_dev(sch));
@@ -305,7 +311,7 @@ index a43661432..660f80431 100644
  	u32 quantum = 256;
  	u32 i;
  
-@@ -2333,10 +2512,29 @@ static int cake_config_precedence(struct Qdisc *sch)
+@@ -2333,10 +2518,29 @@ static int cake_config_precedence(struct Qdisc *sch)
  	for (i = 0; i < q->tin_cnt; i++) {
  		struct cake_tin_data *b = &q->tins[i];
  
@@ -338,7 +344,7 @@ index a43661432..660f80431 100644
  
  		/* calculate next class's parameters */
  		rate  *= 7;
-@@ -2397,8 +2595,8 @@ static int cake_config_diffserv8(struct Qdisc *sch)
+@@ -2397,8 +2601,8 @@ static int cake_config_diffserv8(struct Qdisc *sch)
  {
  /*	Pruned list of traffic classes for typical applications:
   *
@@ -349,7 +355,7 @@ index a43661432..660f80431 100644
   *		Interactive Shell        (CS2, TOS1)
   *		Low Latency Transactions (AF2x, TOS4)
   *		Video Streaming          (AF4x, AF3x, CS3)
-@@ -2411,7 +2609,7 @@ static int cake_config_diffserv8(struct Qdisc *sch)
+@@ -2411,7 +2615,7 @@ static int cake_config_diffserv8(struct Qdisc *sch)
  
  	struct cake_sched_data *q = qdisc_priv(sch);
  	u32 mtu = psched_mtu(qdisc_dev(sch));
@@ -358,7 +364,7 @@ index a43661432..660f80431 100644
  	u32 quantum = 256;
  	u32 i;
  
-@@ -2425,10 +2623,31 @@ static int cake_config_diffserv8(struct Qdisc *sch)
+@@ -2425,10 +2629,31 @@ static int cake_config_diffserv8(struct Qdisc *sch)
  	for (i = 0; i < q->tin_cnt; i++) {
  		struct cake_tin_data *b = &q->tins[i];
  
@@ -393,7 +399,7 @@ index a43661432..660f80431 100644
  
  		/* calculate next class's parameters */
  		rate  *= 7;
-@@ -2717,8 +2936,8 @@ static int cake_init(struct Qdisc *sch, struct nlattr *opt,
+@@ -2717,8 +2942,8 @@ static int cake_init(struct Qdisc *sch, struct nlattr *opt,
  
  	q->rate_bps = 0; /* unlimited by default */
  

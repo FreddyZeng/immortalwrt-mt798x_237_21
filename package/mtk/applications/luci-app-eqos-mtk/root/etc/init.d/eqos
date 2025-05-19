@@ -99,4 +99,10 @@ reload_service() {
 
 service_triggers() {
 	procd_add_reload_trigger "eqos"
+    procd_add_interface_trigger 'interface.*.up' wan /etc/init.d/eqos restart
+    procd_add_interface_trigger 'interface.*.up' wan2 /etc/init.d/eqos restart
+    procd_add_interface_trigger 'interface.*.up' wan3 /etc/init.d/eqos restart
+    procd_add_interface_trigger 'interface.*.up' wan /etc/init.d/sqm restart
+    procd_add_interface_trigger 'interface.*.up' wan2 /etc/init.d/sqm restart
+    procd_add_interface_trigger 'interface.*.up' wan3 /etc/init.d/sqm restart
 }
