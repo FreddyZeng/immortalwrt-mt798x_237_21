@@ -14,7 +14,7 @@ CONFIG_TARGET_DEVICE_PACKAGES_mediatek_mt7986_DEVICE_xiaomi_redmi-router-ax6000-
 
 CONFIG_TARGET_DEVICE_mediatek_mt7986_DEVICE_netcore_n60-pro=y
 CONFIG_TARGET_DEVICE_PACKAGES_mediatek_mt7986_DEVICE_netcore_n60-pro=""
-CONFIG_TARGET_DEVICE_mediatek_mt7986_DEVICE_ruijie-rg-x60-pro-uboot=n
+CONFIG_TARGET_DEVICE_mediatek_mt7986_DEVICE_ruijie-rg-x60-pro-uboot=y
 CONFIG_TARGET_DEVICE_PACKAGES_mediatek_mt7986_DEVICE_ruijie-rg-x60-pro-uboot=""
 
 CONFIG_DEVEL=y
