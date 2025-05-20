@@ -314,9 +314,14 @@ CONFIG_PACKAGE_kmod-shortcut-fe=n
 
 CONFIG_PACKAGE_kmod-sched=y
 CONFIG_PACKAGE_kmod-sched-cake=y
+CONFIG_PACKAGE_kmod-sched-act-vlan=y
+CONFIG_PACKAGE_kmod-sched-bpf=y
+CONFIG_PACKAGE_kmod-sched-cake=y
 CONFIG_PACKAGE_kmod-sched-connmark=y
 CONFIG_PACKAGE_kmod-sched-core=y
 CONFIG_PACKAGE_kmod-sched-ctinfo=y
+CONFIG_PACKAGE_kmod-sched-flower=y
+CONFIG_PACKAGE_kmod-sched-ipset=y
 
 CONFIG_PACKAGE_luci-app-accesscontrol=y
 CONFIG_PACKAGE_luci-app-appfilter=y
@@ -336,7 +341,7 @@ CONFIG_PACKAGE_luci-app-mosdns=y
 CONFIG_PACKAGE_luci-app-mtwifi-cfg=y
 
 CONFIG_PACKAGE_luci-app-mwan3=y
-CONFIG_PACKAGE_luci-app-mwan3helper-chinaroute=y
+CONFIG_PACKAGE_luci-app-mwan3helper=y
 
 CONFIG_PACKAGE_luci-app-opkg=y
 
@@ -367,4 +372,14 @@ CONFIG_PACKAGE_luci-app-wrtbwmon=y
 CONFIG_PACKAGE_luci-app-zerotier=y
 
 
+#CONFIG_KALLSYMS=y
+#CONFIG_KALLSYMS_ALL=y
+#CONFIG_DEBUG_INFO=y
+#CONFIG_DEBUG_INFO_REDUCED=n
 
+
+
+CONFIG_PACKAGE_kmod-crypto-lib-chacha20=y
+CONFIG_PACKAGE_kmod-crypto-lib-chacha20poly1305=y
+CONFIG_PACKAGE_kmod-crypto-lib-curve25519=y
+CONFIG_PACKAGE_kmod-crypto-lib-poly1305=y
