@@ -1,2 +1,3 @@
-# MosDNS Rules
-
+domain:gstatic.com
+domain:kernel.org
+keyword:github
