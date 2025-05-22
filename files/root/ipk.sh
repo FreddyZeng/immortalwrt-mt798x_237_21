@@ -57,36 +57,33 @@ echo "-----------------------------------------------------"
 echo "在 '$PRE_INSTALL_DIR' 目录中递归搜索 .ipk 文件并强制安装..."
 echo "-----------------------------------------------------"
 
-# 递归查找 PRE_INSTALL_DIR 目录下的所有 .ipk 文件
-# 并对每个找到的 .ipk 文件执行 opkg install 命令
-# 使用 -exec sh -c '...' sh {} + 的方式可以高效处理多个文件，并能正确处理文件名中可能包含的特殊字符
-# find 会将找到的文件路径列表传递给内联 sh 脚本，内联脚本通过循环处理它们。
-find "$PRE_INSTALL_DIR" -type f -name "*.ipk" -exec sh -c '
-    # "$@" 会展开为所有由 find 传递过来的文件路径列表
-    for ipk_file_path do
-        echo "==> 准备安装: $ipk_file_path"
+# 过滤掉 macOS 资源文件和其他非 ipk
+find "$PRE_INSTALL_DIR" -type f -name "*.ipk" ! -name "._*" | while read -r ipk; do
+    echo "==> 准备安装: $ipk"
 
-        # 使用 opkg 强制安装 IPK 文件
-        # --force-reinstall: 强制重新安装已安装的软件包
-        # --force-overwrite: 强制覆盖属于其他软件包的文件
-        # --force-depends: 强制安装，忽略依赖问题 (警告：这可能导致系统不稳定或软件包功能异常)
-        opkg install "$ipk_file_path" --force-reinstall --force-overwrite --force-depends
+    # 解压验证
+    mkdir -p /tmp/ipktmp
+    if ! tar -tf "$ipk" > /dev/null 2>&1; then
+        echo "    🚫 无法解压，可能是损坏的 IPK 文件: $ipk"
+        continue
+    fi
 
-        # 检查上一条命令 (opkg install) 的退出状态
-        if [ $? -eq 0 ]; then
-            echo "    成功安装: $ipk_file_path"
-        else
-            # $? 会保存 opkg install 命令的错误码
-            echo "    安装失败: $ipk_file_path (错误码: $?)"
-            # 由于 set -e 已设置，如果 opkg install 失败，脚本通常会在此处因 opkg 的非零退出状态而退出。
-            # 如果希望即使某个 ipk 安装失败也继续尝试安装其他 ipk，
-            # 你需要在此 opkg 命令前加上 'set +e;' 并在之后用 'set -e;' 恢复，
-            # 或者在 opkg install 命令本身后面加上 '|| true' 来忽略其失败，
-            # 或者直接移除脚本开头的 'set -e' (不推荐，除非你明确知道其影响)。
-        fi
-        echo "-----------------------------------------------------"
-    done
-' sh {} +  # 'sh' 是传递给 sh -c 的 $0 参数，'{} +' 会将找到的文件作为参数列表传递给内联脚本
+    # 读取 control 文件中的 Package 字段
+    PKG_NAME=$(tar -xOf "$ipk" ./control.tar.gz 2>/dev/null | tar -xzOf - ./control 2>/dev/null | grep '^Package:' | cut -d' ' -f2)
+    if [[ -z "$PKG_NAME" ]]; then
+        echo "    🚫 读取不到 Package 名称，跳过。"
+        continue
+    fi
+
+    # 强制安装
+    opkg install --force-depends --force-overwrite --force-reinstall "$ipk"
+    if [[ $? -ne 0 ]]; then
+        echo "    ❌ 安装失败: $ipk"
+    else
+        echo "    ✅ 成功安装: $ipk"
+    fi
+    echo "-----------------------------------------------------"
+done
 
 echo "所有找到的 .ipk 文件处理完毕。"
 
