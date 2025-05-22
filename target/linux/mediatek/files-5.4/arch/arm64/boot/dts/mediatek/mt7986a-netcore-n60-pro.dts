@@ -83,7 +83,6 @@
 			partition@0 {
 				label = "BL2";
 				reg = <0x00000 0x0100000>;
-				read-only;
 			};
 			
 			partition@100000 {
@@ -150,10 +149,14 @@
 	
 	gmac1: mac@1 {
 		compatible = "mediatek,eth-mac";
-		label = "wan";
 		reg = <1>;
-		phy-handle = <&phy6>;
+		label = "wan";
 		phy-mode = "2500base-x";
+		fixed-link {
+			speed = <2500>;
+			full-duplex;
+			pause;
+		};
 	};
 	
 	mdio: mdio-bus {
@@ -163,18 +166,19 @@
 };
 
 &mdio {
-	reset-delay-us = <600>;
-	reset-post-delay-us = <20000>;
-	reset-gpios = <&pio 6 GPIO_ACTIVE_LOW>;
-	
 	phy5: phy@5 {
 		compatible = "ethernet-phy-id67c9.de0a";
 		reg = <5>;
+		reset-gpios = <&pio 6 GPIO_ACTIVE_LOW>;
+		reset-assert-us = <50000>;
+		reset-deassert-us = <20000>;
+		mxl,led-config = <0x0 0x12 0x18 0x17>;
 	};
 	
 	phy6: phy@6 {
 		compatible = "ethernet-phy-id67c9.de0a";
 		reg = <6>;
+		mxl,led-config = <0x0 0x12 0x18 0x17>;
 	};
 	
 	switch: switch@0 {
@@ -211,8 +215,12 @@
 		port@5 {
 			reg = <5>;
 			label = "lan1";
-			phy-handle = <&phy5>;
 			phy-mode = "2500base-x";
+			fixed-link {
+				speed = <2500>;
+				full-duplex;
+				pause;
+			};
 		};
 		
 		port@6 {
