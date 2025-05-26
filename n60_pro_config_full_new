@@ -404,5 +404,5 @@ CONFIG_PACKAGE_igmpproxy=y
 
 CONFIG_PACKAGE_tailscale=y
 CONFIG_PACKAGE_luci-app-tailscale=y
-CONFIG_PACKAGE_netbird=y
+CONFIG_PACKAGE_netbird=m
 
