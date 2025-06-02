@@ -1,6 +1,6 @@
 # The bandwidth unit is Mbit/s
 config eqos 'config'
-	option enabled      0
+	option enabled      1
 	option download     100
 	option upload       20
 
