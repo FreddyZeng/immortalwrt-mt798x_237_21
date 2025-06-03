@@ -1,5 +1,5 @@
 diff --git a/include/uapi/linux/netfilter_ipv4.h b/include/uapi/linux/netfilter_ipv4.h
-index 155e77d..2d233c8 100644
+index 155e77d6a..2d233c865 100644
 --- a/include/uapi/linux/netfilter_ipv4.h
 +++ b/include/uapi/linux/netfilter_ipv4.h
 @@ -28,7 +28,7 @@
@@ -12,7 +12,7 @@ index 155e77d..2d233c8 100644
  	NF_IP_PRI_CONNTRACK_DEFRAG = -400,
  	NF_IP_PRI_RAW = -300,
 diff --git a/net/core/dev.c b/net/core/dev.c
-index 4f39d97..c5da86e 100644
+index 4f39d9720..c5da86ea4 100644
 --- a/net/core/dev.c
 +++ b/net/core/dev.c
 @@ -3685,6 +3685,7 @@ struct netdev_queue *netdev_core_pick_tx(struct net_device *dev,
@@ -40,7 +40,7 @@ index 4f39d97..c5da86e 100644
  			cpu = smp_processor_id();
  
 diff --git a/net/sched/sch_cake.c b/net/sched/sch_cake.c
-index a436614..f0a2ff7 100644
+index a43661432..a5d604f1f 100644
 --- a/net/sched/sch_cake.c
 +++ b/net/sched/sch_cake.c
 @@ -70,8 +70,15 @@
@@ -89,7 +89,7 @@ index a436614..f0a2ff7 100644
  };
  
  static const u8 diffserv4[] = {
-@@ -1614,6 +1623,119 @@ static u8 cake_handle_diffserv(struct sk_buff *skb, bool wash)
+@@ -1614,6 +1623,114 @@ static u8 cake_handle_diffserv(struct sk_buff *skb, bool wash)
  	}
  }
  
@@ -166,7 +166,6 @@ index a436614..f0a2ff7 100644
 +		if (tuple_ips_in_range_k(tuple_origin) || tuple_ips_in_range_k(tuple_reply)) {
 +			pr_info("Connection tuple is in range\n");
 +			ret = true;
-+			goto out;
 +		}
 +	} else {
 +		// 如果没有找到连接跟踪记录，尝试根据数据包获取元组
@@ -186,18 +185,14 @@ index a436614..f0a2ff7 100644
 +					if (tuple_ips_in_range_k(tuple_origin) || tuple_ips_in_range_k(tuple_reply)) {
 +						pr_info("Found matching tuple from skb\n");
 +						ret = true;
-+						goto out;
 +					}
++
++					nf_ct_put(ct);
 +				}
 +			}
 +		}
 +	}
 +
-+out:
-+	// 确保释放连接跟踪对象
-+	if (ct) {
-+		nf_ct_put(ct);
-+	}
 +
 +	// 释放自旋锁
 +	//spin_unlock_bh(&q->conntrack_lock);
@@ -209,7 +204,7 @@ index a436614..f0a2ff7 100644
  static struct cake_tin_data *cake_select_tin(struct Qdisc *sch,
  					     struct sk_buff *skb)
  {
-@@ -1622,6 +1744,53 @@ static struct cake_tin_data *cake_select_tin(struct Qdisc *sch,
+@@ -1622,6 +1739,53 @@ static struct cake_tin_data *cake_select_tin(struct Qdisc *sch,
  	bool wash;
  	u8 dscp;
  
@@ -263,7 +258,7 @@ index a436614..f0a2ff7 100644
  	/* Tin selection: Default to diffserv-based selection, allow overriding
  	 * using firewall marks or skb->priority. Call DSCP parsing early if
  	 * wash is enabled, otherwise defer to below to skip unneeded parsing.
-@@ -1634,19 +1803,35 @@ static struct cake_tin_data *cake_select_tin(struct Qdisc *sch,
+@@ -1634,19 +1798,35 @@ static struct cake_tin_data *cake_select_tin(struct Qdisc *sch,
  	if (q->tin_mode == CAKE_DIFFSERV_BESTEFFORT)
  		tin = 0;
  
@@ -302,7 +297,7 @@ index a436614..f0a2ff7 100644
  		if (unlikely(tin >= q->tin_cnt))
  			tin = 0;
  	}
-@@ -2322,7 +2507,7 @@ static int cake_config_precedence(struct Qdisc *sch)
+@@ -2322,7 +2502,7 @@ static int cake_config_precedence(struct Qdisc *sch)
  	/* convert high-level (user visible) parameters into internal format */
  	struct cake_sched_data *q = qdisc_priv(sch);
  	u32 mtu = psched_mtu(qdisc_dev(sch));
@@ -311,7 +306,7 @@ index a436614..f0a2ff7 100644
  	u32 quantum = 256;
  	u32 i;
  
-@@ -2333,10 +2518,29 @@ static int cake_config_precedence(struct Qdisc *sch)
+@@ -2333,10 +2513,29 @@ static int cake_config_precedence(struct Qdisc *sch)
  	for (i = 0; i < q->tin_cnt; i++) {
  		struct cake_tin_data *b = &q->tins[i];
  
@@ -344,7 +339,7 @@ index a436614..f0a2ff7 100644
  
  		/* calculate next class's parameters */
  		rate  *= 7;
-@@ -2397,8 +2601,8 @@ static int cake_config_diffserv8(struct Qdisc *sch)
+@@ -2397,8 +2596,8 @@ static int cake_config_diffserv8(struct Qdisc *sch)
  {
  /*	Pruned list of traffic classes for typical applications:
   *
@@ -355,7 +350,7 @@ index a436614..f0a2ff7 100644
   *		Interactive Shell        (CS2, TOS1)
   *		Low Latency Transactions (AF2x, TOS4)
   *		Video Streaming          (AF4x, AF3x, CS3)
-@@ -2411,7 +2615,7 @@ static int cake_config_diffserv8(struct Qdisc *sch)
+@@ -2411,7 +2610,7 @@ static int cake_config_diffserv8(struct Qdisc *sch)
  
  	struct cake_sched_data *q = qdisc_priv(sch);
  	u32 mtu = psched_mtu(qdisc_dev(sch));
@@ -364,7 +359,7 @@ index a436614..f0a2ff7 100644
  	u32 quantum = 256;
  	u32 i;
  
-@@ -2425,10 +2629,31 @@ static int cake_config_diffserv8(struct Qdisc *sch)
+@@ -2425,10 +2624,31 @@ static int cake_config_diffserv8(struct Qdisc *sch)
  	for (i = 0; i < q->tin_cnt; i++) {
  		struct cake_tin_data *b = &q->tins[i];
  
@@ -399,7 +394,7 @@ index a436614..f0a2ff7 100644
  
  		/* calculate next class's parameters */
  		rate  *= 7;
-@@ -2717,8 +2942,8 @@ static int cake_init(struct Qdisc *sch, struct nlattr *opt,
+@@ -2717,8 +2937,8 @@ static int cake_init(struct Qdisc *sch, struct nlattr *opt,
  
  	q->rate_bps = 0; /* unlimited by default */
  
