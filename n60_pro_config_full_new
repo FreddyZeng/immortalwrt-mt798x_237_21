@@ -400,6 +400,8 @@ CONFIG_PACKAGE_libavahi-dbus-support=y
 
 CONFIG_PACKAGE_luci-app-airconnect=y
 CONFIG_PACKAGE_smcroute=y
+CONFIG_PACKAGE_kmod-ipt-mroute=y
+CONFIG_PACKAGE_kmod-ipmr=y
 CONFIG_PACKAGE_igmpproxy=y
 
 CONFIG_PACKAGE_tailscale=m
