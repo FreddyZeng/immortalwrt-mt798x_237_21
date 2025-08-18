@@ -8,4 +8,8 @@ uci -q batch <<-EOF >/dev/null
 EOF
 
 rm -f /tmp/luci*
+
+/etc/init.d/mwan3helper stop
+/etc/init.d/mwan3helper disable
+
 exit 0
