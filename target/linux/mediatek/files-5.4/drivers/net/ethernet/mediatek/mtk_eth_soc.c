@@ -27,23 +27,9 @@
 #include "mtk_eth_dbg.h"
 #include "mtk_eth_reset.h"
 
-#include <linux/ip.h>           // For struct iphdr and ip_hdr()
-#include <linux/skbuff.h>       // For struct sk_buff
-#include <linux/netdevice.h>    // For dev_net() and networking functions
-#include <linux/if_ether.h>     // For ETH_P_IP
-#include <linux/byteorder/generic.h>  // For htonl(), htons(), ntohl()
-#include <net/netfilter/nf_conntrack.h> // For nf_ct_* functions and conntrack structures
-#include <net/netfilter/nf_conntrack_tuple.h> // For struct nf_conntrack_tuple
-#include <net/netfilter/nf_conntrack_core.h> // For nf_conntrack_find_get()
-#include <linux/netfilter.h>    // For netfilter definitions
-#include <linux/pkt_sched.h>    // For TC_PRIO_MAX, TC_PRIO_INTERACTIVE
-#include <net/ip.h>             // For ip_send_check()
-
 #if defined(CONFIG_NET_MEDIATEK_HNAT) || defined(CONFIG_NET_MEDIATEK_HNAT_MODULE)
 #include "mtk_hnat/nf_hnat_mtk.h"
 #endif
-
-
 static struct mtk_eth *sg_eth;
 static int mtk_msg_level = -1;
 atomic_t reset_lock = ATOMIC_INIT(0);
