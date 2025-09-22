@@ -1,0 +1,16 @@
+#!/bin/sh
+# /etc/uci-defaults/10-disable-services
+# 第一次启动时停止并禁止指定服务开机启动
+# 忽略所有错误，兼容服务未安装的情况
+
+SERVICES="mwan3 mdns-repeater mwan3helper igmpproxy p910nd smcroute"
+
+for s in $SERVICES; do
+    # 停止当前正在运行的服务，忽略错误
+    /etc/init.d/$s stop 2>/dev/null || true
+
+    # 禁止开机启动，忽略错误
+    /etc/init.d/$s disable 2>/dev/null || true
+done
+
+exit 0
