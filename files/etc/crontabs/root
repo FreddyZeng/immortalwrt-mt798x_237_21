@@ -1,2 +1,2 @@
 0 4 * * * /etc/init.d/cloudflared restart
-*/2 * * * * /root/ssr_watchdog.sh
+0 5 * * * /root/ssr_watchdog.sh
