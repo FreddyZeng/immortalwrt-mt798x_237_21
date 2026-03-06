@@ -1,2 +1,7 @@
-0 4 * * * /etc/init.d/cloudflared restart
-0 5 * * * /root/ssr_watchdog.sh
+0 3 * * * /etc/init.d/cloudflared restart
+0 7 * * * /root/ssr_watchdog.sh
+0 0 * * * rm /tmp/wechatpush/usage.db >/dev/null 2>&1
+0 0 * * * rm /tmp/wechatpush/usage6.db >/dev/null 2>&1
+0 6 * * * /usr/share/wechatpush/wechatpush send &
+0 5 * * 6 /usr/bin/lua /usr/share/shadowsocksr/update.lua ip_data > /dev/null 2>&1
+0 4 * * 6 /usr/share/mosdns/mosdns.sh geodata > /dev/null 2>&1
