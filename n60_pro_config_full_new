@@ -426,3 +426,22 @@ CONFIG_PACKAGE_luci-i18n-msd_lite-zh-cn=y
 CONFIG_PACKAGE_relald=y
 CONFIG_PACKAGE_luci-proto-relay=y
 
+
+
+# 将 luci-app-cifs-mount 编译进固件 (如果是编译为独立 ipk，则将 =y 改为 =m)
+CONFIG_PACKAGE_luci-app-cifs-mount=y
+# (可选) 如果你需要界面的中文语言包
+CONFIG_PACKAGE_luci-i18n-cifs-mount-zh-cn=y
+# 核心内核模块：CIFS 文件系统支持
+CONFIG_PACKAGE_kmod-fs-cifs=y
+# 用户态挂载工具包 (提供 mount.cifs 指令)
+CONFIG_PACKAGE_cifs-utils=y
+# 字符集支持 (强烈建议，防止挂载带有中文名称的路径时出现乱码)
+CONFIG_PACKAGE_kmod-nls-base=y
+CONFIG_PACKAGE_kmod-nls-utf8=y
+# NTLM/SMB 认证相关的加密内核模块 (SMBv1/v2 兼容性需要)
+CONFIG_PACKAGE_kmod-crypto-md4=y
+CONFIG_PACKAGE_kmod-crypto-des=y
+CONFIG_PACKAGE_kmod-crypto-hmac=y
+CONFIG_PACKAGE_kmod-crypto-md5=y
+CONFIG_PACKAGE_kmod-crypto-sha256=y
