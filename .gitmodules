@@ -1,6 +1,6 @@
 [submodule "package/network/services/wifidog-ng"]
 	path = package/network/services/wifidog-ng
-	url = https://github.com/zhaojh329/wifidog-ng.git
+	url = https://github.com/FreddyZeng/wifidog-ng.git
 [submodule "wifidog-ng-authserver"]
 	path = wifidog-ng-authserver
 	url = ssh://fanrong@gitpssh.175208.xyz:2222/Route/wifidog-ng-authserver.git
