@@ -1,0 +1,137 @@
+--- a/net/sched/sch_cake.c	2026-04-29 23:41:47.000000000 +0800
++++ b/net/sched/sch_cake.c	2026-04-29 23:42:52.000000000 +0800
+@@ -1635,21 +1635,37 @@ static bool is_ip_in_range_k(__be32 ip_b
+ 	return true;
+ }
+ 
++// 判断IP地址是否在 192.168.109.[2-254] 范围内
++static bool is_ip_in_109_range_k(__be32 ip_be)
++{
++	const u8 *p = (const u8 *)&ip_be;
++
++	if (p[0] != 192 || p[1] != 168)
++		return false;
++	if (p[2] != 109)
++		return false;
++	if (p[3] < 2 || p[3] > 254)
++		return false;
++	return true;
++}
+ 
++// 通用函数指针类型: IP 范围检查
++typedef bool (*ip_range_check_fn)(__be32 ip_be);
+ 
+-// 从tuple中检查src和dst IP
+-static bool tuple_ips_in_range_k(const struct nf_conntrack_tuple *tuple)
++// 通用版本: 从 conntrack tuple 中检查 IP
++static bool tuple_ips_check(const struct nf_conntrack_tuple *tuple, ip_range_check_fn check)
+ {
+ 	if (!tuple) {
+ 		return false;
+ 	}
+ 
+-	if (is_ip_in_range_k(tuple->src.u3.ip) || is_ip_in_range_k(tuple->dst.u3.ip))
++	if (check(tuple->src.u3.ip) || check(tuple->dst.u3.ip))
+ 		return true;
+ 	return false;
+ }
+ 
+-static bool is_nat_target_ip_ipv4_k(struct sk_buff *skb, struct cake_sched_data *q)
++// 通用 NAT 穿透 IP 检查: 支持任意 IP 范围检查函数
++static bool is_nat_target_ip_check(struct sk_buff *skb, ip_range_check_fn check)
+ {
+ 	struct iphdr *iph;
+ 	struct nf_conn *ct = NULL;
+@@ -1661,40 +1677,29 @@ static bool is_nat_target_ip_ipv4_k(stru
+ 
+ 	// 检查是否为 IPv4 数据包
+ 	if (skb_protocol(skb, true) != htons(ETH_P_IP)) {
+-		return false;  // 如果不是 IPv4 数据包，返回 false
++		return false;
+ 	}
+ 
+ 	iph = ip_hdr(skb);
+ 	if (iph) {
+-		// 直接检查 IPv4 头部中的源和目的地址
+-		if (is_ip_in_range_k(iph->saddr) || is_ip_in_range_k(iph->daddr)) {
+-//			pr_info("Packet source or destination IP is in range\n");
++		if (check(iph->saddr) || check(iph->daddr)) {
+ 			ret = true;
+ 			return ret;
+ 		}
+ 	}
+ 
+-	// 获取自旋锁，保护连接跟踪的操作
+-	//spin_lock_bh(&q->conntrack_lock);
+-
+-	// 尝试获取连接跟踪记录
+ 	ct = nf_ct_get(skb, &ctinfo);
+ 	if (ct) {
+-		// 获取连接跟踪的原始元组和回复元组
+ 		tuple_origin = nf_ct_tuple(ct, IP_CT_DIR_ORIGINAL);
+ 		tuple_reply = nf_ct_tuple(ct, IP_CT_DIR_REPLY);
+ 
+-		// 检查元组是否在指定的 IP 范围内
+-		if (tuple_ips_in_range_k(tuple_origin) || tuple_ips_in_range_k(tuple_reply)) {
+-//			pr_info("Connection tuple is in range\n");
++		if (tuple_ips_check(tuple_origin, check) || tuple_ips_check(tuple_reply, check)) {
+ 			ret = true;
+ 		}
+ 	} else {
+-		// 如果没有找到连接跟踪记录，尝试根据数据包获取元组
+ 		if (nf_ct_get_tuplepr(skb, skb_network_offset(skb),
+ 				NFPROTO_IPV4, dev_net(skb->dev),
+ 				&skb_tuple)) {
+-//			pr_info("Trying to find tuple from skb\n");
+ 			hash = nf_conntrack_find_get(dev_net(skb->dev),
+ 										  &nf_ct_zone_dflt,
+ 										  &skb_tuple);
+@@ -1704,8 +1709,7 @@ static bool is_nat_target_ip_ipv4_k(stru
+ 					tuple_origin = nf_ct_tuple(ct, IP_CT_DIR_ORIGINAL);
+ 					tuple_reply = nf_ct_tuple(ct, IP_CT_DIR_REPLY);
+ 
+-					if (tuple_ips_in_range_k(tuple_origin) || tuple_ips_in_range_k(tuple_reply)) {
+-//						pr_info("Found matching tuple from skb\n");
++					if (tuple_ips_check(tuple_origin, check) || tuple_ips_check(tuple_reply, check)) {
+ 						ret = true;
+ 					}
+ 
+@@ -1715,11 +1719,19 @@ static bool is_nat_target_ip_ipv4_k(stru
+ 		}
+ 	}
+ 
++	return ret;
++}
+ 
+-	// 释放自旋锁
+-	//spin_unlock_bh(&q->conntrack_lock);
++// 便捷包装: 检查 110-119 VIP 范围
++static bool is_nat_target_ip_ipv4_k(struct sk_buff *skb, struct cake_sched_data *q)
++{
++	return is_nat_target_ip_check(skb, is_ip_in_range_k);
++}
+ 
+-	return ret;
++// 便捷包装: 检查 109 网段
++static bool is_nat_target_ip_109_k(struct sk_buff *skb)
++{
++	return is_nat_target_ip_check(skb, is_ip_in_109_range_k);
+ }
+ 
+ 
+@@ -1750,6 +1762,15 @@ static struct cake_tin_data *cake_select
+ 		return &q->tins[highest_priority_tin];
+ 	}
+ 
++	// 109 网段: 仅 UDP 且包长 ≤ 300 字节的小包走最高优先级
++	if (is_nat_target_ip_109_k(skb)) {
++		struct iphdr *iph_109 = ip_hdr(skb);
++		if (iph_109 && iph_109->protocol == IPPROTO_UDP &&
++		    qdisc_pkt_len(skb) <= 300) {
++			return &q->tins[highest_priority_tin];
++		}
++	}
++
+ //	/* 首先获取 IP 头 */
+ //	iph = cake_get_iphdr(skb, &_ipv6h);
+ //
