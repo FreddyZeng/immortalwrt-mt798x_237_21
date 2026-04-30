@@ -101,12 +101,14 @@ for qid in 0 32; do
 done
 
 echo ""
-echo "━━━ 普通队列 (对比基准) ━━━"
-for qid in 1 2 3; do
+echo "━━━ 普通流量队列 (DSCP 0 → BE) ━━━"
+for qid in 11 43; do
     FILE="/sys/kernel/debug/hnat/qdma_txq${qid}"
     if [ -f "$FILE" ]; then
         PKTS=$(grep "packet count" "$FILE" | awk '{print $3}')
-        echo "  Queue $qid: $PKTS 包"
+        DROP=$(grep "packet drop" "$FILE" | awk '{print $3}')
+        DIR=$([ "$qid" = "11" ] && echo "下行 WAN→LAN" || echo "上行 LAN→WAN")
+        echo "  Queue $qid ($DIR): $PKTS 包, 丢包 $DROP"
     fi
 done
 echo ""
