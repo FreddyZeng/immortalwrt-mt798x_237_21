@@ -755,7 +755,7 @@ static int hnat_probe(struct platform_device *pdev)
 	hnat_priv->nf_stat_en = true; /* enable nf_stat_en by default */
 	hnat_priv->ipv6_en = true; /* enable ipv6 by default */
 	hnat_priv->guest_en = true; /* enable guest wifi by default */
-	hnat_priv->dscp_en = true;  /* 启用 DSCP→队列方向分离: 上行 LAN→WAN 用 Q0-Q12(sch0/sch2), 下行 WAN→LAN 用 Q32-Q44(sch1/sch3) */
+	hnat_priv->dscp_en = false;  /* 启用 DSCP→队列方向分离: 上行 LAN→WAN 用 Q0-Q12(sch0/sch2), 下行 WAN→LAN 用 Q32-Q44(sch1/sch3) */
 	hnat_priv->macvlan_support = false;
 	err = hnat_init_debugfs(hnat_priv);
 	if (err)
