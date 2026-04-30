@@ -85,7 +85,7 @@ fi
 echo ""
 echo "【2】QDMA 全部硬件队列 (DSCP 映射)"
 echo "--------------------------------------------"
-echo "  下行 (WAN→LAN) Queue 0-11:"
+echo "  下行 (WAN→LAN) Queue 0-12:"
 echo "  Queue | DSCP | 流量类型           | 包数        | 丢包"
 echo "  ------|------|--------------------|-----------|---------"
 
@@ -110,13 +110,18 @@ get_dn_label() {
 for qid in 0 1 2 3 4 5 6 7 8 9 10 11 12; do
     FILE="/sys/kernel/debug/hnat/qdma_txq${qid}"
     PKTS="N/A"; DROP="N/A"
-    [ -f "$FILE" ] && PKTS=$(grep "packet count" "$FILE" | awk '{print $3}') && DROP=$(grep "packet drop" "$FILE" | awk '{print $3}')
+    if [ -f "$FILE" ]; then
+        PKTS=$(grep "packet count" "$FILE" | awk '{print $3}')
+        DROP=$(grep "packet drop" "$FILE" | awk '{print $3}')
+        [ -z "$PKTS" ] && PKTS="0"
+        [ -z "$DROP" ] && DROP="0"
+    fi
     LABEL=$(get_dn_label $qid)
     printf "  Q%-5s | %s | %-10s | %-5s\n" "$qid" "$LABEL" "$PKTS" "$DROP"
 done
 
 echo ""
-echo "  上行 (LAN→WAN) Queue 32-43:"
+echo "  上行 (LAN→WAN) Queue 32-44:"
 echo "  Queue | DSCP | 流量类型           | 包数        | 丢包"
 echo "  ------|------|--------------------|-----------|---------"
 
@@ -140,7 +145,12 @@ get_up_label() {
 for qid in 32 33 34 35 36 37 38 39 40 41 42 43 44; do
     FILE="/sys/kernel/debug/hnat/qdma_txq${qid}"
     PKTS="N/A"; DROP="N/A"
-    [ -f "$FILE" ] && PKTS=$(grep "packet count" "$FILE" | awk '{print $3}') && DROP=$(grep "packet drop" "$FILE" | awk '{print $3}')
+    if [ -f "$FILE" ]; then
+        PKTS=$(grep "packet count" "$FILE" | awk '{print $3}')
+        DROP=$(grep "packet drop" "$FILE" | awk '{print $3}')
+        [ -z "$PKTS" ] && PKTS="0"
+        [ -z "$DROP" ] && DROP="0"
+    fi
     LABEL=$(get_up_label $qid)
     printf "  Q%-5s | %s | %-10s | %-5s\n" "$qid" "$LABEL" "$PKTS" "$DROP"
 done
