@@ -85,11 +85,11 @@ fi
 echo ""
 echo "【2】QDMA 全部硬件队列 (DSCP 映射)"
 echo "--------------------------------------------"
-echo "  下行 (WAN→LAN) Queue 0-12:"
+echo "  上行 (LAN→WAN) Queue 0-12  [sch0/sch2 上传调度器]:"
 echo "  Queue | DSCP | 流量类型           | 包数        | 丢包"
 echo "  ------|------|--------------------|-----------|---------"
 
-# 下行队列 0-11 DSCP 映射
+# 上行队列 Q0-Q12 DSCP 映射 (LAN→WAN, sch0=VIP SP / sch2=普通上传陥0限)
 get_dn_label() {
     case $1 in
         0)  echo "46     EF    ★VIP/游戏 SP最高   " ;;
@@ -121,7 +121,7 @@ for qid in 0 1 2 3 4 5 6 7 8 9 10 11 12; do
 done
 
 echo ""
-echo "  上行 (LAN→WAN) Queue 32-44:"
+echo "  下行 (WAN→LAN) Queue 32-44 [sch1/sch3 下载调度器]:"
 echo "  Queue | DSCP | 流量类型           | 包数        | 丢包"
 echo "  ------|------|--------------------|-----------|---------"
 
@@ -257,9 +257,9 @@ Q32_RATE=$(calc_pps "$Q32_A" "$Q32_B")
 Q11_RATE=$(calc_pps "$Q11_A" "$Q11_B")
 CAKE_RATE=$(calc_pps "$CAKE_SENT_A" "$CAKE_SENT_B")
 
-echo "  硬件加速 VIP   下行 (Queue  0): ${Q0_RATE} 包/秒"
-echo "  硬件加速 VIP   上行 (Queue 32): ${Q32_RATE} 包/秒"
-echo "  硬件加速 普通  下行 (Queue 11): ${Q11_RATE} 包/秒"
+echo "  硬件加速 VIP   上行 (Queue  0, sch0 SP): ${Q0_RATE} 包/秒"
+echo "  硬件加速 VIP   下行 (Queue 32, sch1 SP): ${Q32_RATE} 包/秒"
+echo "  硬件加速 普通  上行 (Queue 11, sch2 WRR): ${Q11_RATE} 包/秒"
 if [ -n "$CAKE_IF" ]; then
     if [ "$CAKE_RATE" = "N/A" ]; then
         echo "  软件 SQM (CAKE) 吞吐:         N/A"
@@ -268,6 +268,8 @@ if [ -n "$CAKE_IF" ]; then
     fi
 fi
 echo ""
-echo "  → Queue 0/32 > 0 = VIP 硬件加速正在工作"
-echo "  → CAKE > 0       = HNAT 未命中流量走软件路径"
+echo "  → Queue 0:  上行 VIP SP > 0  = VIP 硬件加速上行正在工作"
+echo "  → Queue 32: 下行 VIP SP > 0  = VIP 硬件加速下行正在工作"
+echo "  → Queue 11: 上行普通 WRR > 0 = 普通流量上行已分陙1"
+echo "  → CAKE > 0  = HNAT 未命中流量走软件路径"
 echo "============================================"
