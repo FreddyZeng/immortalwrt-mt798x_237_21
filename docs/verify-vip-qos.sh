@@ -83,35 +83,67 @@ else
     echo "  (上传 $N109_UP 条 / 下载 $N109_DN 条)"
 fi
 echo ""
-
-# ==========================================
-# 2. QDMA 队列对比（VIP SP 队列 vs 默认队列）
-# ==========================================
-echo "【2】QDMA 硬件队列统计"
+echo "【2】QDMA 全部硬件队列 (DSCP 映射)"
 echo "--------------------------------------------"
-echo "━━━ VIP 专属队列 (Strict Priority) ━━━"
-for qid in 0 32; do
+echo "  下行 (WAN→LAN) Queue 0-11:"
+echo "  Queue | DSCP | 流量类型           | 包数        | 丢包"
+echo "  ------|------|--------------------|-----------|---------"
+
+# 下行队列 0-11 DSCP 映射
+get_dn_label() {
+    case $1 in
+        0)  echo "46 EF  ★VIP/游戏 SP最高" ;;
+        1)  echo "44     CS5 SP次高        " ;;
+        2)  echo "34 AF41 视频会议 SP       " ;;
+        3)  echo "32     CS4 SP            " ;;
+        4)  echo "28 AF32 流媒体 SP         " ;;
+        5)  echo "26     CS3 SP            " ;;
+        6)  echo "18 AF21 数据 WRR高        " ;;
+        7)  echo "16     CS2 WRR           " ;;
+        8)  echo "10 AF11 批量 WRR          " ;;
+        9)  echo "8  CS1  低优先级 WRR      " ;;
+        10) echo "4       极低 WRR          " ;;
+        11) echo "0  BE  ★普通流量 WRR最低  " ;;
+    esac
+}
+for qid in 0 1 2 3 4 5 6 7 8 9 10 11; do
     FILE="/sys/kernel/debug/hnat/qdma_txq${qid}"
-    if [ -f "$FILE" ]; then
-        PKTS=$(grep "packet count" "$FILE" | awk '{print $3}')
-        DROP=$(grep "packet drop" "$FILE" | awk '{print $3}')
-        DIR=$([ "$qid" = "0" ] && echo "下行 WAN→LAN" || echo "上行 LAN→WAN")
-        echo "  Queue $qid ($DIR): $PKTS 包, 丢包 $DROP"
-    fi
+    PKTS="N/A"; DROP="N/A"
+    [ -f "$FILE" ] && PKTS=$(grep "packet count" "$FILE" | awk '{print $3}') && DROP=$(grep "packet drop" "$FILE" | awk '{print $3}')
+    LABEL=$(get_dn_label $qid)
+    printf "  Q%-5s | %s | %-10s | %-5s\n" "$qid" "$LABEL" "$PKTS" "$DROP"
 done
 
 echo ""
-echo "━━━ 普通流量队列 (DSCP 0 → BE) ━━━"
-for qid in 11 43; do
+echo "  上行 (LAN→WAN) Queue 32-43:"
+echo "  Queue | DSCP | 流量类型           | 包数        | 丢包"
+echo "  ------|------|--------------------|-----------|---------"
+
+get_up_label() {
+    case $1 in
+        32) echo "46 EF  ★VIP/游戏 SP最高" ;;
+        33) echo "44     CS5 SP次高        " ;;
+        34) echo "34 AF41 视频会议 SP       " ;;
+        35) echo "32     CS4 SP            " ;;
+        36) echo "28 AF32 流媒体 SP         " ;;
+        37) echo "26     CS3 SP            " ;;
+        38) echo "18 AF21 数据 WRR高        " ;;
+        39) echo "16     CS2 WRR           " ;;
+        40) echo "10 AF11 批量 WRR          " ;;
+        41) echo "8  CS1  低优先级 WRR      " ;;
+        42) echo "4       极低 WRR          " ;;
+        43) echo "0  BE  ★普通流量 WRR最低  " ;;
+    esac
+}
+for qid in 32 33 34 35 36 37 38 39 40 41 42 43; do
     FILE="/sys/kernel/debug/hnat/qdma_txq${qid}"
-    if [ -f "$FILE" ]; then
-        PKTS=$(grep "packet count" "$FILE" | awk '{print $3}')
-        DROP=$(grep "packet drop" "$FILE" | awk '{print $3}')
-        DIR=$([ "$qid" = "11" ] && echo "下行 WAN→LAN" || echo "上行 LAN→WAN")
-        echo "  Queue $qid ($DIR): $PKTS 包, 丢包 $DROP"
-    fi
+    PKTS="N/A"; DROP="N/A"
+    [ -f "$FILE" ] && PKTS=$(grep "packet count" "$FILE" | awk '{print $3}') && DROP=$(grep "packet drop" "$FILE" | awk '{print $3}')
+    LABEL=$(get_up_label $qid)
+    printf "  Q%-5s | %s | %-10s | %-5s\n" "$qid" "$LABEL" "$PKTS" "$DROP"
 done
 echo ""
+
 
 # ==========================================
 # 3. CAKE SQM 分 tin 详细数据
