@@ -22,70 +22,67 @@ else
     echo "总 HNAT 条目数: $TOTAL"
     echo ""
 
-    # 通用函数：按方向过滤 HNAT 条目
-    # 方向判断：
-    #   上传(LAN→WAN): 第一个IP是内网IP (192.168.xxx.yyy:port->外网)
-    #   下载(WAN→LAN): 最后一个IP是内网IP (在 => 之后的目标IP)
+    # HNAT 条目格式:
+    # NAPT(xxx): qid(y): SRC_IP:port->DST_IP:port => NSRC_IP:port->NDST_IP:port
+    # 上传(LAN→WAN): => 前的 SRC_IP 是内网 IP
+    # 下载(WAN→LAN): => 后的 NDST_IP 是内网 IP
+    # BusyBox awk 不支持 3 参数 match()，改用 split() 解析 IP 各段
 
-    # ---- 真实 VIP: 110-119 网段 AND 第四段 10-39 ----
+    # 内网 IP 提取函数 (BusyBox 兼容):
+    #   上传 src: split(p[1]前半段, "->")[1] 即 SRC_IP:port, 再 split(":")取 IP
+    #   下载 dst: split(p[2], "->")[2] 即 NDST_IP:port, 再 split(":")取 IP
+
+    # ---- 真实 VIP: 第三段 110-119, 第四段 10-39 ----
     echo "━━━ ✅ 110-119 真实 VIP (第四段 .10-.39) ━━━"
 
     echo "  ↑ 上传 (LAN→WAN):"
     echo "$ALL" | awk '
     {
-        # 上传: 第一个IP是 192.168.11x.10-39
-        split($0, parts, " => ")
-        if (match(parts[1], /192\.168\.1(1[0-9])\.([0-9]+):/, arr)) {
-            seg3=arr[1]+0; seg4=arr[2]+0
-            if (seg3>=10 && seg3<=19 && seg4>=10 && seg4<=39) print "    "$0
-        }
+        split($0, p, " => ")
+        split(p[1], f, ": "); split(f[3], fw, "->")
+        split(fw[1], ip, ":"); split(ip[1], oct, ".")
+        o3=oct[3]+0; o4=oct[4]+0
+        if (o3>=110 && o3<=119 && o4>=10 && o4<=39) print "    "$0
     }' | head -5
 
     echo "  ↓ 下载 (WAN→LAN):"
     echo "$ALL" | awk '
     {
-        # 下载: => 之后最后一个目标IP是 192.168.11x.10-39
-        split($0, parts, " => ")
-        if (match(parts[2], /->192\.168\.1(1[0-9])\.([0-9]+):/, arr)) {
-            seg3=arr[1]+0; seg4=arr[2]+0
-            if (seg3>=10 && seg3<=19 && seg4>=10 && seg4<=39) print "    "$0
-        }
+        split($0, p, " => ")
+        split(p[2], fw, "->"); split(fw[2], ip, ":"); split(ip[1], oct, ".")
+        o3=oct[3]+0; o4=oct[4]+0
+        if (o3>=110 && o3<=119 && o4>=10 && o4<=39) print "    "$0
     }' | head -5
 
-    VIP_UP=$(echo "$ALL" | awk '
-    { split($0,p," => "); if(match(p[1],/192\.168\.1(1[0-9])\.([0-9]+):/,a)){s3=a[1]+0;s4=a[2]+0;if(s3>=10&&s3<=19&&s4>=10&&s4<=39)c++} } END{print c+0}')
-    VIP_DN=$(echo "$ALL" | awk '
-    { split($0,p," => "); if(match(p[2],/->192\.168\.1(1[0-9])\.([0-9]+):/,a)){s3=a[1]+0;s4=a[2]+0;if(s3>=10&&s3<=19&&s4>=10&&s4<=39)c++} } END{print c+0}')
+    VIP_UP=$(echo "$ALL" | awk '{split($0,p," => ");split(p[1],f,": ");split(f[3],fw,"->");split(fw[1],ip,":");split(ip[1],oct,".");o3=oct[3]+0;o4=oct[4]+0;if(o3>=110&&o3<=119&&o4>=10&&o4<=39)c++}END{print c+0}')
+    VIP_DN=$(echo "$ALL" | awk '{split($0,p," => ");split(p[2],fw,"->");split(fw[2],ip,":");split(ip[1],oct,".");o3=oct[3]+0;o4=oct[4]+0;if(o3>=110&&o3<=119&&o4>=10&&o4<=39)c++}END{print c+0}')
     echo "  (上传 $VIP_UP 条 / 下载 $VIP_DN 条，应全为 qid(0))"
     echo ""
 
-    # ---- 110-119 网段但不在 10-39 范围 ----
+    # ---- 110-119 非 VIP: 第三段 110-119, 第四段不在 10-39 ----
     echo "━━━ ⚠️  110-119 非 VIP (第四段 .40 以上) ━━━"
 
     echo "  ↑ 上传 (LAN→WAN):"
     echo "$ALL" | awk '
     {
-        split($0, parts, " => ")
-        if (match(parts[1], /192\.168\.1(1[0-9])\.([0-9]+):/, arr)) {
-            seg3=arr[1]+0; seg4=arr[2]+0
-            if (!(seg3>=10 && seg3<=19 && seg4>=10 && seg4<=39)) print "    "$0
-        }
+        split($0, p, " => ")
+        split(p[1], f, ": "); split(f[3], fw, "->")
+        split(fw[1], ip, ":"); split(ip[1], oct, ".")
+        o3=oct[3]+0; o4=oct[4]+0
+        if (o3>=110 && o3<=119 && !(o4>=10 && o4<=39)) print "    "$0
     }' | head -5
 
     echo "  ↓ 下载 (WAN→LAN):"
     echo "$ALL" | awk '
     {
-        split($0, parts, " => ")
-        if (match(parts[2], /->192\.168\.1(1[0-9])\.([0-9]+):/, arr)) {
-            seg3=arr[1]+0; seg4=arr[2]+0
-            if (!(seg3>=10 && seg3<=19 && seg4>=10 && seg4<=39)) print "    "$0
-        }
+        split($0, p, " => ")
+        split(p[2], fw, "->"); split(fw[2], ip, ":"); split(ip[1], oct, ".")
+        o3=oct[3]+0; o4=oct[4]+0
+        if (o3>=110 && o3<=119 && !(o4>=10 && o4<=39)) print "    "$0
     }' | head -5
 
-    NV_UP=$(echo "$ALL" | awk '
-    { split($0,p," => "); if(match(p[1],/192\.168\.1(1[0-9])\.([0-9]+):/,a)){s3=a[1]+0;s4=a[2]+0;if(!(s3>=10&&s3<=19&&s4>=10&&s4<=39))c++} } END{print c+0}')
-    NV_DN=$(echo "$ALL" | awk '
-    { split($0,p," => "); if(match(p[2],/->192\.168\.1(1[0-9])\.([0-9]+):/,a)){s3=a[1]+0;s4=a[2]+0;if(!(s3>=10&&s3<=19&&s4>=10&&s4<=39))c++} } END{print c+0}')
+    NV_UP=$(echo "$ALL" | awk '{split($0,p," => ");split(p[1],f,": ");split(f[3],fw,"->");split(fw[1],ip,":");split(ip[1],oct,".");o3=oct[3]+0;o4=oct[4]+0;if(o3>=110&&o3<=119&&!(o4>=10&&o4<=39))c++}END{print c+0}')
+    NV_DN=$(echo "$ALL" | awk '{split($0,p," => ");split(p[2],fw,"->");split(fw[2],ip,":");split(ip[1],oct,".");o3=oct[3]+0;o4=oct[4]+0;if(o3>=110&&o3<=119&&!(o4>=10&&o4<=39))c++}END{print c+0}')
     echo "  (上传 $NV_UP 条 / 下载 $NV_DN 条，qid 应非 0)"
     echo ""
 
