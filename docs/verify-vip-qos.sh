@@ -138,7 +138,7 @@ get_up_label() {
         40) echo "32-39  AF4x   高优视频 WRR     " ;;
         41) echo "24-31  AF3x   普通视频 WRR     " ;;
         42) echo "16-23  AF2x   网页/应用 WRR    " ;;
-        43) echo "0      BE    ★普通流量 WRR    " ;;
+        43) echo "0      BE    ★普通流量(WRR/同 Q11)" ;;
         44) echo "8-15   CS1    后台清道夫(低于BE)" ;;
     esac
 }
@@ -224,28 +224,42 @@ echo ""
 # ==========================================
 echo "【5】实时吞吐量采样 (3秒间隔)"
 echo "--------------------------------------------"
-Q0_A=$(grep "packet count" /sys/kernel/debug/hnat/qdma_txq0 2>/dev/null | awk '{print $3}')
-Q32_A=$(grep "packet count" /sys/kernel/debug/hnat/qdma_txq32 2>/dev/null | awk '{print $3}')
+# 读取 QDMA 包计数，重试一次避免 sysfs 瞬间返回空
+read_pkts() {
+    VAL=$(grep "packet count" "$1" 2>/dev/null | awk '{print $3}')
+    [ -z "$VAL" ] && VAL=$(grep "packet count" "$1" 2>/dev/null | awk '{print $3}')
+    echo "${VAL:-0}"
+}
+
+Q0_A=$(read_pkts /sys/kernel/debug/hnat/qdma_txq0)
+Q32_A=$(read_pkts /sys/kernel/debug/hnat/qdma_txq32)
+Q11_A=$(read_pkts /sys/kernel/debug/hnat/qdma_txq11)
 CAKE_SENT_A=$(tc -s qdisc show dev "$CAKE_IF" 2>/dev/null | awk '/^ Sent /{print $2}')
+CAKE_SENT_A=${CAKE_SENT_A:-0}
 
 sleep 3
 
-Q0_B=$(grep "packet count" /sys/kernel/debug/hnat/qdma_txq0 2>/dev/null | awk '{print $3}')
-Q32_B=$(grep "packet count" /sys/kernel/debug/hnat/qdma_txq32 2>/dev/null | awk '{print $3}')
+Q0_B=$(read_pkts /sys/kernel/debug/hnat/qdma_txq0)
+Q32_B=$(read_pkts /sys/kernel/debug/hnat/qdma_txq32)
+Q11_B=$(read_pkts /sys/kernel/debug/hnat/qdma_txq11)
 CAKE_SENT_B=$(tc -s qdisc show dev "$CAKE_IF" 2>/dev/null | awk '/^ Sent /{print $2}')
+CAKE_SENT_B=${CAKE_SENT_B:-0}
 
 calc_pps() {
     A=$1 B=$2
-    [ -n "$A" ] && [ -n "$B" ] && [ "$B" -ge "$A" ] 2>/dev/null \
-        && echo $(( (B - A) / 3 )) || echo "N/A"
+    if [ -z "$A" ] || [ -z "$B" ]; then echo "N/A"; return; fi
+    DIFF=$(( B - A ))
+    [ "$DIFF" -lt 0 ] 2>/dev/null && echo "N/A" || echo $(( DIFF / 3 ))
 }
 
 Q0_RATE=$(calc_pps "$Q0_A" "$Q0_B")
 Q32_RATE=$(calc_pps "$Q32_A" "$Q32_B")
+Q11_RATE=$(calc_pps "$Q11_A" "$Q11_B")
 CAKE_RATE=$(calc_pps "$CAKE_SENT_A" "$CAKE_SENT_B")
 
-echo "  硬件加速 VIP 下行 (Queue 0):  ${Q0_RATE} 包/秒"
-echo "  硬件加速 VIP 上行 (Queue 32): ${Q32_RATE} 包/秒"
+echo "  硬件加速 VIP   下行 (Queue  0): ${Q0_RATE} 包/秒"
+echo "  硬件加速 VIP   上行 (Queue 32): ${Q32_RATE} 包/秒"
+echo "  硬件加速 普通  下行 (Queue 11): ${Q11_RATE} 包/秒"
 if [ -n "$CAKE_IF" ]; then
     if [ "$CAKE_RATE" = "N/A" ]; then
         echo "  软件 SQM (CAKE) 吞吐:         N/A"
