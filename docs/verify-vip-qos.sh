@@ -92,22 +92,22 @@ echo "  ------|------|--------------------|-----------|---------"
 # 下行队列 0-11 DSCP 映射
 get_dn_label() {
     case $1 in
-        0)  echo "46    EF   ★VIP/游戏 SP最高    " ;;
-        1)  echo "45         SP次高              " ;;
-        2)  echo "44         SP                  " ;;
-        3)  echo "43         SP                  " ;;
-        4)  echo "42         SP                  " ;;
-        5)  echo "41/56/48   CS5-7/AF1x+          " ;;
-        6)  echo "32-39 AF4x 高优视频             " ;;
-        7)  echo "24-31 AF3x 普通视频             " ;;
-        8)  echo "16-23 AF2x 网页/应用            " ;;
-        9)  echo "未使用                          " ;;
-        10) echo "未使用                          " ;;
-        11) echo "0     BE  ★普通流量 WRR        " ;;
-        12) echo "8-15  CS1  后台清道夫(低于BE)    " ;;
+        0)  echo "46     EF    ★VIP/游戏 SP最高   " ;;
+        1)  echo "45            SP次高           " ;;
+        2)  echo "44            SP              " ;;
+        3)  echo "43            SP              " ;;
+        4)  echo "42            SP              " ;;
+        5)  echo "41            SP              " ;;
+        6)  echo "48/56  CS6-7  网络控制 SP      " ;;
+        7)  echo "40     CS5    SP              " ;;
+        8)  echo "32-39  AF4x   高优视频 WRR     " ;;
+        9)  echo "24-31  AF3x   普通视频 WRR     " ;;
+        10) echo "16-23  AF2x   网页/应用 WRR    " ;;
+        11) echo "0      BE    ★普通流量 WRR    " ;;
+        12) echo "8-15   CS1    后台清道夫(低于BE)" ;;
     esac
 }
-for qid in 0 1 2 3 4 5 6 7 8 11 12; do
+for qid in 0 1 2 3 4 5 6 7 8 9 10 11 12; do
     FILE="/sys/kernel/debug/hnat/qdma_txq${qid}"
     PKTS="N/A"; DROP="N/A"
     [ -f "$FILE" ] && PKTS=$(grep "packet count" "$FILE" | awk '{print $3}') && DROP=$(grep "packet drop" "$FILE" | awk '{print $3}')
@@ -122,22 +122,22 @@ echo "  ------|------|--------------------|-----------|---------"
 
 get_up_label() {
     case $1 in
-        32) echo "46    EF   ★VIP/游戏 SP最高    " ;;
-        33) echo "45         SP次高              " ;;
-        34) echo "44         SP                  " ;;
-        35) echo "43         SP                  " ;;
-        36) echo "42         SP                  " ;;
-        37) echo "41/56/48   CS5-7/AF1x+          " ;;
-        38) echo "32-39 AF4x 高优视频             " ;;
-        39) echo "24-31 AF3x 普通视频             " ;;
-        40) echo "16-23 AF2x 网页/应用            " ;;
-        41) echo "未使用                          " ;;
-        42) echo "未使用                          " ;;
-        43) echo "0     BE  ★普通流量 WRR        " ;;
-        44) echo "8-15  CS1  后台清道夫(低于BE)    " ;;
+        32) echo "46     EF    ★VIP/游戏 SP最高   " ;;
+        33) echo "45            SP次高           " ;;
+        34) echo "44            SP              " ;;
+        35) echo "43            SP              " ;;
+        36) echo "42            SP              " ;;
+        37) echo "41            SP              " ;;
+        38) echo "48/56  CS6-7  网络控制 SP      " ;;
+        39) echo "40     CS5    SP              " ;;
+        40) echo "32-39  AF4x   高优视频 WRR     " ;;
+        41) echo "24-31  AF3x   普通视频 WRR     " ;;
+        42) echo "16-23  AF2x   网页/应用 WRR    " ;;
+        43) echo "0      BE    ★普通流量 WRR    " ;;
+        44) echo "8-15   CS1    后台清道夫(低于BE)" ;;
     esac
 }
-for qid in 32 33 34 35 36 37 38 39 40 43 44; do
+for qid in 32 33 34 35 36 37 38 39 40 41 42 43 44; do
     FILE="/sys/kernel/debug/hnat/qdma_txq${qid}"
     PKTS="N/A"; DROP="N/A"
     [ -f "$FILE" ] && PKTS=$(grep "packet count" "$FILE" | awk '{print $3}') && DROP=$(grep "packet drop" "$FILE" | awk '{print $3}')
