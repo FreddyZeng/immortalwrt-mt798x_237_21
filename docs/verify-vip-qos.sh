@@ -22,11 +22,10 @@ else
     echo "总 HNAT 条目数: $TOTAL"
     echo ""
 
-    # ---- 真正的 VIP: 110-119 网段 AND 第四段 10-39 ----
-    echo "━━━ ✅ 真实 VIP 设备 (192.168.110-119.10-39) ━━━"
+    # ---- 真实 VIP: 110-119 网段 AND 第四段 10-39 ----
+    echo "━━━ ✅ 110-119 真实 VIP (第四段 .10-.39) ━━━"
     echo "$ALL" | awk '
     {
-        # 匹配 src IP 192.168.{110-119}.{10-39}
         if (match($0, /192\.168\.1(1[0-9])\.([0-9]+)/, arr)) {
             seg3 = arr[1]+0
             seg4 = arr[2]+0
@@ -44,11 +43,11 @@ else
         }
     }
     END{print count+0}')
-    echo "(共 $VIP_COUNT 条 VIP 连接)"
+    echo "(共 $VIP_COUNT 条，应全为 qid(0))"
     echo ""
 
-    # ---- 110-119 网段但不在 10-39 范围（非 VIP，脚本 v1 的误报）----
-    echo "━━━ ⚠️  110-119 网段但不是 VIP (.10-.39 以外) ━━━"
+    # ---- 110-119 网段但不在 10-39 范围 ----
+    echo "━━━ ⚠️  110-119 非 VIP (第四段 .40 以上) ━━━"
     echo "$ALL" | awk '
     {
         if (match($0, /192\.168\.1(1[0-9])\.([0-9]+)/, arr)) {
@@ -68,20 +67,14 @@ else
         }
     }
     END{print count+0}')
-    echo "(共 $NONVIP_COUNT 条 110-119 非 VIP 连接)"
+    echo "(共 $NONVIP_COUNT 条，应为 qid 非 0)"
     echo ""
 
     # ---- 109 网段 ----
-    echo "━━━ 🎮 109 网段 (游戏加速区) ━━━"
+    echo "━━━ 🎮 109 游戏加速区 (UDP≤300B → qid(0)) ━━━"
     echo "$ALL" | grep "192\.168\.109\." | head -5
     NET109_COUNT=$(echo "$ALL" | grep -c "192\.168\.109\.")
-    echo "(共 $NET109_COUNT 条 109 连接)"
-    echo ""
-
-    # ---- 其他普通设备 ----
-    echo "━━━ 普通设备 (非 VIP) ━━━"
-    OTHER_COUNT=$(echo "$ALL" | grep -v "192\.168\.10[9]\|192\.168\.1[1-9][0-9]\." | wc -l)
-    echo "(共 $OTHER_COUNT 条普通连接，走 HNAT 默认队列)"
+    echo "(共 $NET109_COUNT 条)"
 fi
 echo ""
 
