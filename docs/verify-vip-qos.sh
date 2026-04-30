@@ -57,8 +57,9 @@ else
     echo ""
 
     # ---- 游戏加速区: 192.168.109.x (必须是内网IP，排除外网IP中第三段恰好是109的误判) ----
-    echo "━━━ 🎮 游戏加速 (192.168.109.x UDP≤300B) ━━━"
-    echo "  期望: 上传 qid(0)/Q0 SP,  下载 qid(32)/Q32 SP"
+    echo "━━━ 🎮 游戏加速 (192.168.109.x) ━━━"
+    echo "  ⚠️  仅 UDP≤300B 打 DSCP=46 → qid(0)/qid(32) SP"
+    echo "  TCP/大包UDP 走普通通道 → qid(11)/qid(43) WRR"
     echo "  ↑ 上传 (LAN→WAN, 源IP为192.168.109.x):"
     echo "$ALL" | awk '{
         split($3,fw,"->"); split(fw[1],ip,":"); split(ip[1],oct,".")
@@ -73,7 +74,7 @@ else
     }' | head -5
     N109_UP=$(echo "$ALL" | awk '{split($3,fw,"->");split(fw[1],ip,":");split(ip[1],oct,".");o1=oct[1]+0;o2=oct[2]+0;o3=oct[3]+0;if(o1==192&&o2==168&&o3==109)c++}END{print c+0}')
     N109_DN=$(echo "$ALL" | awk '{split($5,fw,"->");split(fw[2],ip,":");split(ip[1],oct,".");o1=oct[1]+0;o2=oct[2]+0;o3=oct[3]+0;if(o1==192&&o2==168&&o3==109)c++}END{print c+0}')
-    echo "  (上传 $N109_UP 条 / 下载 $N109_DN 条 → 期望 qid(0)/qid(32))"
+    echo "  (上传 $N109_UP 条 / 下载 $N109_DN 条 → UDP小包期望 qid(0)/qid(32), 其他期望 qid(11)/qid(43))"
     echo ""
 
     # ---- 普通流量: 192.168 网段, 非 VIP 非 109 ----
@@ -102,8 +103,8 @@ echo "  上行 (LAN→WAN) Queue 0-12  [sch0/sch2 上传调度器]:"
 echo "  Queue | DSCP | 流量类型           | 包数        | 丢包"
 echo "  ------|------|--------------------|-----------|---------"
 
-# 上行队列 Q0-Q12 DSCP 映射 (LAN→WAN, sch0=VIP SP / sch2=普通上传陥0限)
-get_dn_label() {
+# 上行队列 Q0-Q12 DSCP 映射 (LAN→WAN, sch0=VIP SP / sch2=普通上传速率限制)
+get_up_label() {
     case $1 in
         0)  echo "46     EF    ★VIP/游戏 SP最高   " ;;
         1)  echo "45            SP次高           " ;;
@@ -129,7 +130,7 @@ for qid in 0 1 2 3 4 5 6 7 8 9 10 11 12; do
         [ -z "$PKTS" ] && PKTS="0"
         [ -z "$DROP" ] && DROP="0"
     fi
-    LABEL=$(get_dn_label $qid)
+    LABEL=$(get_up_label $qid)
     printf "  Q%-5s | %s | %-10s | %-5s\n" "$qid" "$LABEL" "$PKTS" "$DROP"
 done
 
@@ -138,7 +139,7 @@ echo "  下行 (WAN→LAN) Queue 32-44 [sch1/sch3 下载调度器]:"
 echo "  Queue | DSCP | 流量类型           | 包数        | 丢包"
 echo "  ------|------|--------------------|-----------|---------"
 
-get_up_label() {
+get_dn_label() {
     case $1 in
         32) echo "46     EF    ★VIP/游戏 SP最高   " ;;
         33) echo "45            SP次高           " ;;
@@ -151,7 +152,7 @@ get_up_label() {
         40) echo "32-39  AF4x   高优视频 WRR     " ;;
         41) echo "24-31  AF3x   普通视频 WRR     " ;;
         42) echo "16-23  AF2x   网页/应用 WRR    " ;;
-        43) echo "0      BE    ★普通流量(WRR/同 Q11)" ;;
+        43) echo "0      BE    ★普通流量下行 WRR    " ;;
         44) echo "8-15   CS1    后台清道夫(低于BE)" ;;
     esac
 }
@@ -164,7 +165,7 @@ for qid in 32 33 34 35 36 37 38 39 40 41 42 43 44; do
         [ -z "$PKTS" ] && PKTS="0"
         [ -z "$DROP" ] && DROP="0"
     fi
-    LABEL=$(get_up_label $qid)
+    LABEL=$(get_dn_label $qid)
     printf "  Q%-5s | %s | %-10s | %-5s\n" "$qid" "$LABEL" "$PKTS" "$DROP"
 done
 echo ""
@@ -247,6 +248,7 @@ read_pkts() {
 Q0_A=$(read_pkts /sys/kernel/debug/hnat/qdma_txq0)
 Q32_A=$(read_pkts /sys/kernel/debug/hnat/qdma_txq32)
 Q11_A=$(read_pkts /sys/kernel/debug/hnat/qdma_txq11)
+Q43_A=$(read_pkts /sys/kernel/debug/hnat/qdma_txq43)
 CAKE_SENT_A=$(tc -s qdisc show dev "$CAKE_IF" 2>/dev/null | awk '/^ Sent /{print $2}')
 CAKE_SENT_A=${CAKE_SENT_A:-0}
 
@@ -255,6 +257,7 @@ sleep 3
 Q0_B=$(read_pkts /sys/kernel/debug/hnat/qdma_txq0)
 Q32_B=$(read_pkts /sys/kernel/debug/hnat/qdma_txq32)
 Q11_B=$(read_pkts /sys/kernel/debug/hnat/qdma_txq11)
+Q43_B=$(read_pkts /sys/kernel/debug/hnat/qdma_txq43)
 CAKE_SENT_B=$(tc -s qdisc show dev "$CAKE_IF" 2>/dev/null | awk '/^ Sent /{print $2}')
 CAKE_SENT_B=${CAKE_SENT_B:-0}
 
@@ -268,11 +271,13 @@ calc_pps() {
 Q0_RATE=$(calc_pps "$Q0_A" "$Q0_B")
 Q32_RATE=$(calc_pps "$Q32_A" "$Q32_B")
 Q11_RATE=$(calc_pps "$Q11_A" "$Q11_B")
+Q43_RATE=$(calc_pps "$Q43_A" "$Q43_B")
 CAKE_RATE=$(calc_pps "$CAKE_SENT_A" "$CAKE_SENT_B")
 
 echo "  硬件加速 VIP   上行 (Queue  0, sch0 SP): ${Q0_RATE} 包/秒"
 echo "  硬件加速 VIP   下行 (Queue 32, sch1 SP): ${Q32_RATE} 包/秒"
 echo "  硬件加速 普通  上行 (Queue 11, sch2 WRR): ${Q11_RATE} 包/秒"
+echo "  硬件加速 普通  下行 (Queue 43, sch3 WRR): ${Q43_RATE} 包/秒  ← dscp_en 验证关键"
 if [ -n "$CAKE_IF" ]; then
     if [ "$CAKE_RATE" = "N/A" ]; then
         echo "  软件 SQM (CAKE) 吞吐:         N/A"
@@ -283,6 +288,7 @@ fi
 echo ""
 echo "  → Queue 0:  上行 VIP SP > 0  = VIP 硬件加速上行正在工作"
 echo "  → Queue 32: 下行 VIP SP > 0  = VIP 硬件加速下行正在工作"
-echo "  → Queue 11: 上行普通 WRR > 0 = 普通流量上行已分陙1"
+echo "  → Queue 11: 上行普通 WRR > 0 = 普通流量上行已分离"
+echo "  → Queue 43: 下行普通 WRR > 0 = dscp_en 已生效，下行不再混入 Q11"
 echo "  → CAKE > 0  = HNAT 未命中流量走软件路径"
 echo "============================================"
