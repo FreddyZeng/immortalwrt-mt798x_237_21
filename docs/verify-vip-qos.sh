@@ -30,70 +30,86 @@ else
     echo "  └──────────────┴──────────────────────┴───────────────────────┘"
     echo ""
 
-    # HNAT 条目字段结构 (空格分隔):
-    # $1=NAPT(x): $2=qid(y): $3=SRC:port->DST:port $4==> $5=NSRC:port->NDST:port
-    # 上传(LAN→WAN): $3 的源 IP 必须是 192.168.x.x 内网 IP
-    # 下载(WAN→LAN): $5 的目标 IP (->后) 必须是 192.168.x.x 内网 IP
-    # 必须检查 oct[1]==192 && oct[2]==168, 避免外网 IP 中含 109/111 的误判
+    # 使用高精度 AWK 解析:
+    # 1. 过滤掉无 NAT 转换的 LAN-to-LAN 互访流量 (通过判断 $3 和 $5 是否相等)
+    # 2. 上传(LAN→WAN): 发生 Source NAT (fw1[1] != fw2[1])，且原始源 IP 是目标 LAN 设备
+    # 3. 下载(WAN→LAN): 发生 Destination NAT (fw1[2] != fw2[2])，且转换后目标 IP 是目标 LAN 设备
+    get_hnat_entries() {
+        local dir=$1
+        local type=$2
+        echo "$ALL" | awk -v dir="$dir" -v type="$type" '{
+            orig = ""; trans = "";
+            if ($4 == "=>") { orig = $3; trans = $5; }
+            else if ($3 == "=>") { orig = $2; trans = $4; }
+            else next;
+            
+            split(orig, fw1, "->"); split(trans, fw2, "->");
+            
+            target_ip = "";
+            if (dir == "UP" && fw1[1] != fw2[1]) {
+                split(fw1[1], ip, ":");
+                target_ip = ip[1];
+            } else if (dir == "DN" && fw1[2] != fw2[2]) {
+                split(fw2[2], ip, ":");
+                target_ip = ip[1];
+            } else {
+                next;
+            }
+            
+            split(target_ip, oct, ".");
+            o1 = oct[1]+0; o2 = oct[2]+0; o3 = oct[3]+0; o4 = oct[4]+0;
+            
+            if (o1 != 192 || o2 != 168) next;
+            
+            is_vip = (o3 >= 110 && o3 <= 119 && o4 >= 10 && o4 <= 39);
+            is_109 = (o3 == 109);
+            
+            if (type == "VIP" && is_vip) { print "    " $0; }
+            else if (type == "109" && is_109) { print "    " $0; }
+            else if (type == "NM" && !is_vip && !is_109) { print "    " $0; }
+        }'
+    }
 
     # ---- VIP: 192.168.110-119.10-39 ----
     echo "━━━ ✅ VIP 流量 (192.168.110-119.10-39) ━━━"
     echo "  期望: 上传 qid(0)/Q0 SP,  下载 qid(32)/Q32 SP"
+    VIP_UP_ENTRIES=$(get_hnat_entries "UP" "VIP")
+    VIP_DN_ENTRIES=$(get_hnat_entries "DN" "VIP")
     echo "  ↑ 上传 (LAN→WAN, 源IP在VIP范围):"
-    echo "$ALL" | awk '{
-        split($3,fw,"->"); split(fw[1],ip,":"); split(ip[1],oct,".")
-        o1=oct[1]+0; o2=oct[2]+0; o3=oct[3]+0; o4=oct[4]+0
-        if(o1==192&&o2==168&&o3>=110&&o3<=119&&o4>=10&&o4<=39) print "    "$0
-    }' | head -5
+    [ -n "$VIP_UP_ENTRIES" ] && echo "$VIP_UP_ENTRIES" | head -5 || echo "    (无)"
     echo "  ↓ 下载 (WAN→LAN, 目标IP在VIP范围):"
-    echo "$ALL" | awk '{
-        split($5,fw,"->"); split(fw[2],ip,":"); split(ip[1],oct,".")
-        o1=oct[1]+0; o2=oct[2]+0; o3=oct[3]+0; o4=oct[4]+0
-        if(o1==192&&o2==168&&o3>=110&&o3<=119&&o4>=10&&o4<=39) print "    "$0
-    }' | head -5
-    VIP_UP=$(echo "$ALL" | awk '{split($3,fw,"->");split(fw[1],ip,":");split(ip[1],oct,".");o1=oct[1]+0;o2=oct[2]+0;o3=oct[3]+0;o4=oct[4]+0;if(o1==192&&o2==168&&o3>=110&&o3<=119&&o4>=10&&o4<=39)c++}END{print c+0}')
-    VIP_DN=$(echo "$ALL" | awk '{split($5,fw,"->");split(fw[2],ip,":");split(ip[1],oct,".");o1=oct[1]+0;o2=oct[2]+0;o3=oct[3]+0;o4=oct[4]+0;if(o1==192&&o2==168&&o3>=110&&o3<=119&&o4>=10&&o4<=39)c++}END{print c+0}')
+    [ -n "$VIP_DN_ENTRIES" ] && echo "$VIP_DN_ENTRIES" | head -5 || echo "    (无)"
+    VIP_UP=$(echo "$VIP_UP_ENTRIES" | grep -c "=>")
+    VIP_DN=$(echo "$VIP_DN_ENTRIES" | grep -c "=>")
     echo "  (上传 $VIP_UP 条 / 下载 $VIP_DN 条 → 期望 qid(0)/qid(32))"
     echo ""
 
-    # ---- 游戏加速区: 192.168.109.x (必须是内网IP，排除外网IP中第三段恰好是109的误判) ----
+    # ---- 游戏加速区: 192.168.109.x ----
     echo "━━━ 🎮 游戏加速 (192.168.109.x) ━━━"
     echo "  ⚠️  仅 UDP≤300B 打 DSCP=46 → qid(0)/qid(32) SP"
     echo "  TCP/大包UDP 走普通通道 → qid(11)/qid(43) WRR"
+    N109_UP_ENTRIES=$(get_hnat_entries "UP" "109")
+    N109_DN_ENTRIES=$(get_hnat_entries "DN" "109")
     echo "  ↑ 上传 (LAN→WAN, 源IP为192.168.109.x):"
-    echo "$ALL" | awk '{
-        split($3,fw,"->"); split(fw[1],ip,":"); split(ip[1],oct,".")
-        o1=oct[1]+0; o2=oct[2]+0; o3=oct[3]+0
-        if(o1==192&&o2==168&&o3==109) print "    "$0
-    }' | head -5
+    [ -n "$N109_UP_ENTRIES" ] && echo "$N109_UP_ENTRIES" | head -5 || echo "    (无)"
     echo "  ↓ 下载 (WAN→LAN, 目标IP为192.168.109.x):"
-    echo "$ALL" | awk '{
-        split($5,fw,"->"); split(fw[2],ip,":"); split(ip[1],oct,".")
-        o1=oct[1]+0; o2=oct[2]+0; o3=oct[3]+0
-        if(o1==192&&o2==168&&o3==109) print "    "$0
-    }' | head -5
-    N109_UP=$(echo "$ALL" | awk '{split($3,fw,"->");split(fw[1],ip,":");split(ip[1],oct,".");o1=oct[1]+0;o2=oct[2]+0;o3=oct[3]+0;if(o1==192&&o2==168&&o3==109)c++}END{print c+0}')
-    N109_DN=$(echo "$ALL" | awk '{split($5,fw,"->");split(fw[2],ip,":");split(ip[1],oct,".");o1=oct[1]+0;o2=oct[2]+0;o3=oct[3]+0;if(o1==192&&o2==168&&o3==109)c++}END{print c+0}')
+    [ -n "$N109_DN_ENTRIES" ] && echo "$N109_DN_ENTRIES" | head -5 || echo "    (无)"
+    N109_UP=$(echo "$N109_UP_ENTRIES" | grep -c "=>")
+    N109_DN=$(echo "$N109_DN_ENTRIES" | grep -c "=>")
     echo "  (上传 $N109_UP 条 / 下载 $N109_DN 条 → UDP小包期望 qid(0)/qid(32), 其他期望 qid(11)/qid(43))"
     echo ""
 
     # ---- 普通流量: 192.168 网段, 非 VIP 非 109 ----
     echo "━━━ 📦 普通流量 (其他 192.168.x.x 设备) ━━━"
     echo "  期望: 上传 qid(11)/Q11 WRR, 下载 qid(43)/Q43 WRR"
+    NM_UP_ENTRIES=$(get_hnat_entries "UP" "NM")
+    NM_DN_ENTRIES=$(get_hnat_entries "DN" "NM")
     echo "  ↑ 上传 (LAN→WAN, 源IP为普通设备):"
-    echo "$ALL" | awk '{
-        split($3,fw,"->"); split(fw[1],ip,":"); split(ip[1],oct,".")
-        o1=oct[1]+0; o2=oct[2]+0; o3=oct[3]+0; o4=oct[4]+0
-        if(o1==192&&o2==168&&!(o3==109)&&!(o3>=110&&o3<=119&&o4>=10&&o4<=39)) print "    "$0
-    }' | head -5
+    [ -n "$NM_UP_ENTRIES" ] && echo "$NM_UP_ENTRIES" | head -5 || echo "    (无)"
     echo "  ↓ 下载 (WAN→LAN, 目标IP为普通设备):"
-    echo "$ALL" | awk '{
-        split($5,fw,"->"); split(fw[2],ip,":"); split(ip[1],oct,".")
-        o1=oct[1]+0; o2=oct[2]+0; o3=oct[3]+0; o4=oct[4]+0
-        if(o1==192&&o2==168&&!(o3==109)&&!(o3>=110&&o3<=119&&o4>=10&&o4<=39)) print "    "$0
-    }' | head -5
-    NM_UP=$(echo "$ALL" | awk '{split($3,fw,"->");split(fw[1],ip,":");split(ip[1],oct,".");o1=oct[1]+0;o2=oct[2]+0;o3=oct[3]+0;o4=oct[4]+0;if(o1==192&&o2==168&&!(o3==109)&&!(o3>=110&&o3<=119&&o4>=10&&o4<=39))c++}END{print c+0}')
-    NM_DN=$(echo "$ALL" | awk '{split($5,fw,"->");split(fw[2],ip,":");split(ip[1],oct,".");o1=oct[1]+0;o2=oct[2]+0;o3=oct[3]+0;o4=oct[4]+0;if(o1==192&&o2==168&&!(o3==109)&&!(o3>=110&&o3<=119&&o4>=10&&o4<=39))c++}END{print c+0}')
+    [ -n "$NM_DN_ENTRIES" ] && echo "$NM_DN_ENTRIES" | head -5 || echo "    (无)"
+    NM_UP=$(echo "$NM_UP_ENTRIES" | grep -c "=>")
+    NM_DN=$(echo "$NM_DN_ENTRIES" | grep -c "=>")
     echo "  (上传 $NM_UP 条 / 下载 $NM_DN 条 → 期望 qid(11)/qid(43))"
 fi
 echo ""
