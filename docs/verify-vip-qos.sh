@@ -278,10 +278,16 @@ CAKE_SENT_B=$(tc -s qdisc show dev "$CAKE_IF" 2>/dev/null | awk '/^ Sent /{print
 CAKE_SENT_B=${CAKE_SENT_B:-0}
 
 calc_pps() {
-    A=$1 B=$2
-    if [ -z "$A" ] || [ -z "$B" ]; then echo "N/A"; return; fi
-    DIFF=$(( B - A ))
-    [ "$DIFF" -lt 0 ] 2>/dev/null && echo "N/A" || echo $(( DIFF / 3 ))
+    local A=$(echo "$1" | tr -cd '0-9')
+    local B=$(echo "$2" | tr -cd '0-9')
+    A=${A:-0}
+    B=${B:-0}
+    local DIFF=$(( B - A ))
+    if [ "$DIFF" -lt 0 ]; then
+        echo "0"
+    else
+        echo $(( DIFF / 3 ))
+    fi
 }
 
 Q0_RATE=$(calc_pps "$Q0_A" "$Q0_B")
