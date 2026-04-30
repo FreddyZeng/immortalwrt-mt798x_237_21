@@ -150,33 +150,35 @@ if [ -z "$CAKE_IF" ]; then
 else
     echo "接口: $CAKE_IF"
     echo ""
-    # 提取 tin 统计
+    echo "          Tin0      Tin1      Tin2      Tin3      Tin4      Tin5      Tin6  Tin7(VIP)"
     tc -s qdisc show dev "$CAKE_IF" 2>/dev/null | awk '
-    /Tin [0-9]/{tin=$2}
-    /pkts/{
-        gsub(/[^0-9 ]/,"",$0)
-        split($0,a," ")
-        for(i=1;i<=8;i++) printf "Tin%d: %s pkts  ", i-1, a[i]
-        print ""
-    }
-    /bytes/{
-        split($0,a," ")
-        for(i=2;i<=9;i++) {
-            b=a[i]+0
-            if(b>1048576) printf "Tin%d: %.1fMB  ", i-2, b/1048576
-            else if(b>1024) printf "Tin%d: %.1fKB  ", i-2, b/1024
-            else printf "Tin%d: %dB  ", i-2, b
+    /^  pkts /   { printf "  pkts:   "; for(i=2;i<=NF;i++) printf "%10s", $i; print "" }
+    /^  bytes /  {
+        printf "  bytes:  "
+        for(i=2;i<=NF;i++) {
+            b=$i+0
+            if(b>=1073741824) s=sprintf("%.1fGB",b/1073741824)
+            else if(b>=1048576) s=sprintf("%.1fMB",b/1048576)
+            else if(b>=1024) s=sprintf("%.1fKB",b/1024)
+            else s=sprintf("%dB",b)
+            printf "%10s", s
         }
         print ""
-    }' 2>/dev/null
-
+    }
+    /^  drops /  { printf "  drops:  "; for(i=2;i<=NF;i++) printf "%10s", $i; print "" }
+    /^  interval / { printf "  intrvl: "; for(i=2;i<=NF;i++) printf "%10s", $i; print "" }
+    '
     echo ""
-    echo "━━━ Tin 7 (VIP 专属, interval=10ms) ━━━"
-    tc -s qdisc show dev "$CAKE_IF" 2>/dev/null | grep -A 20 "Tin 7" | grep -E "pkts|bytes|drops|pk_delay|interval|thresh" | head -8
-
-    echo ""
-    echo "━━━ Tin 2 (默认流量) ━━━"
-    tc -s qdisc show dev "$CAKE_IF" 2>/dev/null | grep -A 20 "Tin 2" | grep -E "pkts|bytes|drops|pk_delay|interval|thresh" | head -8
+    echo "━━━ Tin 7 (VIP专属) vs Tin 2 (默认流量) 对比 ━━━"
+    tc -s qdisc show dev "$CAKE_IF" 2>/dev/null | awk '
+    /^  pkts /    { t2_p=$4; t7_p=$9 }
+    /^  bytes /   { t2_b=$4+0; t7_b=$9+0 }
+    /^  drops /   { t2_d=$4; t7_d=$9 }
+    /^  interval / { t7_i=$9 }
+    END {
+        printf "  Tin7 VIP  (interval=%-5s): %s 包 / %.2fMB / %s 丢包\n", t7_i, t7_p, t7_b/1048576, t7_d
+        printf "  Tin2 默认 (interval=100ms): %s 包 / %.2fMB / %s 丢包\n", t2_p, t2_b/1048576, t2_d
+    }'
 fi
 echo ""
 
@@ -206,24 +208,34 @@ echo "【5】实时吞吐量采样 (3秒间隔)"
 echo "--------------------------------------------"
 Q0_A=$(grep "packet count" /sys/kernel/debug/hnat/qdma_txq0 2>/dev/null | awk '{print $3}')
 Q32_A=$(grep "packet count" /sys/kernel/debug/hnat/qdma_txq32 2>/dev/null | awk '{print $3}')
-CAKE_SENT_A=$(tc -s qdisc show dev "$CAKE_IF" 2>/dev/null | grep "Sent" | awk '{print $2}')
+CAKE_SENT_A=$(tc -s qdisc show dev "$CAKE_IF" 2>/dev/null | awk '/^ Sent /{print $2}')
 
 sleep 3
 
 Q0_B=$(grep "packet count" /sys/kernel/debug/hnat/qdma_txq0 2>/dev/null | awk '{print $3}')
 Q32_B=$(grep "packet count" /sys/kernel/debug/hnat/qdma_txq32 2>/dev/null | awk '{print $3}')
-CAKE_SENT_B=$(tc -s qdisc show dev "$CAKE_IF" 2>/dev/null | grep "Sent" | awk '{print $2}')
+CAKE_SENT_B=$(tc -s qdisc show dev "$CAKE_IF" 2>/dev/null | awk '/^ Sent /{print $2}')
 
-Q0_RATE=$(( (Q0_B - Q0_A) / 3 ))
-Q32_RATE=$(( (Q32_B - Q32_A) / 3 ))
-CAKE_RATE=$(( (CAKE_SENT_B - CAKE_SENT_A) / 3 ))
+calc_pps() {
+    A=$1 B=$2
+    [ -n "$A" ] && [ -n "$B" ] && [ "$B" -ge "$A" ] 2>/dev/null \
+        && echo $(( (B - A) / 3 )) || echo "N/A"
+}
 
-echo "  硬件加速 VIP 下行 (Queue 0):  $Q0_RATE 包/秒"
-echo "  硬件加速 VIP 上行 (Queue 32): $Q32_RATE 包/秒"
+Q0_RATE=$(calc_pps "$Q0_A" "$Q0_B")
+Q32_RATE=$(calc_pps "$Q32_A" "$Q32_B")
+CAKE_RATE=$(calc_pps "$CAKE_SENT_A" "$CAKE_SENT_B")
+
+echo "  硬件加速 VIP 下行 (Queue 0):  ${Q0_RATE} 包/秒"
+echo "  硬件加速 VIP 上行 (Queue 32): ${Q32_RATE} 包/秒"
 if [ -n "$CAKE_IF" ]; then
-    echo "  软件 SQM (CAKE) 吞吐:         $(( CAKE_RATE / 1024 )) KB/秒"
+    if [ "$CAKE_RATE" = "N/A" ]; then
+        echo "  软件 SQM (CAKE) 吞吐:         N/A"
+    else
+        echo "  软件 SQM (CAKE) 吞吐:         $(( CAKE_RATE / 1024 )) KB/秒"
+    fi
 fi
 echo ""
 echo "  → Queue 0/32 > 0 = VIP 硬件加速正在工作"
-echo "  → CAKE > 0     = HNAT 未命中流量走软件路径"
+echo "  → CAKE > 0       = HNAT 未命中流量走软件路径"
 echo "============================================"
