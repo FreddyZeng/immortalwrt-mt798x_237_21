@@ -265,7 +265,7 @@ Q0_A=$(read_pkts /sys/kernel/debug/hnat/qdma_txq0)
 Q32_A=$(read_pkts /sys/kernel/debug/hnat/qdma_txq32)
 Q11_A=$(read_pkts /sys/kernel/debug/hnat/qdma_txq11)
 Q43_A=$(read_pkts /sys/kernel/debug/hnat/qdma_txq43)
-CAKE_SENT_A=$(tc -s qdisc show dev "$CAKE_IF" 2>/dev/null | awk '/^ Sent /{print $2}')
+CAKE_SENT_A=$(tc -s qdisc show dev "$CAKE_IF" 2>/dev/null | awk '/^ Sent /{print $2; exit}')
 CAKE_SENT_A=${CAKE_SENT_A:-0}
 
 sleep 3
@@ -274,7 +274,7 @@ Q0_B=$(read_pkts /sys/kernel/debug/hnat/qdma_txq0)
 Q32_B=$(read_pkts /sys/kernel/debug/hnat/qdma_txq32)
 Q11_B=$(read_pkts /sys/kernel/debug/hnat/qdma_txq11)
 Q43_B=$(read_pkts /sys/kernel/debug/hnat/qdma_txq43)
-CAKE_SENT_B=$(tc -s qdisc show dev "$CAKE_IF" 2>/dev/null | awk '/^ Sent /{print $2}')
+CAKE_SENT_B=$(tc -s qdisc show dev "$CAKE_IF" 2>/dev/null | awk '/^ Sent /{print $2; exit}')
 CAKE_SENT_B=${CAKE_SENT_B:-0}
 
 calc_pps() {
