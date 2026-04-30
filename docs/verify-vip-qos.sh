@@ -101,7 +101,7 @@ get_dn_label() {
         6)  echo "18 AF21 数据 WRR高        " ;;
         7)  echo "16     CS2 WRR           " ;;
         8)  echo "10 AF11 批量 WRR          " ;;
-        9)  echo "8  CS1  低优先级 WRR      " ;;
+        9)  echo "8  CS1  后台/清道夫(RFC<BE) " ;;
         10) echo "4       极低 WRR          " ;;
         11) echo "0  BE  ★普通流量 WRR最低  " ;;
     esac
@@ -130,7 +130,7 @@ get_up_label() {
         38) echo "18 AF21 数据 WRR高        " ;;
         39) echo "16     CS2 WRR           " ;;
         40) echo "10 AF11 批量 WRR          " ;;
-        41) echo "8  CS1  低优先级 WRR      " ;;
+        41) echo "8  CS1  后台/清道夫(RFC<BE) " ;;
         42) echo "4       极低 WRR          " ;;
         43) echo "0  BE  ★普通流量 WRR最低  " ;;
     esac
