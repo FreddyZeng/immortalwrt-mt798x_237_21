@@ -231,13 +231,14 @@ case "$1" in
 
     if [ $id -eq 64 ]; then
 
-        iptables -t mangle -D eqos -s $ip -j DSCP --set-dscp 46
-        iptables -t mangle -D eqos -d $ip -j DSCP --set-dscp 46
-        ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j MARK --set-mark 46
-        ebtables -t nat -D eqos -p ipv6 -d $macaddr -j mark --mark-set 46
+        iptables -t mangle -D eqos -s $ip -j DSCP --set-dscp 46 2>/dev/null
+        iptables -t mangle -D eqos -d $ip -j DSCP --set-dscp 46 2>/dev/null
+        # BUG-fix: IPv6 上行必须使用 DSCP 而非 MARK，否则硬件 HNAT QoS 无法识别
+        ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j DSCP --set-dscp 46 2>/dev/null
+        ebtables -t nat -D eqos -p ipv6 -d $macaddr -j mark --mark-set 46 2>/dev/null
 
         iptables -t mangle -A eqos -s $ip -j DSCP --set-dscp 46
-        ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j MARK --set-mark 46
+        ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j DSCP --set-dscp 46
 
         iptables -t mangle -A eqos -d $ip -j DSCP --set-dscp 46
         ebtables -t nat -A eqos -p ipv6 -d $macaddr -j mark --mark-set 46
@@ -247,7 +248,8 @@ case "$1" in
         # BUG-4 fix: 删除旧规则时, 先从累加器减去该设备的速率
         iptables -t mangle -D eqos -s $ip -j DSCP --set-dscp 2 2>/dev/null
         iptables -t mangle -D eqos -d $ip -j DSCP --set-dscp 2 2>/dev/null
-        ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j MARK --set-mark 2 2>/dev/null
+        # BUG-fix: 同上，必须使用 DSCP
+        ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j DSCP --set-dscp 2 2>/dev/null
         ebtables -t nat -D eqos -p ipv6 -d $macaddr -j mark --mark-set 2 2>/dev/null
 
         # 如果删除的规则存在(即重新添加同一设备), 需要先减去旧速率
