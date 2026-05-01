@@ -38,11 +38,13 @@ iptables_stop() {
     echo "10 0" > /sys/kernel/debug/hnat/hnat_setting
     echo "11 1" >/sys/kernel/debug/hnat/hnat_setting
     for i in $(seq 0 31); do
-    echo 0 0 0 0 0 4 4 > $hqos_path/qdma_txq$i
+    echo 0 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq$i
     done
     for i in $(seq 32 63); do
-    echo 1 0 0 0 0 4 4 > $hqos_path/qdma_txq$i
+    echo 1 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq$i
     done
+    # 清零限速累加器
+    rm -f /tmp/eqos_q31_rate /tmp/eqos_q63_rate
     echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch0
     echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch1
     echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch2
