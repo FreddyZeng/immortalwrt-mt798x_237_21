@@ -1558,6 +1558,11 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 	u8  dscp = 0;
 	struct net_device *master_dev = (struct net_device *)dev;
 	struct mtk_mac *mac;
+	__be32 lan_ip = 0;
+	__be32 hash_ip = 0;
+	__be32 orig_sip = 0;
+	__be32 new_dip_val = 0;
+	enum hqos_direction dir = HQOS_LOCAL;
 
 	ct = nf_ct_get(skb, &ctinfo);
 	
@@ -1987,11 +1992,6 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
     // 所以: 上行 LAN IP = sip, 下行 LAN IP = new_dip
     // lan_ip: 用于方向检测(必须是192.168.109-119范围的LAN IP)
     // hash_ip: 用于per-user队列hash(任意可区分设备的值)
-    __be32 lan_ip = 0;
-    __be32 hash_ip = 0;
-    __be32 orig_sip = 0;
-    __be32 new_dip_val = 0;
-    enum hqos_direction dir = HQOS_LOCAL;
     if (IS_IPV4_HNAPT(&entry) || IS_IPV4_HNAT(&entry)) {
         const uint8_t *s, *d;
         orig_sip = htonl(entry.ipv4_hnapt.sip);
