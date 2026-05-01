@@ -1607,6 +1607,7 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 
 				entry.ipv4_dslite.bfib1.rmt = 1;
 				entry.ipv4_dslite.iblk2.dscp = iph->tos;
+				dscp = iph->tos;  // BUG-2 fix: 同步局部变量用于 dscp_to_queue()
 				entry.ipv4_dslite.vlan1 = hw_path->vlan_id;
 				if (hnat_priv->data->per_flow_accounting)
 					entry.ipv4_dslite.iblk2.mibf = 1;
@@ -1735,6 +1736,7 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 			entry.ipv6_5t_route.iblk2.dscp =
 				(ip6h->priority << 4 |
 				 (ip6h->flow_lbl[0] >> 4));
+			dscp = entry.ipv6_5t_route.iblk2.dscp;  // BUG-1 fix: 同步局部变量用于 dscp_to_queue()
 			break;
 
 		case NEXTHDR_IPIP:

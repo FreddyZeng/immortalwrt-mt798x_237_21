@@ -77,7 +77,7 @@ start_service() {
 stop_service() {
 	eqos stop
 	iptables -t mangle -F PREROUTING
-	rm /etc/hotplug.d/dhcp/99-eqos
+	rm -f /etc/hotplug.d/dhcp/99-eqos
 }
 
 reload_service() {

@@ -47,8 +47,8 @@ iptables_stop() {
     for i in $(seq 32 63); do
     echo 1 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq$i
     done
-    # 清零限速累加器
-    rm -f /tmp/eqos_q31_rate /tmp/eqos_q63_rate
+    # 清零限速累加器和per-device速率记录
+    rm -f /tmp/eqos_q31_rate /tmp/eqos_q63_rate /tmp/eqos_dev_up_* /tmp/eqos_dev_dl_*
     echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch0
     echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch1
     echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch2
@@ -129,9 +129,10 @@ case "$1" in
     ;;
     "start")
     stop_qos
-    # 清零限速累加器
+    # 清零限速累加器和per-device速率记录
     echo 0 > /tmp/eqos_q31_rate
     echo 0 > /tmp/eqos_q63_rate
+    rm -f /tmp/eqos_dev_up_* /tmp/eqos_dev_dl_*
     iptables_start_prepare
 #        start_qos $2 $3
     iptables_start_inital
@@ -243,16 +244,51 @@ case "$1" in
 
     elif [ $id -lt 64 ]; then
         # 限速设备: 强制标记 DSCP 2 → 内核映射到 Q31/Q63 (硬件限速队列)
-        iptables -t mangle -D eqos -s $ip -j DSCP --set-dscp 2
-        iptables -t mangle -D eqos -d $ip -j DSCP --set-dscp 2
-        ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j MARK --set-mark 2
-        ebtables -t nat -D eqos -p ipv6 -d $macaddr -j mark --mark-set 2
+        # BUG-4 fix: 删除旧规则时, 先从累加器减去该设备的速率
+        iptables -t mangle -D eqos -s $ip -j DSCP --set-dscp 2 2>/dev/null
+        iptables -t mangle -D eqos -d $ip -j DSCP --set-dscp 2 2>/dev/null
+        ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j MARK --set-mark 2 2>/dev/null
+        ebtables -t nat -D eqos -p ipv6 -d $macaddr -j mark --mark-set 2 2>/dev/null
+
+        # 如果删除的规则存在(即重新添加同一设备), 需要先减去旧速率
+        # 检查该设备是否已有记录, 如有则减去其旧速率后再加新速率
+        old_up_file="/tmp/eqos_dev_up_${ip}"
+        old_dl_file="/tmp/eqos_dev_dl_${ip}"
+        old_up=$(cat "$old_up_file" 2>/dev/null || echo 0)
+        old_dl=$(cat "$old_dl_file" 2>/dev/null || echo 0)
+
+        # 从总累加器中减去该设备的旧速率
+        if [ "$old_up" -gt 0 ]; then
+            cur_up=$(cat /tmp/eqos_q31_rate 2>/dev/null || echo 0)
+            new_total=$((cur_up - old_up))
+            [ $new_total -lt 0 ] && new_total=0
+            echo $new_total > /tmp/eqos_q31_rate
+            if [ $new_total -gt 0 ]; then
+                echo 2 1 ${new_total} 1 ${new_total} 1 1 > /sys/kernel/debug/hnat/qdma_txq31
+            else
+                echo 2 0 0 0 0 1 0 > /sys/kernel/debug/hnat/qdma_txq31
+            fi
+        fi
+        if [ "$old_dl" -gt 0 ]; then
+            cur_dl=$(cat /tmp/eqos_q63_rate 2>/dev/null || echo 0)
+            new_total=$((cur_dl - old_dl))
+            [ $new_total -lt 0 ] && new_total=0
+            echo $new_total > /tmp/eqos_q63_rate
+            if [ $new_total -gt 0 ]; then
+                echo 3 1 ${new_total} 1 ${new_total} 1 1 > /sys/kernel/debug/hnat/qdma_txq63
+            else
+                echo 3 0 0 0 0 1 0 > /sys/kernel/debug/hnat/qdma_txq63
+            fi
+        fi
 
         iptables -t mangle -A eqos -s $ip -j DSCP --set-dscp 2
         ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j MARK --set-mark 2
 
         # 限速设备统一使用 Q31(上行)/Q63(下行) 背景队列
-        # 多设备累加: 读取已有速率 + 本次速率 = 总速率
+        # 记录每设备速率用于后续删除时减法, 再累加到总限速
+        echo $up > "$old_up_file"
+        echo $dl > "$old_dl_file"
+
         if [ $up -ne 0 ]; then
             cur_up=$(cat /tmp/eqos_q31_rate 2>/dev/null || echo 0)
             new_up=$((cur_up + up))
