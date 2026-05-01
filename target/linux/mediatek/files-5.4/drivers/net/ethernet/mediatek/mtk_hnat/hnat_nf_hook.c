@@ -2041,11 +2041,14 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 		}
 
 		// 队列分配完成, 重写非语音/VIP的出站DSCP
-		// 保留 EF(46→tos 0xB8) 和 VA(44→tos 0xB0)
-		// 上行: 提升为 CS4(32→tos 0x80), 让ISP给予较高转发优先级
+		// TOS字节 = [DSCP 6位][ECN 2位], 比较时必须用掩码 0xFC 忽略 ECN
+		// 保留 EF(DSCP 46→tos 0xB8) 和 VA(DSCP 44→tos 0xB0)
+		// 上行: 提升为 CS4(DSCP 32→tos 0x80), 让ISP给予较高转发优先级
 		// 下行: 清零, LAN设备不需要外部DSCP标记
-		if (dscp != 0xB8 && dscp != 0xB0) {
-			uint8_t out_dscp = (dir == HQOS_UPLOAD) ? 0x80 : 0;
+		if ((dscp & 0xFC) != 0xB8 && (dscp & 0xFC) != 0xB0) {
+			// 保留原始 ECN 位, 只替换 DSCP 部分
+			uint8_t ecn_bits = dscp & 0x03;
+			uint8_t out_dscp = ((dir == HQOS_UPLOAD) ? 0x80 : 0) | ecn_bits;
 			if (IS_IPV4_HNAPT(&entry) || IS_IPV4_HNAT(&entry)) {
 				entry.ipv4_hnapt.iblk2.dscp = out_dscp;
 			} else if (IS_IPV4_DSLITE(&entry) || IS_IPV4_MAPE(&entry) || IS_IPV4_MAPT(&entry)) {
