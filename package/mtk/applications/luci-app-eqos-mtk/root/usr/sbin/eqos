@@ -80,85 +80,23 @@ iptables_start_inital() {
 }
 
 dscp_to_queue() {
-
     local dscp=$1
 
-    # Initialize queue and offset
-    local queue=5  # 初始化队列值
-    local offset=0
-
-    # Keep trying with decreasing DSCP values until a match is found or DSCP becomes negative
-    while [ $dscp -ge 0 ]; do  # DSCP最大值为63(6位二进制)
     if [ $dscp -eq 46 ]; then
-        queue=0
-        offset=0  # EF - 实时语音流，最高优先级
-        break
-    elif [ $dscp -eq 46 ]; then  # Note: This is a duplicate condition from the original code
-        queue=0
-        offset=0  # EF - 实时语音流，最高优先级
-        break
-    elif [ $dscp -eq 45 ]; then
-        queue=1
-        offset=0  # EF - 实时语音流，最高优先级
-        break
-    elif [ $dscp -eq 44 ]; then
-        queue=2
-        offset=0
-        break
-    elif [ $dscp -eq 43 ]; then
-        queue=3
-        offset=0
-        break
-    elif [ $dscp -eq 42 ]; then
-        queue=4
-        offset=0
-        break
-    elif [ $dscp -eq 41 ]; then
-        queue=5
-        offset=0
-        break
-    elif [ $dscp -eq 56 ]; then
-        queue=5
-        offset=1  # CS7 - 网络管理流
-        break
-    elif [ $dscp -eq 48 ]; then
-        queue=5
-        offset=1  # CS6 - 网络控制流
-        break
-    elif [ $dscp -eq 40 ]; then
-        queue=5
-        offset=2  # CS5 - 视频会议，关键业务应用
-        break
-    elif [ $dscp -ge 32 ] && [ $dscp -le 39 ]; then
-        queue=5
-        offset=3  # AF4x - 高优视频流
-        break
-    elif [ $dscp -ge 24 ] && [ $dscp -le 31 ]; then
-        queue=5
-        offset=4  # AF3x - 普通视频流
-        break
+        echo 0    # EF → Q0 (CAKE tin7)
+    elif [ $dscp -eq 48 ] || [ $dscp -eq 56 ]; then
+        echo 1    # CS6/CS7 → Q1 (CAKE tin6)
+    elif [ $dscp -eq 32 ] || [ $dscp -eq 40 ] || [ $dscp -eq 44 ]; then
+        echo 2    # CS4/CS5/VA → Q2 (CAKE tin5)
     elif [ $dscp -ge 16 ] && [ $dscp -le 23 ]; then
-        queue=5
-        offset=5  # AF2x - 网页、应用、交互
-        break
-    elif [ $dscp -ge 8 ] && [ $dscp -le 15 ]; then
-        queue=5
-        offset=7  # AF1x / CS1 - 背景任务，低优先级流
-        break
-    elif [ $dscp -eq 0 ]; then
-        queue=5
-        offset=6  # CS0 - 默认流量，正常优先级
-        break
+        echo 3    # CS2/AF2x → Q3 (CAKE tin4)
+    elif ([ $dscp -ge 24 ] && [ $dscp -le 31 ]) || ([ $dscp -ge 33 ] && [ $dscp -le 39 ]); then
+        echo 4    # AF3x/AF4x → Q4 (CAKE tin3)
+    elif [ $dscp -eq 1 ] || ([ $dscp -ge 8 ] && [ $dscp -le 15 ]); then
+        echo 31   # LE/CS1/AF1x → Q31 (CAKE tin0+1, 最低)
+    else
+        echo 5    # CS0(0) + 未定义 → Q5 (默认, 内核中按IP hash到Q5-Q30)
     fi
-
-    dscp=$((dscp - 1))
-    done
-
-    # Calculate final queue value
-    local result=$((queue + offset))
-
-    # Return result
-    echo $result
 }
 
 

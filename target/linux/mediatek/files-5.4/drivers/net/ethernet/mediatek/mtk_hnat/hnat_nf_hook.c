@@ -1422,83 +1422,39 @@ struct foe_entry ppe_fill_info_blk(struct ethhdr *eth, struct foe_entry entry,
 }
 
 /**
- * 输入: TOS字节（IP头部的第二字节）
+ * 输入: TOS字节, 局域网侧IP地址 (网络字节序)
+ * 输出: 硬件队列ID (0-31, 连续)
+ *
+ * 队列布局 (队列号越小优先级越高):
+ *   Q0     = EF(46)              VIP最高优先级   (CAKE tin7)
+ *   Q1     = CS6(48)/CS7(56)     网络控制        (CAKE tin6)
+ *   Q2     = CS4(32)/CS5(40)/VA(44) 实时         (CAKE tin5)
+ *   Q3     = CS2/AF2x(16-23)    交互应用        (CAKE tin4)
+ *   Q4     = AF3x(24-31)/AF4x(33-39) 视频流     (CAKE tin3)
+ *   Q5-Q30 = CS0(0) + 未定义     per-user队列    (CAKE tin2, 按IP hash)
+ *   Q31    = LE(1)/CS1/AF1x(8-15) 背景最低      (CAKE tin0+1)
  */
-static uint8_t dscp_to_queue(uint8_t tos) {
+static uint8_t dscp_to_queue(uint8_t tos, __be32 lan_ip) {
     uint8_t dscp = tos >> 2;  // 提取高6位为DSCP
-    uint8_t queue = 5;  // 初始化队列值
-    uint8_t offset = 0;
 
-    // 不断尝试，每次减少1，直到找到匹配或DSCP值减到0
-    while (dscp >= 0) {  // DSCP最大值为63(6位二进制)
-        if (dscp == 46) {
-            queue = 0;
-            offset = 0;  // EF - 实时语音流，最高优先级
-            break;
-        } else if (dscp == 46) {
-            queue = 0;
-            offset = 0;  // EF - 实时语音流，最高优先级
-            break;
-        } else if (dscp == 45) {
-            queue = 1;
-            offset = 0;  // EF - 实时语音流，最高优先级
-            break;
-        } else if (dscp == 44) {
-            queue = 2;
-            offset = 0;
-            break;
-        } else if (dscp == 43) {
-            queue = 3;
-            offset = 0;
-            break;
-        } else if (dscp == 42) {
-            queue = 4;
-            offset = 0;
-            break;
-        } else if (dscp == 41) {
-            queue = 5;
-            offset = 0;
-            break;
-        } else if (dscp == 56) {
-            queue = 5;
-            offset = 1;  // CS7 - 网络管理流
-            break;
-        } else if (dscp == 48) {
-            queue = 5;
-            offset = 1;  // CS6 - 网络控制流
-            break;
-        } else if (dscp == 40) {
-            queue = 5;
-            offset = 2;  // CS5 - 视频会议，关键业务应用
-            break;
-        } else if (dscp >= 32 && dscp <= 39) {
-            queue = 5;
-            offset = 3;  // AF4x - 高优视频流
-            break;
-        } else if (dscp >= 24 && dscp <= 31) {
-            queue = 5;
-            offset = 4;  // AF3x - 普通视频流
-            break;
-        } else if (dscp >= 16 && dscp <= 23) {
-            queue = 5;
-            offset = 5;  // AF2x - 网页、应用、交互
-            break;
-        } else if (dscp >= 8 && dscp <= 15) {
-            queue = 5;
-            offset = 7;  // AF1x / CS1 - 背景任务，低优先级流
-            break;
-        } else if (dscp == 0) {
-            queue = 5;
-            offset = 6;  // CS0 - 默认流量，正常优先级
-            break;
-        }
-
-        dscp--;
+    if (dscp == 46) {
+        return 0;   // EF → Q0 (CAKE tin7)
+    } else if (dscp == 48 || dscp == 56) {
+        return 1;   // CS6/CS7 → Q1 (CAKE tin6)
+    } else if (dscp == 32 || dscp == 40 || dscp == 44) {
+        return 2;   // CS4/CS5/VA → Q2 (CAKE tin5)
+    } else if (dscp >= 16 && dscp <= 23) {
+        return 3;   // CS2/AF2x → Q3 (CAKE tin4)
+    } else if ((dscp >= 24 && dscp <= 31) || (dscp >= 33 && dscp <= 39)) {
+        return 4;   // AF3x/AF4x → Q4 (CAKE tin3)
+    } else if (dscp == 1 || (dscp >= 8 && dscp <= 15)) {
+        return 31;  // LE/CS1/AF1x → Q31 (CAKE tin0+1, 最低)
+    } else {
+        // CS0(0) + 未定义 → 按IP last_octet hash 分配到 Q5-Q30
+        // 26个队列, 实现 per-user 硬件队列隔离
+        uint8_t last_octet = ((const uint8_t *)&lan_ip)[3];
+        return 5 + (last_octet % 26);
     }
-
-    queue = queue + offset;
-
-    return queue;
 }
 
 // 判断 DSCP 是否为默认白名单（只允许 CS0 使用默认队列）
@@ -1522,7 +1478,7 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 	enum ip_conntrack_info ctinfo;
 	u32 gmac = NR_DISCARD;
 	int udp = 0;
-	u32 qid = 43;
+	u32 qid = 37;  // 默认下行队列 = Q5(默认) + 32
 	int port_id = 0;
 	int mape = 0;
 	u8  dscp = 0;
@@ -1944,13 +1900,27 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 	else if (IS_PPPQ_MODE && (IS_DSA_1G_LAN(dev) || IS_DSA_WAN(dev)))
 		qid = port_id & MTK_QDMA_TX_MASK;
 	else
-		qid = 43;
+		qid = 37;  // 默认下行队列 = Q5(默认) + 32
 
 
 
     if (IS_HQOS_MODE && (hnat_priv->dscp_en)) {
 
-	qid = dscp_to_queue(dscp);
+	// 绝对锁定局域网 IP: 检查 saddr/daddr 谁在 192.168.109-120.x
+	__be32 lan_ip = 0;
+	struct iphdr *iph_qos = ip_hdr(skb);
+	if (iph_qos) {
+	    const uint8_t *s = (const uint8_t *)&iph_qos->saddr;
+	    const uint8_t *d = (const uint8_t *)&iph_qos->daddr;
+
+	    if (s[0] == 192 && s[1] == 168 && s[2] >= 109 && s[2] <= 120) {
+		lan_ip = iph_qos->saddr;
+	    } else if (d[0] == 192 && d[1] == 168 && d[2] >= 109 && d[2] <= 120) {
+		lan_ip = iph_qos->daddr;
+	    }
+	}
+
+	qid = dscp_to_queue(dscp, lan_ip);
 
 	    if (!IS_WAN(dev) && strncmp(dev->name, "apcli", 5) != 0 && strncmp(dev->name, "ifb4apcli", 9) != 0) {
 		    qid = qid + 32;
