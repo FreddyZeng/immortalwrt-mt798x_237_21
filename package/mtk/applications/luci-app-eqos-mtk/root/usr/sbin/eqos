@@ -63,7 +63,6 @@ iptables_start_prepare() {
     iptables -t mangle -F dscp_clear
     iptables -t mangle -A dscp_clear -m dscp --dscp 44 -j RETURN
     iptables -t mangle -A dscp_clear -m dscp --dscp 46 -j DSCP --set-dscp 44
-    iptables -t mangle -A dscp_clear -j DSCP --set-dscp 0
     iptables -t mangle -D FORWARD -j dscp_clear 2>/dev/null
     iptables -t mangle -I FORWARD 1 -j dscp_clear
 
@@ -71,7 +70,6 @@ iptables_start_prepare() {
     ip6tables -t mangle -F dscp_clear
     ip6tables -t mangle -A dscp_clear -m dscp --dscp 44 -j RETURN
     ip6tables -t mangle -A dscp_clear -m dscp --dscp 46 -j DSCP --set-dscp 44
-    ip6tables -t mangle -A dscp_clear -j DSCP --set-dscp 0
     ip6tables -t mangle -D FORWARD -j dscp_clear 2>/dev/null
     ip6tables -t mangle -I FORWARD 1 -j dscp_clear
 }
