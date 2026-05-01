@@ -51,12 +51,14 @@ start_service() {
         fi  
         
         if [ "$smarthqos" -eq "1" ]; then  
-        for i in $(seq 1 31); do
+        # 上行 per-user 队列: Q5-Q31 (跳过 Q0-Q4 优先队列)
+        for i in $(seq 5 31); do
         	if [ "$upload" -ne "0" ]; then
 		echo 2 1 $(($upload*225)) 1 $(($upload*1000)) 4 1 > /sys/kernel/debug/hnat/qdma_txq$i
 		fi
 		done
-		for i in $(seq 33 63); do
+		# 下行 per-user 队列: Q37-Q63 (跳过 Q32-Q36 优先队列)
+		for i in $(seq 37 63); do
 		if [ "$download" -ne "0" ]; then
 		echo 3 1 $(($download*200)) 1 $(($download*1000)) 4 1 > /sys/kernel/debug/hnat/qdma_txq$i
 		fi
@@ -67,23 +69,9 @@ start_service() {
 	bash /usr/sbin/loadbalance "$interface"
         fi
         config_foreach parse_device "device"
-        if [ "$smarthqos" -eq "1" ]; then
-        rm /etc/hotplug.d/dhcp/99-eqos
-	cat << 'EOF' > /etc/hotplug.d/dhcp/99-eqos
-#!/bin/sh
-
-# 只有在新增 DHCP 租约时才执行操作
-if [ "$ACTION" = "add" ]; then
-
-    # 执行指定的命令
-    /etc/init.d/dhcp_mark.sh eqos init
-fi
-EOF
-
-        chmod +x /etc/hotplug.d/dhcp/99-eqos
-        /etc/init.d/dnsmasq restart
-        /etc/init.d/dhcp_mark.sh eqos init
-        fi   
+        # smarthqos DHCP DSCP 分配已禁用:
+        # dhcp_mark.sh 会给每个设备随机分配 DSCP 1-31, 与我们的 DSCP→队列映射冲突
+        # per-user 隔离现在由内核 IP hash (last_octet % 26) 实现, 不需要 DHCP 分配
 }
 
 stop_service() {
