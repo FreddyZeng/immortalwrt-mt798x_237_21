@@ -1441,14 +1441,14 @@ enum hqos_direction {
  *   2) 硬件入口标记: FROM_GE_WAN = 下行, FROM_GE_LAN = 上行
  *   3) 其他来源 (WiFi/PPD/EXT): 本地流量, 不限速
  */
-static enum hqos_direction get_hqos_direction(const struct iphdr *iph,
+static enum hqos_direction get_hqos_direction(__be32 orig_sip, __be32 orig_dip,
 					      __be32 lan_ip,
 					      const struct sk_buff *skb) {
-    // 第一优先: 109-119 范围内, IP 地址精确判断
-    if (lan_ip && iph) {
-	if (lan_ip == iph->daddr)
+    // 第一优先: 109-119 范围内, 用原始 pre-NAT IP 精确判断
+    if (lan_ip) {
+	if (lan_ip == orig_dip)
 	    return HQOS_DOWNLOAD;  // 目标是 LAN IP = 下行
-	if (lan_ip == iph->saddr)
+	if (lan_ip == orig_sip)
 	    return HQOS_UPLOAD;    // 来源是 LAN IP = 上行
     }
     // 第二优先: 硬件 GMAC 入口标记
@@ -1948,22 +1948,27 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 
     if (IS_HQOS_MODE && (hnat_priv->dscp_en)) {
 
-	// 绝对锁定局域网 IP: 检查 saddr/daddr 谁在 192.168.109-119.x
+	// 绝对锁定局域网 IP: 检查 sip/dip (原始 pre-NAT 地址) 谁在 192.168.109-119.x
+	// 注意: ip_hdr(skb) 是 POST_ROUTING 后的地址, 上行已被 SNAT 为 WAN IP
+	// 必须使用 FOE entry 中的原始 sip/dip (主机字节序, 来自 conntrack)
 	__be32 lan_ip = 0;
-	struct iphdr *iph_qos = ip_hdr(skb);
-	if (iph_qos) {
-	    const uint8_t *s = (const uint8_t *)&iph_qos->saddr;
-	    const uint8_t *d = (const uint8_t *)&iph_qos->daddr;
+	if (IS_IPV4_HNAPT(&entry) || IS_IPV4_HNAT(&entry)) {
+	    __be32 orig_sip = htonl(entry.ipv4_hnapt.sip);  // 原始源IP (主机→网络字节序)
+	    __be32 orig_dip = htonl(entry.ipv4_hnapt.dip);  // 原始目的IP
+	    const uint8_t *s = (const uint8_t *)&orig_sip;
+	    const uint8_t *d = (const uint8_t *)&orig_dip;
 
 	    if (s[0] == 192 && s[1] == 168 && s[2] >= 109 && s[2] <= 119) {
-		lan_ip = iph_qos->saddr;
+		lan_ip = orig_sip;
 	    } else if (d[0] == 192 && d[1] == 168 && d[2] >= 109 && d[2] <= 119) {
-		lan_ip = iph_qos->daddr;
+		lan_ip = orig_dip;
 	    }
 	}
 
 	{
-	    enum hqos_direction dir = get_hqos_direction(iph_qos, lan_ip, skb);
+	    __be32 orig_sip_n = htonl(entry.ipv4_hnapt.sip);
+	    __be32 orig_dip_n = htonl(entry.ipv4_hnapt.dip);
+	    enum hqos_direction dir = get_hqos_direction(orig_sip_n, orig_dip_n, lan_ip, skb);
 	    if (dir == HQOS_LOCAL) {
 		// 本地流量(LAN→LAN): 走 Q33 (sch1 SP 不限速), 避开 VIP 队列
 		qid = 33;
