@@ -91,7 +91,7 @@ return view.extend({
 		o.default = '0';
 		o.rmempty = true;
 		o.description = _('VIP=64: DSCP 46, highest priority queue Q0/Q32. Rate Limit<64: hardware queue Q31/Q63 with min/max rate. Software>64: tc htb software shaping.');
-		
+
 		o = s.option(form.Value, 'interfacename', _('InterfaceName(start from 0)'));
 		o.datatype = 'and(uinteger,min(0))';
 		o.rmempty = true;

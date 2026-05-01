@@ -1441,15 +1441,17 @@ enum hqos_direction {
  *   2) 硬件入口标记: FROM_GE_WAN = 下行, FROM_GE_LAN = 上行
  *   3) 其他来源 (WiFi/PPD/EXT): 本地流量, 不限速
  */
-static enum hqos_direction get_hqos_direction(__be32 orig_sip, __be32 orig_dip,
+static enum hqos_direction get_hqos_direction(__be32 orig_sip, __be32 new_dip,
 					      __be32 lan_ip,
 					      const struct sk_buff *skb) {
-    // 第一优先: 109-119 范围内, 用原始 pre-NAT IP 精确判断
+    // 第一优先: 109-119 范围内, 精确判断方向
+    // 上行: lan_ip == orig_sip (LAN 设备是原始源)
+    // 下行: lan_ip == new_dip (LAN 设备是 NAT 后目标)
     if (lan_ip) {
-	if (lan_ip == orig_dip)
-	    return HQOS_DOWNLOAD;  // 目标是 LAN IP = 下行
+	if (lan_ip == new_dip)
+	    return HQOS_DOWNLOAD;  // NAT后目标是 LAN IP = 下行
 	if (lan_ip == orig_sip)
-	    return HQOS_UPLOAD;    // 来源是 LAN IP = 上行
+	    return HQOS_UPLOAD;    // 原始源是 LAN IP = 上行
     }
     // 第二优先: 硬件 GMAC 入口标记
     if (FROM_GE_WAN(skb))
@@ -1948,28 +1950,30 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 
     if (IS_HQOS_MODE && (hnat_priv->dscp_en)) {
 
-	// 绝对锁定局域网 IP: 检查 sip/dip (原始 pre-NAT 地址) 谁在 192.168.109-119.x
-	// 注意: ip_hdr(skb) 是 POST_ROUTING 后的地址, 上行已被 SNAT 为 WAN IP
-	// 必须使用 FOE entry 中的原始 sip/dip (主机字节序, 来自 conntrack)
+	// 从 FOE entry 中提取 LAN IP 用于方向判断和 per-user 队列分配
+	// NAPT 地址映射:
+	//   上行: sip=LAN(111.x) → new_sip=WAN(101.88), dip=服务器 → new_dip=服务器
+	//   下行: sip=服务器 → new_sip=服务器, dip=WAN(101.88) → new_dip=LAN(111.x)
+	// 所以: 上行 LAN IP = sip, 下行 LAN IP = new_dip
 	__be32 lan_ip = 0;
 	__be32 orig_sip = 0;
-	__be32 orig_dip = 0;
+	__be32 new_dip_val = 0;
 	if (IS_IPV4_HNAPT(&entry) || IS_IPV4_HNAT(&entry)) {
 	    const uint8_t *s, *d;
-	    orig_sip = htonl(entry.ipv4_hnapt.sip);  // 原始源IP (主机→网络字节序)
-	    orig_dip = htonl(entry.ipv4_hnapt.dip);  // 原始目的IP
+	    orig_sip = htonl(entry.ipv4_hnapt.sip);      // 上行: LAN IP
+	    new_dip_val = htonl(entry.ipv4_hnapt.new_dip); // 下行: LAN IP
 	    s = (const uint8_t *)&orig_sip;
-	    d = (const uint8_t *)&orig_dip;
+	    d = (const uint8_t *)&new_dip_val;
 
 	    if (s[0] == 192 && s[1] == 168 && s[2] >= 109 && s[2] <= 119) {
-		lan_ip = orig_sip;
+		lan_ip = orig_sip;       // 上行: 源是 LAN 设备
 	    } else if (d[0] == 192 && d[1] == 168 && d[2] >= 109 && d[2] <= 119) {
-		lan_ip = orig_dip;
+		lan_ip = new_dip_val;    // 下行: NAT后目标是 LAN 设备
 	    }
 	}
 
 	{
-	    enum hqos_direction dir = get_hqos_direction(orig_sip, orig_dip, lan_ip, skb);
+	    enum hqos_direction dir = get_hqos_direction(orig_sip, new_dip_val, lan_ip, skb);
 	    if (dir == HQOS_LOCAL) {
 		// 本地流量(LAN→LAN): 走 Q33 (sch1 SP 不限速), 避开 VIP 队列
 		qid = 33;
