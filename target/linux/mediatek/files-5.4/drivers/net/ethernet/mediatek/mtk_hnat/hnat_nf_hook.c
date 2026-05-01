@@ -1906,16 +1906,16 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 
     if (IS_HQOS_MODE && (hnat_priv->dscp_en)) {
 
-	// 绝对锁定局域网 IP: 检查 saddr/daddr 谁在 192.168.109-120.x
+	// 绝对锁定局域网 IP: 检查 saddr/daddr 谁在 192.168.109-119.x
 	__be32 lan_ip = 0;
 	struct iphdr *iph_qos = ip_hdr(skb);
 	if (iph_qos) {
 	    const uint8_t *s = (const uint8_t *)&iph_qos->saddr;
 	    const uint8_t *d = (const uint8_t *)&iph_qos->daddr;
 
-	    if (s[0] == 192 && s[1] == 168 && s[2] >= 109 && s[2] <= 120) {
+	    if (s[0] == 192 && s[1] == 168 && s[2] >= 109 && s[2] <= 119) {
 		lan_ip = iph_qos->saddr;
-	    } else if (d[0] == 192 && d[1] == 168 && d[2] >= 109 && d[2] <= 120) {
+	    } else if (d[0] == 192 && d[1] == 168 && d[2] >= 109 && d[2] <= 119) {
 		lan_ip = iph_qos->daddr;
 	    }
 	}
