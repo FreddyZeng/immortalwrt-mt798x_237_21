@@ -32,9 +32,13 @@ iptables_stop() {
     ebtables -t nat -D POSTROUTING  -j eqos -p ipv6
     echo 0 > /sys/kernel/debug/hnat/qos_toggle
     sed -i '/\/etc\/init.d\/eqos start/d' /etc/firewall.user
-    # 清理 EF 降级规则
-    iptables -t mangle -D FORWARD -m dscp --dscp 46 -j DSCP --set-dscp 32
-    ip6tables -t mangle -D FORWARD -m dscp --dscp 46 -j DSCP --set-dscp 32
+    # 清理 dscp_clear 链
+    iptables -t mangle -D FORWARD -j dscp_clear 2>/dev/null
+    iptables -t mangle -F dscp_clear 2>/dev/null
+    iptables -t mangle -X dscp_clear 2>/dev/null
+    ip6tables -t mangle -D FORWARD -j dscp_clear 2>/dev/null
+    ip6tables -t mangle -F dscp_clear 2>/dev/null
+    ip6tables -t mangle -X dscp_clear 2>/dev/null
     echo "10 0" > /sys/kernel/debug/hnat/hnat_setting
     echo "11 1" >/sys/kernel/debug/hnat/hnat_setting
     for i in $(seq 0 31); do
@@ -52,13 +56,24 @@ iptables_stop() {
 }
 
 iptables_start_prepare() {
-    # 仅降级 EF(46)→CS4(32), 保留其他 DSCP 标记
-    # 防止用户设备伪造 EF 抢占 VIP Q0, 降级后走 Q2(实时交互)
-    # eqos 链中的 VIP/109小包规则会重新标记为 EF(46)→Q0
-    iptables -t mangle -D FORWARD -m dscp --dscp 46 -j DSCP --set-dscp 32
-    iptables -t mangle -A FORWARD -m dscp --dscp 46 -j DSCP --set-dscp 32
-    ip6tables -t mangle -D FORWARD -m dscp --dscp 46 -j DSCP --set-dscp 32
-    ip6tables -t mangle -A FORWARD -m dscp --dscp 46 -j DSCP --set-dscp 32
+    # EF(46) 降级为 VA(44) 即时语音, Q0 只留给 eqos 指定的 VIP 设备
+    # VA(44) 保留, 走 Q2 实时交互队列
+    # 其他全部清零, eqos 链会重新标记: VIP=46, 限速=2, 109小包=46
+    iptables -t mangle -N dscp_clear 2>/dev/null
+    iptables -t mangle -F dscp_clear
+    iptables -t mangle -A dscp_clear -m dscp --dscp 44 -j RETURN
+    iptables -t mangle -A dscp_clear -m dscp --dscp 46 -j DSCP --set-dscp 44
+    iptables -t mangle -A dscp_clear -j DSCP --set-dscp 0
+    iptables -t mangle -D FORWARD -j dscp_clear 2>/dev/null
+    iptables -t mangle -I FORWARD 1 -j dscp_clear
+
+    ip6tables -t mangle -N dscp_clear 2>/dev/null
+    ip6tables -t mangle -F dscp_clear
+    ip6tables -t mangle -A dscp_clear -m dscp --dscp 44 -j RETURN
+    ip6tables -t mangle -A dscp_clear -m dscp --dscp 46 -j DSCP --set-dscp 44
+    ip6tables -t mangle -A dscp_clear -j DSCP --set-dscp 0
+    ip6tables -t mangle -D FORWARD -j dscp_clear 2>/dev/null
+    ip6tables -t mangle -I FORWARD 1 -j dscp_clear
 }
 
 iptables_start_inital() {

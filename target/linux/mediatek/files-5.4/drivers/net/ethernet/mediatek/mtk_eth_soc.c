@@ -1006,7 +1006,7 @@ static int mtk_tx_map(struct sk_buff *skb, struct net_device *dev,
 	int i, n_desc = 1;
 	u32 txd4 = 0, txd5 = 0, txd6 = 0;
 	u32 fport;
-	u32 qid = 33;
+	u32 qid = 1;
 	int k = 0;
 
 	itxd = ring->next_free;
@@ -1031,12 +1031,12 @@ static int mtk_tx_map(struct sk_buff *skb, struct net_device *dev,
 
 	nr_frags = skb_shinfo(skb)->nr_frags;
 
-        // CPU慢路径统一走Q33, skb->mark仅用于路由选择(分流)不影响队列
-        qid = 33;
+        // CPU慢路径按方向分流: GMAC1(LAN)=下行Q33, GMAC2(WAN)=上行Q1
+        qid = mac->id ? 1 : 33;
 
 #if defined(CONFIG_MEDIATEK_NETSYS_V2)
 	if(!qid && mac->id)
-		qid = MTK_QDMA_GMAC2_QID;
+		qid = 1;  // GMAC2(WAN)上行兜底Q1
 #endif
 
 	if (MTK_HAS_CAPS(eth->soc->caps, MTK_NETSYS_V2)) {

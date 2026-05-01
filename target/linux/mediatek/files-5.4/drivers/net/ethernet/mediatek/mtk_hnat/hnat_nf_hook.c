@@ -1522,7 +1522,7 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 	enum ip_conntrack_info ctinfo;
 	u32 gmac = NR_DISCARD;
 	int udp = 0;
-	u32 qid = 33;   // 默认 Q33 (sch1 SP不限速), 避开 Q0/Q32 VIP 专属队列
+	u32 qid = 1;    // 默认 Q1 (sch0 上行), dscp_en开启后由dscp_to_queue覆盖
 	int port_id = 0;
 	int mape = 0;
 	u8  dscp = 0;
@@ -1940,50 +1940,97 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 	}
 
 	if (IS_HQOS_MODE || skb->mark >= MAX_PPPQ_PORT_NUM)
-		qid = 33;   // HQOS模式初始Q33, dscp_en块会覆盖为正确队列
+		qid = 1;    // HQOS模式初始Q1(上行), dscp_en块会覆盖为正确队列
 	else if (IS_PPPQ_MODE && (IS_DSA_1G_LAN(dev) || IS_DSA_WAN(dev)))
 		qid = port_id & MTK_QDMA_TX_MASK;
 	else
-		qid = 33;   // 默认 Q33 (sch1 SP不限速), 避开 Q0/Q32 VIP 专属队列
+		qid = 1;    // 默认 Q1 (sch0 上行), 避开 Q0/Q32 VIP 专属队列
 
 
+
+    // 从 FOE entry 中提取 LAN IP 用于方向判断和 per-user 队列分配
+    // NAPT 地址映射:
+    //   上行: sip=LAN(111.x) → new_sip=WAN(101.88), dip=服务器 → new_dip=服务器
+    //   下行: sip=服务器 → new_sip=服务器, dip=WAN(101.88) → new_dip=LAN(111.x)
+    // 所以: 上行 LAN IP = sip, 下行 LAN IP = new_dip
+    // lan_ip: 用于方向检测(必须是192.168.109-119范围的LAN IP)
+    // hash_ip: 用于per-user队列hash(任意可区分设备的值)
+    __be32 lan_ip = 0;
+    __be32 hash_ip = 0;
+    __be32 orig_sip = 0;
+    __be32 new_dip_val = 0;
+    enum hqos_direction dir = HQOS_LOCAL;
+    if (IS_IPV4_HNAPT(&entry) || IS_IPV4_HNAT(&entry)) {
+        const uint8_t *s, *d;
+        orig_sip = htonl(entry.ipv4_hnapt.sip);
+        new_dip_val = htonl(entry.ipv4_hnapt.new_dip);
+        s = (const uint8_t *)&orig_sip;
+        d = (const uint8_t *)&new_dip_val;
+
+        if (s[0] == 192 && s[1] == 168 && s[2] >= 109 && s[2] <= 119) {
+            lan_ip = orig_sip;
+        } else if (d[0] == 192 && d[1] == 168 && d[2] >= 109 && d[2] <= 119) {
+            lan_ip = new_dip_val;
+        }
+        hash_ip = lan_ip;
+    } else if (IS_IPV4_DSLITE(&entry) || IS_IPV4_MAPE(&entry) || IS_IPV4_MAPT(&entry)) {
+        const uint8_t *s;
+        orig_sip = htonl(entry.ipv4_dslite.sip);
+        s = (const uint8_t *)&orig_sip;
+        if (s[0] == 192 && s[1] == 168 && s[2] >= 109 && s[2] <= 119) {
+            lan_ip = orig_sip;
+        }
+#if defined(CONFIG_MEDIATEK_NETSYS_V2)
+        else {
+            const uint8_t *d;
+            new_dip_val = htonl(entry.ipv4_dslite.new_dip);
+            d = (const uint8_t *)&new_dip_val;
+            if (d[0] == 192 && d[1] == 168 && d[2] >= 109 && d[2] <= 119) {
+                lan_ip = new_dip_val;
+            }
+        }
+#endif
+        hash_ip = lan_ip;
+    } else if (IS_IPV6_5T_ROUTE(&entry)) {
+        // IPv6: 不设 lan_ip(无法子网匹配), 方向由 FROM_GE_WAN/LAN 判断
+        // hash_ip 取 sip3 用于 per-user 队列分配
+        hash_ip = htonl(entry.ipv6_5t_route.ipv6_sip3);
+        if (!hash_ip) hash_ip = htonl(entry.ipv6_5t_route.ipv6_dip3);
+    } else if (IS_IPV6_3T_ROUTE(&entry)) {
+        hash_ip = htonl(entry.ipv6_3t_route.ipv6_sip3);
+        if (!hash_ip) hash_ip = htonl(entry.ipv6_3t_route.ipv6_dip3);
+    } else if (IS_IPV6_6RD(&entry)) {
+        // 6RD: tunnel_sipv4/dipv4 是IPv4, 可做子网匹配
+        const uint8_t *s, *d;
+        orig_sip = htonl(entry.ipv6_6rd.tunnel_sipv4);
+        new_dip_val = htonl(entry.ipv6_6rd.tunnel_dipv4);
+        s = (const uint8_t *)&orig_sip;
+        d = (const uint8_t *)&new_dip_val;
+
+        if (s[0] == 192 && s[1] == 168 && s[2] >= 109 && s[2] <= 119) {
+            lan_ip = orig_sip;
+        } else if (d[0] == 192 && d[1] == 168 && d[2] >= 109 && d[2] <= 119) {
+            lan_ip = new_dip_val;
+        }
+        hash_ip = lan_ip ? lan_ip : (orig_sip ? orig_sip : new_dip_val);
+    }
+
+    dir = get_hqos_direction(orig_sip, new_dip_val, lan_ip, skb);
+    if (dir == HQOS_LOCAL) {
+        qid = 33;
+    } else if (dir == HQOS_UPLOAD) {
+        qid = 1;
+    } else {
+        qid = 33;
+    }
 
     if (IS_HQOS_MODE && (hnat_priv->dscp_en)) {
-
-	// 从 FOE entry 中提取 LAN IP 用于方向判断和 per-user 队列分配
-	// NAPT 地址映射:
-	//   上行: sip=LAN(111.x) → new_sip=WAN(101.88), dip=服务器 → new_dip=服务器
-	//   下行: sip=服务器 → new_sip=服务器, dip=WAN(101.88) → new_dip=LAN(111.x)
-	// 所以: 上行 LAN IP = sip, 下行 LAN IP = new_dip
-	__be32 lan_ip = 0;
-	__be32 orig_sip = 0;
-	__be32 new_dip_val = 0;
-	if (IS_IPV4_HNAPT(&entry) || IS_IPV4_HNAT(&entry)) {
-	    const uint8_t *s, *d;
-	    orig_sip = htonl(entry.ipv4_hnapt.sip);      // 上行: LAN IP
-	    new_dip_val = htonl(entry.ipv4_hnapt.new_dip); // 下行: LAN IP
-	    s = (const uint8_t *)&orig_sip;
-	    d = (const uint8_t *)&new_dip_val;
-
-	    if (s[0] == 192 && s[1] == 168 && s[2] >= 109 && s[2] <= 119) {
-		lan_ip = orig_sip;       // 上行: 源是 LAN 设备
-	    } else if (d[0] == 192 && d[1] == 168 && d[2] >= 109 && d[2] <= 119) {
-		lan_ip = new_dip_val;    // 下行: NAT后目标是 LAN 设备
-	    }
-	}
-
-	{
-	    enum hqos_direction dir = get_hqos_direction(orig_sip, new_dip_val, lan_ip, skb);
-	    if (dir == HQOS_LOCAL) {
-		// 本地流量(LAN→LAN): 走 Q33 (sch1 SP 不限速), 避开 VIP 队列
-		qid = 33;
-	    } else {
-		qid = dscp_to_queue(dscp, lan_ip);
-		if (dir == HQOS_DOWNLOAD) {
-		    qid = qid + 32;  // 下行: Q0-31 → Q32-63
-		}
-	    }
-	}
+        if (dir != HQOS_LOCAL) {
+            qid = dscp_to_queue(dscp, hash_ip);
+            if (dir == HQOS_DOWNLOAD) {
+                qid = qid + 32;
+            }
+        }
 
 		// 强制覆盖默认的队列0
 		if (IS_IPV4_HNAPT(&entry) || IS_IPV4_HNAT(&entry)) {
@@ -1996,6 +2043,25 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 			entry.ipv6_3t_route.iblk2.qid = qid;
 		} else if (IS_IPV6_6RD(&entry)) {
 			entry.ipv6_6rd.iblk2.qid = qid;
+		}
+
+		// 队列分配完成, 重写非语音/VIP的出站DSCP
+		// 保留 EF(46→tos 0xB8) 和 VA(44→tos 0xB0)
+		// 上行: 提升为 CS4(32→tos 0x80), 让ISP给予较高转发优先级
+		// 下行: 清零, LAN设备不需要外部DSCP标记
+		if (dscp != 0xB8 && dscp != 0xB0) {
+			uint8_t out_dscp = (dir == HQOS_UPLOAD) ? 0x80 : 0;
+			if (IS_IPV4_HNAPT(&entry) || IS_IPV4_HNAT(&entry)) {
+				entry.ipv4_hnapt.iblk2.dscp = out_dscp;
+			} else if (IS_IPV4_DSLITE(&entry) || IS_IPV4_MAPE(&entry) || IS_IPV4_MAPT(&entry)) {
+				entry.ipv4_dslite.iblk2.dscp = out_dscp;
+			} else if (IS_IPV6_5T_ROUTE(&entry)) {
+				entry.ipv6_5t_route.iblk2.dscp = out_dscp;
+			} else if (IS_IPV6_3T_ROUTE(&entry)) {
+				entry.ipv6_3t_route.iblk2.dscp = out_dscp;
+			} else if (IS_IPV6_6RD(&entry)) {
+				entry.ipv6_6rd.iblk2.dscp = out_dscp;
+			}
 		}
     }
 
