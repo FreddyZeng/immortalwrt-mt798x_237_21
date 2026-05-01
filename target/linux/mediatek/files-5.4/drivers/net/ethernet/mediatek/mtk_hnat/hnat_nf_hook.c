@@ -2050,6 +2050,26 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
     }
 
     dir = get_hqos_direction(orig_sip, new_dip_val, lan_ip, skb, gmac, dev);
+
+    // 外来的 EF(46) 必须降级为 VA(44), 保护内网 VIP 队列不被外部流量挤占
+    // 且必须在 dscp_to_queue 之前执行，确保被分配到正确的 tin5 限速队列
+    if (dir == HQOS_DOWNLOAD && (dscp & 0xFC) == 0xB8) {
+        dscp = (dscp & 0x03) | 0xB0; // 降级为 0xB0 (DSCP 44)
+        
+        // 更新硬件表 entry 中的 dscp，使发出的包也变为 44
+        if (IS_IPV4_HNAPT(&entry) || IS_IPV4_HNAT(&entry)) {
+            entry.ipv4_hnapt.iblk2.dscp = dscp;
+        } else if (IS_IPV4_DSLITE(&entry) || IS_IPV4_MAPE(&entry) || IS_IPV4_MAPT(&entry)) {
+            entry.ipv4_dslite.iblk2.dscp = dscp;
+        } else if (IS_IPV6_5T_ROUTE(&entry)) {
+            entry.ipv6_5t_route.iblk2.dscp = dscp;
+        } else if (IS_IPV6_3T_ROUTE(&entry)) {
+            entry.ipv6_3t_route.iblk2.dscp = dscp;
+        } else if (IS_IPV6_6RD(&entry)) {
+            entry.ipv6_6rd.iblk2.dscp = dscp;
+        }
+    }
+
     if (dir == HQOS_LOCAL) {
         qid = 33;
     } else if (dir == HQOS_UPLOAD) {
@@ -2065,29 +2085,6 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
                 qid = qid + 32;
             }
         }
-
-
-		// 队列分配完成, 重写非语音/VIP的出站DSCP
-		// TOS字节 = [DSCP 6位][ECN 2位], 比较时必须用掩码 0xFC 忽略 ECN
-		// 保留 EF(DSCP 46→tos 0xB8) 和 VA(DSCP 44→tos 0xB0)
-		// 上行: 提升为 CS4(DSCP 32→tos 0x80), 让ISP给予较高转发优先级
-		// 下行: 清零, LAN设备不需要外部DSCP标记
-		if ((dscp & 0xFC) != 0xB8 && (dscp & 0xFC) != 0xB0) {
-			// 保留原始 ECN 位, 只替换 DSCP 部分
-			uint8_t ecn_bits = dscp & 0x03;
-			uint8_t out_dscp = ((dir == HQOS_UPLOAD) ? 0x80 : 0) | ecn_bits;
-			if (IS_IPV4_HNAPT(&entry) || IS_IPV4_HNAT(&entry)) {
-				entry.ipv4_hnapt.iblk2.dscp = out_dscp;
-			} else if (IS_IPV4_DSLITE(&entry) || IS_IPV4_MAPE(&entry) || IS_IPV4_MAPT(&entry)) {
-				entry.ipv4_dslite.iblk2.dscp = out_dscp;
-			} else if (IS_IPV6_5T_ROUTE(&entry)) {
-				entry.ipv6_5t_route.iblk2.dscp = out_dscp;
-			} else if (IS_IPV6_3T_ROUTE(&entry)) {
-				entry.ipv6_3t_route.iblk2.dscp = out_dscp;
-			} else if (IS_IPV6_6RD(&entry)) {
-				entry.ipv6_6rd.iblk2.dscp = out_dscp;
-			}
-		}
     }
 
 	if (IS_IPV4_GRP(foe)) {
