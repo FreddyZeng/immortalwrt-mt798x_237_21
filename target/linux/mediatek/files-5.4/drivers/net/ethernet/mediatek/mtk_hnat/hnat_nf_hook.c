@@ -1441,9 +1441,28 @@ enum hqos_direction {
  *   2) 硬件入口标记: FROM_GE_WAN = 下行, FROM_GE_LAN = 上行
  *   3) 其他来源 (WiFi/PPD/EXT): 本地流量, 不限速
  */
+// 辅助函数: 判断是否为 RFC1918 局域网私有 IP
+static bool is_private_ipv4(__be32 ip_be) {
+    const uint8_t *p = (const uint8_t *)&ip_be;
+    // 10.0.0.0/8
+    if (p[0] == 10) return true;
+    // 172.16.0.0/12
+    if (p[0] == 172 && p[1] >= 16 && p[1] <= 31) return true;
+    // 192.168.0.0/16
+    if (p[0] == 192 && p[1] == 168) return true;
+    return false;
+}
+
 static enum hqos_direction get_hqos_direction(__be32 orig_sip, __be32 new_dip,
 					      __be32 lan_ip,
 					      const struct sk_buff *skb) {
+    // 强制拦截: 如果源 IP 和目的 IP 都是内网私有 IP, 必定是局域网内部通讯 (如跨VLAN/访客到主网)
+    // BUG-8 fix: 防止 LAN-to-LAN 流量被错误判定为 HQOS_UPLOAD 并被强制施加 WAN 上行限速
+    if (orig_sip != 0 && new_dip != 0) {
+        if (is_private_ipv4(orig_sip) && is_private_ipv4(new_dip)) {
+            return HQOS_LOCAL;
+        }
+    }
     // 第一优先: 109-119 范围内, 精确判断方向
     // 上行: lan_ip == orig_sip (LAN 设备是原始源)
     // 下行: lan_ip == new_dip (LAN 设备是 NAT 后目标)

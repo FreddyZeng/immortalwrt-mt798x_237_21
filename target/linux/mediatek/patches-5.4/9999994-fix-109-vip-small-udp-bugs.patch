@@ -1,0 +1,40 @@
+--- sch_cake.c.orig	2026-05-01 23:44:39.269227303 +0800
++++ sch_cake.c	2026-05-01 23:44:54.504064306 +0800
+@@ -1667,7 +1667,8 @@ static bool tuple_ips_check(const struct
+ // 通用 NAT 穿透 IP 检查: 支持任意 IP 范围检查函数
+ static bool is_nat_target_ip_check(struct sk_buff *skb, ip_range_check_fn check)
+ {
+-	struct iphdr *iph;
++	struct iphdr _iph;
++	const struct iphdr *iph;
+ 	struct nf_conn *ct = NULL;
+ 	enum ip_conntrack_info ctinfo;
+ 	const struct nf_conntrack_tuple *tuple_origin = NULL, *tuple_reply = NULL;
+@@ -1680,7 +1681,8 @@ static bool is_nat_target_ip_check(struc
+ 		return false;
+ 	}
+ 
+-	iph = ip_hdr(skb);
++	// 安全获取 IP 头部，避免越界访问 (BUG-7修复)
++	iph = skb_header_pointer(skb, skb_network_offset(skb), sizeof(_iph), &_iph);
+ 	if (iph) {
+ 		if (check(iph->saddr) || check(iph->daddr)) {
+ 			ret = true;
+@@ -1713,6 +1715,7 @@ static bool is_nat_target_ip_check(struc
+ 						ret = true;
+ 					}
+ 
++					// BUG-6 fix: 释放通过 nf_conntrack_find_get 取得的引用
+ 					nf_ct_put(ct);
+ 				}
+ 			}
+@@ -1764,7 +1767,8 @@ static struct cake_tin_data *cake_select
+ 
+ 	// 109 网段: 仅 UDP 且包长 ≤ 300 字节的小包走最高优先级
+ 	if (is_nat_target_ip_109_k(skb)) {
+-		struct iphdr *iph_109 = ip_hdr(skb);
++		struct iphdr _iph_109;
++		const struct iphdr *iph_109 = skb_header_pointer(skb, skb_network_offset(skb), sizeof(_iph_109), &_iph_109);
+ 		if (iph_109 && iph_109->protocol == IPPROTO_UDP &&
+ 		    qdisc_pkt_len(skb) <= 300) {
+ 			return &q->tins[highest_priority_tin];
