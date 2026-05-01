@@ -72,11 +72,12 @@ iptables_start_inital() {
     echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch1
     echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch2
     echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch3
-    # 基线队列: 上行Q0(VIP)+Q5(默认) → sch0, 下行Q32(VIP)+Q37(默认) → sch1
+    # VIP 队列 SP(weight=0): Q0(上行VIP) Q32(下行VIP)
+    # 默认队列 SP(weight=0): Q1(上行默认) Q33(下行默认) — 对应内核 qid=33
     echo 0 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq0
-    echo 0 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq5
+    echo 0 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq1
     echo 1 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq32
-    echo 1 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq37
+    echo 1 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq33
     echo "11 1" >/sys/kernel/debug/hnat/hnat_setting
     uci -q set "turboacc.config.fastpath_mh_eth_hnat_bind_rate"="1"
     uci -q commit "turboacc"
