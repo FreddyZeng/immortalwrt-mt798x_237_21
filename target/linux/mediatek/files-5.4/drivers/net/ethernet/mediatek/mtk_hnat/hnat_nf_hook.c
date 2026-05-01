@@ -1455,14 +1455,8 @@ static bool is_private_ipv4(__be32 ip_be) {
 
 static enum hqos_direction get_hqos_direction(__be32 orig_sip, __be32 new_dip,
 					      __be32 lan_ip,
-					      const struct sk_buff *skb) {
-    // 强制拦截: 如果源 IP 和目的 IP 都是内网私有 IP, 必定是局域网内部通讯 (如跨VLAN/访客到主网)
-    // BUG-8 fix: 防止 LAN-to-LAN 流量被错误判定为 HQOS_UPLOAD 并被强制施加 WAN 上行限速
-    if (orig_sip != 0 && new_dip != 0) {
-        if (is_private_ipv4(orig_sip) && is_private_ipv4(new_dip)) {
-            return HQOS_LOCAL;
-        }
-    }
+					      const struct sk_buff *skb, u32 gmac,
+					      const struct net_device *dev) {
     // 第一优先: 109-119 范围内, 精确判断方向
     // 上行: lan_ip == orig_sip (LAN 设备是原始源)
     // 下行: lan_ip == new_dip (LAN 设备是 NAT 后目标)
@@ -1472,12 +1466,34 @@ static enum hqos_direction get_hqos_direction(__be32 orig_sip, __be32 new_dip,
 	if (lan_ip == orig_sip)
 	    return HQOS_UPLOAD;    // 原始源是 LAN IP = 上行
     }
-    // 第二优先: 硬件 GMAC 入口标记
-    if (FROM_GE_WAN(skb))
-	return HQOS_DOWNLOAD;  // 从 WAN 口进入 = 下行
-    if (FROM_GE_LAN(skb))
-	return HQOS_UPLOAD;    // 从 LAN 口进入 = 上行
-    // 其他来源 (WiFi中继/PPD/虚拟接口): 本地流量, 不限速
+
+    // 第二优先: 根据底层硬件实际脱出端口(gmac)判断方向, 防止跨端口抢占死锁
+    if (gmac == NR_GMAC2_PORT) {
+        return HQOS_UPLOAD;
+    }
+
+    if (gmac == NR_PDMA_PORT) {
+        if (FROM_GE_WAN(skb))
+            return HQOS_DOWNLOAD;  // WAN -> CPU/WiFi = 下行
+        
+        // 判断出口 dev 是否是真正的 Wi-Fi 网卡 (属于 wifi_hook_if)
+        if (get_wifi_hook_if_index_from_dev(dev))
+            return HQOS_LOCAL;     // LAN -> WiFi 属于局域网内通讯, 绕过 QoS
+
+        if (FROM_GE_LAN(skb))
+            return HQOS_UPLOAD;    // LAN -> CPU(MapE/虚拟WAN) = 上行
+            
+        return HQOS_LOCAL;         // CPU -> CPU/WiFi 等内部转发
+    }
+
+    if (gmac == NR_GMAC1_PORT) {
+        if (FROM_GE_WAN(skb))
+            return HQOS_DOWNLOAD;  // WAN -> LAN = 下行
+            
+        // LAN -> LAN = 局域网互访, 必须返回 LOCAL。如果返回 UPLOAD 会分配 WAN 的队列，但在 GMAC1 物理脱出会发生跨端口队列硬件死锁
+        return HQOS_LOCAL;
+    }
+
     return HQOS_LOCAL;
 }
 
@@ -1988,7 +2004,8 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
         } else if (d[0] == 192 && d[1] == 168 && d[2] >= 109 && d[2] <= 119) {
             lan_ip = new_dip_val;
         }
-        hash_ip = lan_ip;
+        // BUG-9 fix: 提取真实内网 IP 用于 WRR per-user hash 隔离
+        hash_ip = is_private_ipv4(orig_sip) ? orig_sip : new_dip_val;
     } else if (IS_IPV4_DSLITE(&entry) || IS_IPV4_MAPE(&entry) || IS_IPV4_MAPT(&entry)) {
         const uint8_t *s;
         orig_sip = htonl(entry.ipv4_dslite.sip);
@@ -2006,7 +2023,8 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
             }
         }
 #endif
-        hash_ip = lan_ip;
+        // BUG-9 fix: 提取真实内网 IP 用于 WRR per-user hash 隔离
+        hash_ip = is_private_ipv4(orig_sip) ? orig_sip : new_dip_val;
     } else if (IS_IPV6_5T_ROUTE(&entry)) {
         // IPv6: 不设 lan_ip(无法子网匹配), 方向由 FROM_GE_WAN/LAN 判断
         // hash_ip 取 sip3 用于 per-user 队列分配
@@ -2031,7 +2049,7 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
         hash_ip = lan_ip ? lan_ip : (orig_sip ? orig_sip : new_dip_val);
     }
 
-    dir = get_hqos_direction(orig_sip, new_dip_val, lan_ip, skb);
+    dir = get_hqos_direction(orig_sip, new_dip_val, lan_ip, skb, gmac, dev);
     if (dir == HQOS_LOCAL) {
         qid = 33;
     } else if (dir == HQOS_UPLOAD) {
@@ -2048,18 +2066,6 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
             }
         }
 
-		// 强制覆盖默认的队列0
-		if (IS_IPV4_HNAPT(&entry) || IS_IPV4_HNAT(&entry)) {
-			entry.ipv4_hnapt.iblk2.qid = qid;
-		} else if (IS_IPV4_DSLITE(&entry) || IS_IPV4_MAPE(&entry) || IS_IPV4_MAPT(&entry)) {
-			entry.ipv4_dslite.iblk2.qid = qid;
-		} else if (IS_IPV6_5T_ROUTE(&entry)) {
-			entry.ipv6_5t_route.iblk2.qid = qid;
-		} else if (IS_IPV6_3T_ROUTE(&entry)) {
-			entry.ipv6_3t_route.iblk2.qid = qid;
-		} else if (IS_IPV6_6RD(&entry)) {
-			entry.ipv6_6rd.iblk2.qid = qid;
-		}
 
 		// 队列分配完成, 重写非语音/VIP的出站DSCP
 		// TOS字节 = [DSCP 6位][ECN 2位], 比较时必须用掩码 0xFC 忽略 ECN
