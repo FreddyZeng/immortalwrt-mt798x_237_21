@@ -1952,11 +1952,14 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 	// 注意: ip_hdr(skb) 是 POST_ROUTING 后的地址, 上行已被 SNAT 为 WAN IP
 	// 必须使用 FOE entry 中的原始 sip/dip (主机字节序, 来自 conntrack)
 	__be32 lan_ip = 0;
+	__be32 orig_sip = 0;
+	__be32 orig_dip = 0;
 	if (IS_IPV4_HNAPT(&entry) || IS_IPV4_HNAT(&entry)) {
-	    __be32 orig_sip = htonl(entry.ipv4_hnapt.sip);  // 原始源IP (主机→网络字节序)
-	    __be32 orig_dip = htonl(entry.ipv4_hnapt.dip);  // 原始目的IP
-	    const uint8_t *s = (const uint8_t *)&orig_sip;
-	    const uint8_t *d = (const uint8_t *)&orig_dip;
+	    const uint8_t *s, *d;
+	    orig_sip = htonl(entry.ipv4_hnapt.sip);  // 原始源IP (主机→网络字节序)
+	    orig_dip = htonl(entry.ipv4_hnapt.dip);  // 原始目的IP
+	    s = (const uint8_t *)&orig_sip;
+	    d = (const uint8_t *)&orig_dip;
 
 	    if (s[0] == 192 && s[1] == 168 && s[2] >= 109 && s[2] <= 119) {
 		lan_ip = orig_sip;
@@ -1966,9 +1969,7 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 	}
 
 	{
-	    __be32 orig_sip_n = htonl(entry.ipv4_hnapt.sip);
-	    __be32 orig_dip_n = htonl(entry.ipv4_hnapt.dip);
-	    enum hqos_direction dir = get_hqos_direction(orig_sip_n, orig_dip_n, lan_ip, skb);
+	    enum hqos_direction dir = get_hqos_direction(orig_sip, orig_dip, lan_ip, skb);
 	    if (dir == HQOS_LOCAL) {
 		// 本地流量(LAN→LAN): 走 Q33 (sch1 SP 不限速), 避开 VIP 队列
 		qid = 33;
