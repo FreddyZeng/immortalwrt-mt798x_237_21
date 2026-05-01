@@ -84,8 +84,13 @@ return view.extend({
 		o.datatype = 'and(uinteger,min(0))';
 		o.rmempty = false;
 
-		o = s.option(form.Value, 'comment', _('Comment'));
+		o = s.option(form.ListValue, 'comment', _('QoS Mode'));
+		o.value('64', _('VIP (Highest priority, no rate limit)'));
+		o.value('0', _('Rate Limit (Hardware Q31/Q63)'));
+		o.value('65', _('Rate Limit (Software tc)'));
+		o.default = '0';
 		o.rmempty = true;
+		o.description = _('VIP=64: DSCP 46, highest priority queue Q0/Q32. Rate Limit<64: hardware queue Q31/Q63 with min/max rate. Software>64: tc htb software shaping.');
 		
 		o = s.option(form.Value, 'interfacename', _('InterfaceName(start from 0)'));
 		o.datatype = 'and(uinteger,min(0))';

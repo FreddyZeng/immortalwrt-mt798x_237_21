@@ -1422,6 +1422,45 @@ struct foe_entry ppe_fill_info_blk(struct ethhdr *eth, struct foe_entry entry,
 }
 
 /**
+ * 流量方向枚举
+ * HQOS_UPLOAD:   LAN→WAN, 使用上行队列 Q0-Q31 (sch0/sch2)
+ * HQOS_DOWNLOAD: WAN→LAN, 使用下行队列 Q32-Q63 (sch1/sch3)
+ * HQOS_LOCAL:    LAN→LAN/WiFi等本地流量, 不应受 WAN 限速
+ */
+enum hqos_direction {
+    HQOS_UPLOAD   = 0,
+    HQOS_DOWNLOAD = 1,
+    HQOS_LOCAL    = 2,
+};
+
+/**
+ * 判断流量方向, 完全不使用 IS_WAN/IS_LAN (它们定义相同, 无法区分)
+ *
+ * 判断优先级:
+ *   1) 109-119 范围: IP 精确判断 (saddr=上行, daddr=下行)
+ *   2) 硬件入口标记: FROM_GE_WAN = 下行, FROM_GE_LAN = 上行
+ *   3) 其他来源 (WiFi/PPD/EXT): 本地流量, 不限速
+ */
+static enum hqos_direction get_hqos_direction(const struct iphdr *iph,
+					      __be32 lan_ip,
+					      const struct sk_buff *skb) {
+    // 第一优先: 109-119 范围内, IP 地址精确判断
+    if (lan_ip && iph) {
+	if (lan_ip == iph->daddr)
+	    return HQOS_DOWNLOAD;  // 目标是 LAN IP = 下行
+	if (lan_ip == iph->saddr)
+	    return HQOS_UPLOAD;    // 来源是 LAN IP = 上行
+    }
+    // 第二优先: 硬件 GMAC 入口标记
+    if (FROM_GE_WAN(skb))
+	return HQOS_DOWNLOAD;  // 从 WAN 口进入 = 下行
+    if (FROM_GE_LAN(skb))
+	return HQOS_UPLOAD;    // 从 LAN 口进入 = 上行
+    // 其他来源 (WiFi中继/PPD/虚拟接口): 本地流量, 不限速
+    return HQOS_LOCAL;
+}
+
+/**
  * 输入: TOS字节, 局域网侧IP地址 (网络字节序)
  * 输出: 硬件队列ID (0-31, 连续)
  *
@@ -1431,8 +1470,9 @@ struct foe_entry ppe_fill_info_blk(struct ethhdr *eth, struct foe_entry entry,
  *   Q2     = CS4(32)/CS5(40)/VA(44) 实时         (CAKE tin5)
  *   Q3     = CS2/AF2x(16-23)    交互应用        (CAKE tin4)
  *   Q4     = AF3x(24-31)/AF4x(33-39) 视频流     (CAKE tin3)
- *   Q5-Q30 = CS0(0) + 未定义     per-user队列    (CAKE tin2, 按IP hash)
- *   Q31    = LE(1)/CS1/AF1x(8-15) 背景最低      (CAKE tin0+1)
+ *   Q5-Q29 = CS0(0) + 未定义     per-user队列    (CAKE tin2, 按IP hash)
+ *   Q30    = LE(1)/CS1/AF1x(8-15) 背景最低      (CAKE tin0+1)
+ *   Q31    = 限速设备专用           硬件限速队列
  */
 static uint8_t dscp_to_queue(uint8_t tos, __be32 lan_ip) {
     uint8_t dscp = tos >> 2;  // 提取高6位为DSCP
@@ -1447,13 +1487,15 @@ static uint8_t dscp_to_queue(uint8_t tos, __be32 lan_ip) {
         return 3;   // CS2/AF2x → Q3 (CAKE tin4)
     } else if ((dscp >= 24 && dscp <= 31) || (dscp >= 33 && dscp <= 39)) {
         return 4;   // AF3x/AF4x → Q4 (CAKE tin3)
+    } else if (dscp == 2) {
+        return 31;  // 限速设备专用 DSCP → Q31 (硬件限速队列)
     } else if (dscp == 1 || (dscp >= 8 && dscp <= 15)) {
-        return 31;  // LE/CS1/AF1x → Q31 (CAKE tin0+1, 最低)
+        return 30;  // LE/CS1/AF1x → Q30 (CAKE tin0+1, 背景最低)
     } else {
-        // CS0(0) + 未定义 → 按IP last_octet hash 分配到 Q5-Q30
-        // 26个队列, 实现 per-user 硬件队列隔离
+        // CS0(0) + 未定义 → 按IP last_octet hash 分配到 Q5-Q29
+        // 25个队列, 实现 per-user 硬件队列隔离
         uint8_t last_octet = ((const uint8_t *)&lan_ip)[3];
-        return 5 + (last_octet % 26);
+        return 5 + (last_octet % 25);
     }
 }
 
@@ -1478,7 +1520,7 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 	enum ip_conntrack_info ctinfo;
 	u32 gmac = NR_DISCARD;
 	int udp = 0;
-	u32 qid = 37;  // 默认下行队列 = Q5(默认) + 32
+	u32 qid = 33;   // 默认 Q33 (sch1 SP不限速), 避开 Q0/Q32 VIP 专属队列
 	int port_id = 0;
 	int mape = 0;
 	u8  dscp = 0;
@@ -1900,7 +1942,7 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 	else if (IS_PPPQ_MODE && (IS_DSA_1G_LAN(dev) || IS_DSA_WAN(dev)))
 		qid = port_id & MTK_QDMA_TX_MASK;
 	else
-		qid = 37;  // 默认下行队列 = Q5(默认) + 32
+		qid = 33;   // 默认 Q33 (sch1 SP不限速), 避开 Q0/Q32 VIP 专属队列
 
 
 
@@ -1920,11 +1962,18 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 	    }
 	}
 
-	qid = dscp_to_queue(dscp, lan_ip);
-
-	    if (!IS_WAN(dev) && strncmp(dev->name, "apcli", 5) != 0 && strncmp(dev->name, "ifb4apcli", 9) != 0) {
-		    qid = qid + 32;
+	{
+	    enum hqos_direction dir = get_hqos_direction(iph_qos, lan_ip, skb);
+	    if (dir == HQOS_LOCAL) {
+		// 本地流量(LAN→LAN): 走 Q33 (sch1 SP 不限速), 避开 VIP 队列
+		qid = 33;
+	    } else {
+		qid = dscp_to_queue(dscp, lan_ip);
+		if (dir == HQOS_DOWNLOAD) {
+		    qid = qid + 32;  // 下行: Q0-31 → Q32-63
+		}
 	    }
+	}
 
 		// 强制覆盖默认的队列0
 		if (IS_IPV4_HNAPT(&entry) || IS_IPV4_HNAT(&entry)) {

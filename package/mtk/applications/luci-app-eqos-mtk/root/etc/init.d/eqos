@@ -51,14 +51,14 @@ start_service() {
         fi  
         
         if [ "$smarthqos" -eq "1" ]; then  
-        # 上行 per-user 队列: Q5-Q31 (跳过 Q0-Q4 优先队列)
-        for i in $(seq 5 31); do
+        # 上行 per-user 队列: Q5-Q29 (跳过 Q0-Q4 优先队列, Q30 背景, Q31 限速)
+        for i in $(seq 5 29); do
         	if [ "$upload" -ne "0" ]; then
 		echo 2 1 $(($upload*225)) 1 $(($upload*1000)) 4 1 > /sys/kernel/debug/hnat/qdma_txq$i
 		fi
 		done
-		# 下行 per-user 队列: Q37-Q63 (跳过 Q32-Q36 优先队列)
-		for i in $(seq 37 63); do
+		# 下行 per-user 队列: Q37-Q61 (跳过 Q32-Q36 优先队列, Q62 背景, Q63 限速)
+		for i in $(seq 37 61); do
 		if [ "$download" -ne "0" ]; then
 		echo 3 1 $(($download*200)) 1 $(($download*1000)) 4 1 > /sys/kernel/debug/hnat/qdma_txq$i
 		fi
@@ -71,7 +71,7 @@ start_service() {
         config_foreach parse_device "device"
         # smarthqos DHCP DSCP 分配已禁用:
         # dhcp_mark.sh 会给每个设备随机分配 DSCP 1-31, 与我们的 DSCP→队列映射冲突
-        # per-user 隔离现在由内核 IP hash (last_octet % 26) 实现, 不需要 DHCP 分配
+        # per-user 隔离现在由内核 IP hash (last_octet % 25) 实现, 不需要 DHCP 分配
 }
 
 stop_service() {

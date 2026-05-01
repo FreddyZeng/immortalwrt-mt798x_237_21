@@ -96,10 +96,12 @@ dscp_to_queue() {
         echo 3    # CS2/AF2x → Q3 (CAKE tin4)
     elif ([ $dscp -ge 24 ] && [ $dscp -le 31 ]) || ([ $dscp -ge 33 ] && [ $dscp -le 39 ]); then
         echo 4    # AF3x/AF4x → Q4 (CAKE tin3)
+    elif [ $dscp -eq 2 ]; then
+        echo 31   # 限速设备专用 DSCP → Q31 (硬件限速队列)
     elif [ $dscp -eq 1 ] || ([ $dscp -ge 8 ] && [ $dscp -le 15 ]); then
-        echo 31   # LE/CS1/AF1x → Q31 (CAKE tin0+1, 最低)
+        echo 30   # LE/CS1/AF1x → Q30 (CAKE tin0+1, 背景最低)
     else
-        echo 5    # CS0(0) + 未定义 → Q5 (默认, 内核中按IP hash到Q5-Q30)
+        echo 5    # CS0(0) + 未定义 → Q5 (默认, 内核中按IP hash到Q5-Q29)
     fi
 }
 
@@ -111,6 +113,9 @@ case "$1" in
     ;;
     "start")
     stop_qos
+    # 清零限速累加器
+    echo 0 > /tmp/eqos_q31_rate
+    echo 0 > /tmp/eqos_q63_rate
     iptables_start_prepare
 #        start_qos $2 $3
     iptables_start_inital
@@ -125,11 +130,13 @@ case "$1" in
     for i in $(seq 0 4); do
         echo 0 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq$i
     done
-    # Q5-Q30: per-user 默认队列 → sch2 (WRR 等权重=4)
-    for i in $(seq 5 30); do
+    # Q5-Q29: per-user 默认队列 → sch2 (WRR 等权重=4)
+    for i in $(seq 5 29); do
         echo 2 0 0 0 0 4 0 > /sys/kernel/debug/hnat/qdma_txq$i
     done
-    # Q31: 背景最低 → sch2 (WRR 低权重=1)
+    # Q30: 背景 DSCP (LE/CS1/AF1x) → sch2 (WRR 低权重=1)
+    echo 2 0 0 0 0 1 0 > /sys/kernel/debug/hnat/qdma_txq30
+    # Q31: 限速设备专用 → sch2 (WRR 权重=1, 由 add 命令设 min/max rate)
     echo 2 0 0 0 0 1 0 > /sys/kernel/debug/hnat/qdma_txq31
 
     # === 下行 Q32-Q63 ===
@@ -137,11 +144,13 @@ case "$1" in
     for i in $(seq 32 36); do
         echo 1 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq$i
     done
-    # Q37-Q62: per-user 默认队列 → sch3 (WRR 等权重=4)
-    for i in $(seq 37 62); do
+    # Q37-Q61: per-user 默认队列 → sch3 (WRR 等权重=4)
+    for i in $(seq 37 61); do
         echo 3 0 0 0 0 4 0 > /sys/kernel/debug/hnat/qdma_txq$i
     done
-    # Q63: 背景最低 → sch3 (WRR 低权重=1)
+    # Q62: 背景 DSCP (LE/CS1/AF1x) → sch3 (WRR 低权重=1)
+    echo 3 0 0 0 0 1 0 > /sys/kernel/debug/hnat/qdma_txq62
+    # Q63: 限速设备专用 → sch3 (WRR 权重=1, 由 add 命令设 min/max rate)
     echo 3 0 0 0 0 1 0 > /sys/kernel/debug/hnat/qdma_txq63
 
     #iptables -t mangle -D eqos -m iprange --src-range 192.168.110.10-192.168.110.39 -j MARK --set-mark 0x99
@@ -223,34 +232,33 @@ case "$1" in
         ebtables -t nat -A eqos -p ipv6 -d $macaddr -j mark --mark-set 46
 
     elif [ $id -lt 64 ]; then
-        iptables -t mangle -D eqos -s $ip -j DSCP --set-dscp ${dscp}
-        iptables -t mangle -D eqos -d $ip -j DSCP --set-dscp ${dscp}
-        ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j MARK --set-mark ${dscp}
-        ebtables -t nat -D eqos -p ipv6 -d $macaddr -j mark --mark-set ${dscp}
+        # 限速设备: 强制标记 DSCP 2 → 内核映射到 Q31/Q63 (硬件限速队列)
+        iptables -t mangle -D eqos -s $ip -j DSCP --set-dscp 2
+        iptables -t mangle -D eqos -d $ip -j DSCP --set-dscp 2
+        ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j MARK --set-mark 2
+        ebtables -t nat -D eqos -p ipv6 -d $macaddr -j mark --mark-set 2
 
+        iptables -t mangle -A eqos -s $ip -j DSCP --set-dscp 2
+        ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j MARK --set-mark 2
 
-        iptables -t mangle -A eqos -s $ip -j DSCP --set-dscp ${dscp}
-        ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j MARK --set-mark ${dscp}
-
-        if [ $up_id -ne 0 ]; then
-
+        # 限速设备统一使用 Q31(上行)/Q63(下行) 背景队列
+        # 多设备累加: 读取已有速率 + 本次速率 = 总速率
         if [ $up -ne 0 ]; then
-            echo 2 1 ${up} 0 0 4 1 > /sys/kernel/debug/hnat/qdma_txq${up_id}
-        else
-            echo 2 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq${up_id}
+            local cur_up=$(cat /tmp/eqos_q31_rate 2>/dev/null || echo 0)
+            local new_up=$((cur_up + up))
+            echo $new_up > /tmp/eqos_q31_rate
+            echo 2 1 ${new_up} 1 ${new_up} 1 1 > /sys/kernel/debug/hnat/qdma_txq31
         fi
 
         if [ $dl -ne 0 ]; then
-            echo 3 1 ${dl} 0 0 4 1 > /sys/kernel/debug/hnat/qdma_txq${down_id}
-        else
-            echo 3 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq${down_id}
+            local cur_dl=$(cat /tmp/eqos_q63_rate 2>/dev/null || echo 0)
+            local new_dl=$((cur_dl + dl))
+            echo $new_dl > /tmp/eqos_q63_rate
+            echo 3 1 ${new_dl} 1 ${new_dl} 1 1 > /sys/kernel/debug/hnat/qdma_txq63
         fi
 
-        fi
-
-
-        iptables -t mangle -A eqos -d $ip -j DSCP --set-dscp ${dscp}
-        ebtables -t nat -A eqos -p ipv6 -d $macaddr -j mark --mark-set ${dscp}
+        iptables -t mangle -A eqos -d $ip -j DSCP --set-dscp 2
+        ebtables -t nat -A eqos -p ipv6 -d $macaddr -j mark --mark-set 2
     else
         iptables -t mangle -D eqos -s $ip -j MARK --set-mark 0x99
         iptables -t mangle -D eqos -d $ip -j MARK --set-mark 0x99
