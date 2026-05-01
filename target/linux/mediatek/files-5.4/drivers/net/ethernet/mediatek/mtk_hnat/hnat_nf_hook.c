@@ -1501,11 +1501,6 @@ static uint8_t dscp_to_queue(uint8_t tos, __be32 lan_ip) {
     }
 }
 
-// 判断 DSCP 是否为默认白名单（只允许 CS0 使用默认队列）
-static inline bool is_default_whitelist(uint8_t dscp) {
-    return (dscp == 0);  // 可以在此扩展更多白名单，例如 dscp == 4 等
-}
-
 static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 				     const struct net_device *dev,
 				     struct foe_entry *foe,

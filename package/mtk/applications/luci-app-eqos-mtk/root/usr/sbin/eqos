@@ -222,17 +222,10 @@ case "$1" in
     ip="$2"
     dl="$3"
     up="$4"
-    id="$5" idpair=$((id+32))
+    id="$5"
     macaddr="$6"
     interface="$7"
     cnt=$(tc class show dev $dev | wc -l)
-
-
-
-    dscp=$id
-
-    up_id=$(dscp_to_queue $id)
-    down_id=$((up_id+32))
 
 
     if [ $id -eq 64 ]; then
