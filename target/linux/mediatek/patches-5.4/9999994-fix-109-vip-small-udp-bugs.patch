@@ -1,5 +1,5 @@
---- sch_cake.c.orig	2026-05-01 23:44:39.269227303 +0800
-+++ sch_cake.c	2026-05-01 23:44:54.504064306 +0800
+--- a/net/sched/sch_cake.c
++++ b/net/sched/sch_cake.c
 @@ -1667,7 +1667,8 @@ static bool tuple_ips_check(const struct
  // 通用 NAT 穿透 IP 检查: 支持任意 IP 范围检查函数
  static bool is_nat_target_ip_check(struct sk_buff *skb, ip_range_check_fn check)
