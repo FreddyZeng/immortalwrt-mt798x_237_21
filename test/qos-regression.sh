@@ -61,7 +61,10 @@ grep -Fq 'qid = 32;' "$HNAT_HOOK" ||
 
 grep -Fq 'if (qos_mark == 2)' "$HNAT_HOOK" ||
     fail "HNAT must honor mark 2 as hardware limit fallback"
-
+# 检查 CONNMARK 还原规则的掩码保护
+RESTORE_MARK_CMD="iptables -t mangle -I FORWARD 1 -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF"
+grep -Fq "$RESTORE_MARK_CMD" "$EQOS" ||
+    fail "Global CONNMARK restore rule MUST use --nfmask 0xFF --ctmask 0xFF to protect upper bits"
 grep -Fq 'qid = (dir == HQOS_DOWNLOAD) ? 63 : 31;' "$HNAT_HOOK" ||
     fail "HNAT mark 2 fallback must map to Q31/Q63"
 

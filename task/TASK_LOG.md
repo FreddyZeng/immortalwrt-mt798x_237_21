@@ -44,7 +44,7 @@
 
 <!-- 新增 commit 记录在此下方添加 -->
 
-## [2026-05-02] C-FQOS01-04 | commit: pending
+## [2026-05-02] C-FQOS01-04 | commit: d6f47e1fce
 
 - **FID**: F-QOS01
 - **CID**: C-FQOS01-04
@@ -55,3 +55,15 @@
 - **PRD 同步**: ✅ PRD/qos-hardening.md
 - **方案同步**: ✅ design/qos-architecture.md
 - **测试同步**: ✅ test/qos-regression.sh
+
+## [2026-05-02] B-002 | commit: d6f47e1fce
+
+- **BID**: B-002
+- **关联 FID**: F-QOS01
+- **类型**: bugfix
+- **范围**: luci-app-eqos-mtk, mtk_hnat
+- **描述**: Add `0xFF` mask to `CONNMARK` operations and `skb->mark & 0xFF` kernel extraction to prevent catastrophic collision with `mwan3` multi-WAN routing marks (which use bits 8-13).
+- **改动文件**: root/usr/sbin/eqos, hnat_nf_hook.c, test/qos-regression.sh
+- **测试同步**: ✅ test/qos-regression.sh
+
+<!-- 新增 commit 记录在此下方添加 -->

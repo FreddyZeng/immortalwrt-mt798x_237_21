@@ -29,8 +29,8 @@ start_qos() {
 iptables_stop() {
     iptables -t mangle -D FORWARD  -j eqos
     ip6tables -t mangle -D FORWARD  -j eqos
-    iptables -t mangle -D FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --mask 0xFF 2>/dev/null
-    ip6tables -t mangle -D FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --mask 0xFF 2>/dev/null
+    iptables -t mangle -D FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF 2>/dev/null
+    ip6tables -t mangle -D FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF 2>/dev/null
     echo 0 > /sys/kernel/debug/hnat/qos_toggle
     sed -i '/\/etc\/init.d\/eqos start/d' /etc/firewall.user
     # 清理 dscp_clear 链
@@ -75,10 +75,10 @@ iptables_start_prepare() {
     ip6tables -t mangle -I FORWARD 1 -j dscp_clear
 
     # 新架构: 统一连接跟踪标记还原 (仅还原低8位 0xFF，保护 mwan3 等多线高位 mark)
-    iptables -t mangle -D FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --mask 0xFF 2>/dev/null
-    iptables -t mangle -I FORWARD 1 -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --mask 0xFF
-    ip6tables -t mangle -D FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --mask 0xFF 2>/dev/null
-    ip6tables -t mangle -I FORWARD 1 -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --mask 0xFF
+    iptables -t mangle -D FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF 2>/dev/null
+    iptables -t mangle -I FORWARD 1 -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF
+    ip6tables -t mangle -D FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF 2>/dev/null
+    ip6tables -t mangle -I FORWARD 1 -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF
 }
 
 iptables_start_inital() {
