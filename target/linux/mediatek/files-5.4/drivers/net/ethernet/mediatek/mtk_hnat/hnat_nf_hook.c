@@ -2018,8 +2018,11 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
         hash_ip = (dir == HQOS_DOWNLOAD) ? new_dip_val : orig_sip;
     } else if (IS_IPV4_DSLITE(&entry) || IS_IPV4_MAPE(&entry) || IS_IPV4_MAPT(&entry)) {
         orig_sip = htonl(entry.ipv4_dslite.sip);
+        // [P2-FIX] 非 NETSYS_V2 构建无 new_dip 字段, 用 orig_sip 作为 hash 兜底,
+        // 确保 DSLITE 下行不全堆积到 Q5
+        new_dip_val = orig_sip;  // fallback: 上行 sip 作为隔离 seed
 #if defined(CONFIG_MEDIATEK_NETSYS_V2)
-        new_dip_val = htonl(entry.ipv4_dslite.new_dip);
+        new_dip_val = htonl(entry.ipv4_dslite.new_dip);  // 有 NETSYS_V2 时使用真实下行 LAN IP
 #endif
         hash_ip = (dir == HQOS_DOWNLOAD) ? new_dip_val : orig_sip;
     } else if (IS_IPV6_5T_ROUTE(&entry)) {
@@ -2087,12 +2090,12 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 
 		if (qos_toggle) {
 			if (hnat_priv->data->version == MTK_HNAT_V4) {
+				// [P1-FIX] V4: qid 字段 7-bit, 直接写入即可(qid≤63<128无截断)
 				entry.ipv4_hnapt.iblk2.qid = qid & 0x7f;
-				entry.ipv4_hnapt.iblk2.qid = qid;
 			} else {
 				/* qid[5:0]= port_mg[1:0]+ qid[3:0] */
+				// [P1-FIX] 非V4: iblk2.qid 存低4位, 高2位写入 port_mg (见下方 |= 操作)
 				entry.ipv4_hnapt.iblk2.qid = qid & 0xf;
-				entry.ipv4_hnapt.iblk2.qid = qid;
 				if (hnat_priv->data->version != MTK_HNAT_V1)
 					entry.ipv4_hnapt.iblk2.port_mg |=
 						((qid >> 4) & 0x3);
@@ -2124,12 +2127,12 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 
 		if (qos_toggle) {
 			if (hnat_priv->data->version == MTK_HNAT_V4) {
+				// [P1-FIX] V4: qid 7-bit 直接写入
 				entry.ipv6_5t_route.iblk2.qid = qid & 0x7f;
-				entry.ipv6_5t_route.iblk2.qid = qid;
 			} else {
 				/* qid[5:0]= port_mg[1:0]+ qid[3:0] */
+				// [P1-FIX] 非V4: 只写低4位到 qid 字段
 				entry.ipv6_5t_route.iblk2.qid = qid & 0xf;
-				entry.ipv6_5t_route.iblk2.qid = qid;
 				if (hnat_priv->data->version != MTK_HNAT_V1)
 					entry.ipv6_5t_route.iblk2.port_mg |=
 								((qid >> 4) & 0x3);

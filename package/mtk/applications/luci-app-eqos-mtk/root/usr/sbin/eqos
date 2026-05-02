@@ -99,27 +99,6 @@ iptables_start_inital() {
     echo "10 1" > /sys/kernel/debug/hnat/hnat_setting
 }
 
-dscp_to_queue() {
-    local dscp=$1
-
-    if [ $dscp -eq 46 ]; then
-        echo 0    # EF → Q0 (CAKE tin7)
-    elif [ $dscp -eq 48 ] || [ $dscp -eq 56 ]; then
-        echo 1    # CS6/CS7 → Q1 (CAKE tin6)
-    elif [ $dscp -eq 32 ] || [ $dscp -eq 40 ] || [ $dscp -eq 44 ]; then
-        echo 2    # CS4/CS5/VA → Q2 (CAKE tin5)
-    elif [ $dscp -ge 16 ] && [ $dscp -le 23 ]; then
-        echo 3    # CS2/AF2x → Q3 (CAKE tin4)
-    elif ([ $dscp -ge 24 ] && [ $dscp -le 31 ]) || ([ $dscp -ge 33 ] && [ $dscp -le 39 ]); then
-        echo 4    # AF3x/AF4x → Q4 (CAKE tin3)
-    elif [ $dscp -eq 2 ]; then
-        echo 31   # 限速设备专用 DSCP → Q31 (硬件限速队列)
-    elif [ $dscp -eq 1 ] || ([ $dscp -ge 8 ] && [ $dscp -le 15 ]); then
-        echo 30   # LE/CS1/AF1x → Q30 (CAKE tin0+1, 背景最低)
-    else
-        echo 5    # CS0(0) + 未定义 → Q5 (默认, 内核中按IP hash到Q5-Q29)
-    fi
-}
 
 
 case "$1" in
