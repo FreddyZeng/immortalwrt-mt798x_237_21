@@ -13,21 +13,27 @@ iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \
     -j CONNMARK --save-mark 2>/dev/null
 
 for _every in 1 2 3 4 5 6 7 8; do
-    for _ci in 0 1 2 3 4 5 6 7; do
-        [ "$_ci" -lt "$_every" ] || continue
-        _om=$(printf "0x%02x00" $((0x20 + _ci)))
-        iptables -t mangle -D PREROUTING -i br-lan \
-            -m conntrack --ctstate NEW \
-            -m statistic --mode nth --every "$_every" --packet "$_ci" \
-            -j CONNMARK --set-mark "2${_ci}" 2>/dev/null
-        iptables -t mangle -D PREROUTING -i br-lan \
-            -m conntrack --ctstate NEW \
-            -m statistic --mode nth --every "$_every" --packet "$_ci" \
-            -j CONNMARK --set-xmark "${_om}/0xFF00" 2>/dev/null
-        iptables -t mangle -D PREROUTING -i br-lan \
-            -m conntrack --ctstate NEW \
-            -m statistic --mode nth --every "$_every" --packet "$_ci" \
-            -j MARK --set-mark "2${_ci}" 2>/dev/null
+    for _packet in 0 1 2 3 4 5 6 7; do
+        [ "$_packet" -lt "$_every" ] || continue
+        for _mark_idx in 0 1 2 3 4 5 6 7; do
+            _om=$(printf "0x%02x00" $((0x20 + _mark_idx)))
+            iptables -t mangle -D PREROUTING -i br-lan \
+                -m conntrack --ctstate NEW \
+                -m statistic --mode nth --every "$_every" --packet "$_packet" \
+                -j CONNMARK --set-mark "2${_mark_idx}" 2>/dev/null
+            iptables -t mangle -D PREROUTING -i br-lan \
+                -m conntrack --ctstate NEW \
+                -m statistic --mode nth --every "$_every" --packet "$_packet" \
+                -j CONNMARK --set-xmark "${_om}/0xFF00" 2>/dev/null
+            iptables -t mangle -D PREROUTING -i br-lan \
+                -m conntrack --ctstate NEW \
+                -m statistic --mode nth --every "$_every" --packet "$_packet" \
+                -j MARK --set-mark "2${_mark_idx}" 2>/dev/null
+            iptables -t mangle -D PREROUTING -i br-lan \
+                -m conntrack --ctstate NEW \
+                -m statistic --mode nth --every "$_every" --packet "$_packet" \
+                -j MARK --set-xmark "${_om}/0xFF00" 2>/dev/null
+        done
     done
 done
 
@@ -53,7 +59,7 @@ for _ci in 0 1 2 3 4 5 6 7; do
         -j MARK --set-xmark "${_om}/0xFF00" 2>/dev/null
 done
 logger -p daemon.debug -t loadbalance \
-    "[LB-C-FQOS02-02-01] exact legacy cleanup complete: iface=$interface"
+    "[LB-C-FQOS02-02-01] exact legacy cleanup complete: iface=$interface, every_range=1-8, packet_range=0-7, mark_idx_range=0-7"
 
 # ── 2. 创建/清空专属子链 ──────────────────────────────────────────────────
 iptables -t mangle -N eqos_lb 2>/dev/null

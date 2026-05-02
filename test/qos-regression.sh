@@ -130,6 +130,22 @@ if grep -Fq 'iptables-save -t mangle' "$LOADBALANCE"; then
     fail "loadbalance migration cleanup must not scan and broadly delete PREROUTING rules"
 fi
 
+grep -Fq 'for _packet in 0 1 2 3 4 5 6 7; do' "$LOADBALANCE" ||
+    fail "loadbalance exact cleanup must enumerate compressed nth packet indexes independently"
+
+grep -Fq 'for _mark_idx in 0 1 2 3 4 5 6 7; do' "$LOADBALANCE" ||
+    fail "loadbalance exact cleanup must enumerate route mark cfg indexes independently"
+
+grep -Fq -- '--packet "$_packet"' "$LOADBALANCE" ||
+    fail "loadbalance exact cleanup must match nth packet with independent packet index"
+
+grep -Fq '0x20 + _mark_idx' "$LOADBALANCE" ||
+    fail "loadbalance exact cleanup must compute xmark from independent mark index"
+
+if grep -Fq -- '--packet "$_ci"' "$LOADBALANCE"; then
+    fail "loadbalance cleanup must not bind nth packet index to cfg index"
+fi
+
 grep -Fq -- '-m comment --comment "eqos_lb"' "$LOADBALANCE" ||
     fail "loadbalance route mark rules must be tagged with eqos_lb comment"
 
