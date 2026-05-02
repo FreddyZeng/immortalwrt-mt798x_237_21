@@ -79,3 +79,4 @@
 <!-- 新增 commit 记录在此下方添加 -->
 - [x] (2026-05-02) `B-004`: Fixed legacy `--set-mark` logic in `eqos` script which lacked masks and zeroed out upper routing bits used by `mwan3`. Replaced all `--set-mark 0x99` with `--set-xmark 0x99/0xFF` and `--set-mark 2"$interface"` with `--set-xmark 2"$interface"/0xFF00`.
 - [x] (2026-05-02) `F-QOS02`: Refactored `loadbalance` and `eqos` scripts to migrate multi-WAN routing marks from 8-bit to 16-bit (`0x2X00/0xFF00`). This completely resolves the collision between QoS tagging (`0xFF` mask) and per-device WAN binding/load balancing marking, ensuring both systems can coexist.
+| 2026-05-02T12:58:34Z | Fixed B-005 | CAKE vs HNAT Priority Asymmetry for 109 Subnet | F-QOS-AUDIT |
