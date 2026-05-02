@@ -43,3 +43,15 @@
 - **测试同步**: ✅ test/qos-test.md
 
 <!-- 新增 commit 记录在此下方添加 -->
+
+## [2026-05-02] C-FQOS01-04 | commit: pending
+
+- **FID**: F-QOS01
+- **CID**: C-FQOS01-04
+- **类型**: refactor
+- **范围**: luci-app-eqos-mtk, tests
+- **描述**: Refactor eqos ruleset to a unified CONNMARK architecture. Replaced all ebtables and IP-based DSCP rules with global CONNMARK tracking. Solved IPv6 hardware offload bypass issue and unified QoS tracking for both IPv4 and IPv6.
+- **改动文件**: root/usr/sbin/eqos, root/etc/init.d/eqos, test/qos-regression.sh
+- **PRD 同步**: ✅ PRD/qos-hardening.md
+- **方案同步**: ✅ design/qos-architecture.md
+- **测试同步**: ✅ test/qos-regression.sh

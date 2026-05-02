@@ -24,31 +24,27 @@ grep -Fq 'case "$dl" in' "$EQOS" ||
 grep -Fq 'case "$up" in' "$EQOS" ||
     fail "upload speed must be normalized before numeric comparisons"
 
-grep -Fq 'iptables -t mangle -A eqos -d $ip -j MARK --set-mark 46' "$EQOS" ||
-    fail "configured IPv4 VIP download must install trusted mark 46"
+grep -Fq 'iptables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-mark 46' "$EQOS" ||
+    fail "configured VIP must install unified CONNMARK 46"
 
-grep -Fq 'iptables -t mangle -I eqos -d 192.168.0.0/16 -m u32 --u32 "0x10&0x0000FF00=0x00006E00:0x00007700" -m u32 --u32 "0x10&0x000000FF=0x0000000A:0x00000027" -j MARK --set-mark 46' "$EQOS" ||
-    fail "static IPv4 VIP download range must install trusted mark 46"
+grep -Fq 'ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-mark 46' "$EQOS" ||
+    fail "configured VIP must install unified IPv6 CONNMARK 46"
 
-grep -Fq 'ebtables -t nat -A eqos -p ipv6 -d $macaddr -j mark --mark-set 46' "$EQOS" ||
-    fail "configured IPv6 VIP download must install trusted mark 46"
+grep -Fq 'iptables -t mangle -I eqos -s 192.168.0.0/16 -m u32 --u32 "0xc&0x0000FF00=0x00006E00:0x00007700" -m u32 --u32 "0xc&0x000000FF=0x0000000A:0x00000027" -j CONNMARK --set-mark 46' "$EQOS" ||
+    fail "static VIP source range must install unified CONNMARK 46"
 
-grep -Fq 'ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j DSCP --set-dscp 2' "$EQOS" ||
-    fail "IPv6 hardware limit rule must set DSCP 2"
+grep -Fq 'iptables -t mangle -A eqos -m mark --mark 46 -j DSCP --set-dscp 46' "$EQOS" ||
+    fail "global mark 46 to DSCP 46 translation is missing"
 
-UP_LIMIT_BLOCK=$(sed -n '/if \[ \$up -ne 0 \]; then/,/fi/p' "$EQOS")
-echo "$UP_LIMIT_BLOCK" | grep -Fq 'iptables -t mangle -A eqos -s $ip -j DSCP --set-dscp 2' ||
-    fail "upload limit DSCP2 rule must only be installed when upload speed is nonzero"
+grep -Fq 'ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-mark 2' "$EQOS" ||
+    fail "IPv6 hardware limit rule must set CONNMARK 2"
 
-DL_LIMIT_BLOCK=$(sed -n '/if \[ \$dl -ne 0 \]; then/,/fi/p' "$EQOS")
-echo "$DL_LIMIT_BLOCK" | grep -Fq 'iptables -t mangle -A eqos -d $ip -j DSCP --set-dscp 2' ||
-    fail "download limit DSCP2 rule must only be installed when download speed is nonzero"
+UP_LIMIT_BLOCK=$(sed -n '/if \[ \$up -ne 0 \] || \[ \$dl -ne 0 \]; then/,/fi/p' "$EQOS")
+echo "$UP_LIMIT_BLOCK" | grep -Fq 'iptables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-mark 2' ||
+    fail "unified limit CONNMARK 2 rule must be installed"
 
-echo "$DL_LIMIT_BLOCK" | grep -Fq 'ebtables -t nat -A eqos -p ipv6 -d $macaddr -j mark --mark-set 2' ||
-    fail "download limit IPv6 mark2 rule must only be installed when download speed is nonzero"
-
-if grep -Eq 'ip6tables .* -A eqos .* MARK --set-mark 2' "$EQOS"; then
-    fail "IPv6 hardware limit rule still uses MARK"
+if grep -Eq 'ebtables -t nat .* eqos' "$EQOS"; then
+    fail "ebtables rules must be completely removed from eqos script"
 fi
 
 grep -Fq 'qos_mark = skb->mark;' "$HNAT_HOOK" ||
