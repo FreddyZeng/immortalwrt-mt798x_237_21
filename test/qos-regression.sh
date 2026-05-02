@@ -18,6 +18,12 @@ grep -Fq 'case "$id" in' "$EQOS" ||
 grep -Fq 'legacy qos mode fallback' "$EQOS" ||
     fail "legacy comment fallback diagnostic log is missing"
 
+grep -Fq 'case "$dl" in' "$EQOS" ||
+    fail "download speed must be normalized before numeric comparisons"
+
+grep -Fq 'case "$up" in' "$EQOS" ||
+    fail "upload speed must be normalized before numeric comparisons"
+
 grep -Fq 'iptables -t mangle -A eqos -d $ip -j MARK --set-mark 46' "$EQOS" ||
     fail "configured IPv4 VIP download must install trusted mark 46"
 
@@ -30,12 +36,23 @@ grep -Fq 'ebtables -t nat -A eqos -p ipv6 -d $macaddr -j mark --mark-set 46' "$E
 grep -Fq 'ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j DSCP --set-dscp 2' "$EQOS" ||
     fail "IPv6 hardware limit rule must set DSCP 2"
 
+UP_LIMIT_BLOCK=$(sed -n '/if \[ \$up -ne 0 \]; then/,/fi/p' "$EQOS")
+echo "$UP_LIMIT_BLOCK" | grep -Fq 'iptables -t mangle -A eqos -s $ip -j DSCP --set-dscp 2' ||
+    fail "upload limit DSCP2 rule must only be installed when upload speed is nonzero"
+
+DL_LIMIT_BLOCK=$(sed -n '/if \[ \$dl -ne 0 \]; then/,/fi/p' "$EQOS")
+echo "$DL_LIMIT_BLOCK" | grep -Fq 'iptables -t mangle -A eqos -d $ip -j DSCP --set-dscp 2' ||
+    fail "download limit DSCP2 rule must only be installed when download speed is nonzero"
+
+echo "$DL_LIMIT_BLOCK" | grep -Fq 'ebtables -t nat -A eqos -p ipv6 -d $macaddr -j mark --mark-set 2' ||
+    fail "download limit IPv6 mark2 rule must only be installed when download speed is nonzero"
+
 if grep -Eq 'ip6tables .* -A eqos .* MARK --set-mark 2' "$EQOS"; then
     fail "IPv6 hardware limit rule still uses MARK"
 fi
 
-grep -Fq 'qos_mark = skb->mark & MTK_QDMA_TX_MASK;' "$HNAT_HOOK" ||
-    fail "HNAT must normalize skb mark once before queue selection"
+grep -Fq 'qos_mark = skb->mark;' "$HNAT_HOOK" ||
+    fail "HNAT must use exact skb mark for trusted policy markers"
 
 grep -Fq 'dir == HQOS_DOWNLOAD && qos_mark == 46' "$HNAT_HOOK" ||
     fail "HNAT must honor trusted VIP download mark 46"

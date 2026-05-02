@@ -19,7 +19,7 @@
   | CID | Commit | PR | 日期 | 描述 | 状态 |
   |-----|--------|-----|------|------|------|
   | C-FQOS01-01 | pending | - | 2026-05-02 | MT798x HNAT datapath dead-code cleanup, syntax fix, and fallback QoS refactoring | ✅ 已完成 |
-  | C-FQOS01-02 | pending | - | 2026-05-02 | Fix QoS regression findings for IPv6 limit DSCP/mark, trusted VIP download Q32 marker, legacy mode parsing, CAKE highest tin guard, and verification queue labels | ✅ 已完成 |
+  | C-FQOS01-02 | pending | - | 2026-05-02 | Fix QoS regression findings for IPv6 limit DSCP/mark, trusted VIP download Q32 marker, zero-speed limit cancellation, exact mark matching, legacy mode parsing, CAKE highest tin guard, and verification queue labels | ✅ 已完成 |
 - Bugs:
   | BID | 描述 | 引入者 | 修复者 | 状态 |
   |-----|------|--------|--------|------|

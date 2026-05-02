@@ -1475,6 +1475,24 @@ static enum hqos_direction get_hqos_direction(const struct sk_buff *skb, u32 gma
 }
 
 /**
+ * 检查 IP 是否属于 192.168.109.[2-254] 网段
+ * 与 sch_cake.c:is_ip_in_109_range_k() 语义相同，独立实现，无跨文件依赖
+ * [HNAT-C-QOS109-01] ip_be: 网络字节序的 IPv4 地址
+ */
+static inline bool is_ip_in_109_range_hnat(__be32 ip_be)
+{
+	const u8 *p = (const u8 *)&ip_be;
+
+	if (p[0] != 192 || p[1] != 168)
+		return false;
+	if (p[2] != 109)
+		return false;
+	if (p[3] < 2 || p[3] > 254)
+		return false;
+	return true;
+}
+
+/**
  * 输入: TOS字节, 局域网侧IP地址 (网络字节序)
  * 输出: 硬件队列ID (0-31, 连续)
  *
@@ -2026,7 +2044,7 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
         hash_ip = (dir == HQOS_DOWNLOAD) ? new_dip_val : orig_sip;
     }
 
-    qos_mark = skb->mark & MTK_QDMA_TX_MASK;
+    qos_mark = skb->mark;
 
     // eqos 指定 VIP 下行使用可信 mark46, 保留 EF(46) 并进入 Q32。
     if (dir == HQOS_DOWNLOAD && qos_mark == 46) {
@@ -2045,6 +2063,13 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
                 qid = (dir == HQOS_DOWNLOAD) ? 63 : 31;
             } else if (dir == HQOS_DOWNLOAD && qos_mark == 46) {
                 qid = 32;
+            } else if (dir == HQOS_DOWNLOAD &&
+                       is_ip_in_109_range_hnat(hash_ip) &&
+                       udp &&
+                       skb->len <= 300) {
+                // [HNAT-C-QOS109-02] 109网段 UDP 小包(≤300B) 下行强制走 Q33
+                // Q33 = CS6/CS7 级别, 与上行 Q1 对称, 保障低延迟
+                qid = 33;
             } else {
                 qid = dscp_to_queue(dscp, hash_ip);
                 if (dir == HQOS_DOWNLOAD) {
