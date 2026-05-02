@@ -1964,6 +1964,16 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
         qid = (dir == HQOS_UPLOAD) ? 1 : 33; // 常规默认队列
     }
 
+	if (IS_HQOS_MODE || skb->mark >= MAX_PPPQ_PORT_NUM) {
+		qid = skb->mark & (MTK_QDMA_TX_MASK);
+	}
+	else if (IS_PPPQ_MODE && (IS_DSA_1G_LAN(dev) || IS_DSA_WAN(dev))) {
+		qid = port_id & MTK_QDMA_TX_MASK;
+	}
+	else {
+		qid = (dir == HQOS_UPLOAD) ? 1 : 33; // 常规默认队列
+	}
+
     // 防御性兜底：防止被异常的 mark 或 port_id 污染为 0
     // 绝对不允许未经显式授权的流量占用 VIP Q0/Q32
     if (!qid) {
