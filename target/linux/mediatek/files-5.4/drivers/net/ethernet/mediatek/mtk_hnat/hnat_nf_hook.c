@@ -2057,6 +2057,7 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
     // 必须在外部 EF 降级之前: eqos 对 109 UDP 标记 DSCP=46, 若不提前拦截
     // 则降级分支先触发 → VA/Q34, 109 小包永远无法到达 Q33
     } else if (dir == HQOS_DOWNLOAD &&
+               skb->protocol == htons(ETH_P_IP) &&
                is_ip_in_109_range_hnat(hash_ip) &&
                udp &&
                skb->len <= 300) {
