@@ -1,54 +1,76 @@
 #!/bin/sh
-# loadbalance - 多 WAN 负载均衡路由标记配置
-# 使用专属子链 eqos_lb，避免全局 -F PREROUTING 破坏 mwan3 等其他组件规则
-# 参数: $1 = 逗号分隔的 WAN 接口列表 (如 "pppoe-wan,pppoe-wan2")
-# 标记域: bits[15:8] = 路由 mark (0xFF00)，与 QoS 低8位完全隔离
+# loadbalance - 多 WAN 负载均衡路由标记配置 (POSIX sh)
+# 专属子链 eqos_lb + 可用 WAN 动态 PPP_NUM
 
 interface=$1
 iface_list=$(echo "$interface" | tr ',' ' ')
 
-# ── 专属子链清理（只清自己，不影响 mwan3 等其他组件）────────────────────
-# 创建 eqos_lb（已存在则忽略），flush 清除所有旧规则（包括旧 PPP_NUM/nth 参数）
+# ── 1. 创建/清空专属子链 ──────────────────────────────────────────────────
 iptables -t mangle -N eqos_lb 2>/dev/null
 iptables -t mangle -F eqos_lb
 
-# 幂等插入跳转（先删后插，保证在 PREROUTING 最前）
+# 删除旧的 PREROUTING→eqos_lb 跳转（若存在）
 iptables -t mangle -D PREROUTING -j eqos_lb 2>/dev/null
-iptables -t mangle -I PREROUTING 1 -j eqos_lb
 
-# ── 清理旧 WAN ip rule / ip route（支持 WAN 数量减少场景）──────────────
-# 固定迭代 0..7，覆盖任何旧配置留下的 fwmark 规则和路由表
+# ── 2. 迁移清理：删除旧版直写 PREROUTING 的规则 ──────────────────────────
+# 旧版 loadbalance 直接写 PREROUTING（无 eqos_lb 子链），需精准删除迁移残留
+# 通过 iptables-save 找到所有 0xFF00 路由域规则并逐条 -D 删除
+iptables-save -t mangle 2>/dev/null | while IFS= read -r _line; do
+    case "$_line" in
+        "-A PREROUTING "*"0xFF00"*|"-A PREROUTING "*"0xff00"*)
+            # 去掉 "-A PREROUTING " 前缀，用 set-- 拆分后传给 -D
+            set -- $_line
+            shift 2
+            iptables -t mangle -D PREROUTING "$@" 2>/dev/null
+            ;;
+    esac
+done
+
+# ── 3. 清理旧 ip rule / ip route（支持 WAN 数量减少）──────────────────────
 for _ci in 0 1 2 3 4 5 6 7; do
     _om=$(printf "0x%02x00" $((0x20 + _ci)))
     ip rule del fwmark ${_om}/0xff00 2>/dev/null
     ip route flush table "2${_ci}0" 2>/dev/null
 done
 
-# ── 统计 WAN 接口数 ───────────────────────────────────────────────────────
+# ── 4. 构建可用 WAN 列表（先过滤，再计算 PPP_NUM）───────────────────────
+# 用 tmp 文件存储 "var ipaddr" 对，避免 POSIX sh 无关联数组的问题
+_tmp=$(mktemp /tmp/eqos_lb_avail.XXXXXX)
 PPP_NUM=0
-for _v in $iface_list; do
-    PPP_NUM=$((PPP_NUM + 1))
-done
-
-# ── 第一轮：LAN→WAN NEW 连接负载均衡 CONNMARK + ip rule + ip route ───────
-i=0
 for var in $iface_list; do
     ipaddr=$(ip route show | grep default | grep "$var" | awk '{print $3}')
-    # 空网关保护: 接口未起或默认路由不存在时跳过，避免半配置状态
-    if [ -z "$ipaddr" ]; then
+    if [ -n "$ipaddr" ]; then
+        printf '%s %s\n' "$var" "$ipaddr" >> "$_tmp"
+        PPP_NUM=$((PPP_NUM + 1))
+    else
         logger -p daemon.warn -t loadbalance \
-            "[LB-WARN-①] $var: no default route, skip mark=$i"
-        i=$((i + 1))
-        continue
+            "[LB-WARN-①] $var: no default route, excluded from loadbalance"
     fi
+done
+
+if [ "$PPP_NUM" -eq 0 ]; then
+    logger -p daemon.err -t loadbalance "[LB-ERR-①] no available WAN, abort"
+    rm -f "$_tmp"
+    exit 1
+fi
+
+# 第一个可用 WAN 始终获得 index=0，mark=0x2000
+first_mark=$(printf "0x%02x00" $((0x20 + 0)))
+
+# ── 5. 插入 PREROUTING→eqos_lb 跳转 ─────────────────────────────────────
+iptables -t mangle -I PREROUTING 1 -j eqos_lb
+
+# ── 6. 第一轮：CONNMARK + ip rule + ip route ─────────────────────────────
+i=0
+while IFS=' ' read -r var ipaddr; do
     FW_MARK=$(printf "0x%02x00" $((0x20 + i)))
 
-    # NEW 连接按 nth 算法分配 WAN 出口 CONNMARK（写入专属子链，可整体 flush）
+    # NEW 连接按实际可用 WAN 数 nth 分配 CONNMARK
     iptables -t mangle -A eqos_lb \
         -i br-lan -m conntrack --ctstate NEW \
         -m statistic --mode nth --every $PPP_NUM --packet $i \
         -j CONNMARK --set-xmark ${FW_MARK}/0xFF00
-    # ESTABLISHED 从 CONNMARK 还原路由标记到 skb->mark
+    # ESTABLISHED 从 CONNMARK 还原路由标记
     iptables -t mangle -A eqos_lb \
         -i br-lan -m connmark --mark ${FW_MARK}/0xFF00 \
         -j MARK --set-xmark ${FW_MARK}/0xFF00
@@ -57,43 +79,36 @@ for var in $iface_list; do
     ip route add default via "$ipaddr" dev "$var" table "2${i}0"
 
     logger -p daemon.debug -t loadbalance \
-        "[LB-①] installed WAN$i: dev=$var gw=$ipaddr mark=$FW_MARK table=2${i}0"
+        "[LB-②] WAN$i dev=$var gw=$ipaddr mark=$FW_MARK PPP_NUM=$PPP_NUM"
     i=$((i + 1))
-done
+done < "$_tmp"
 
-# ── 第二轮：回程路由标记（目标 IP/24 → WAN 接口路由表）──────────────────
+# ── 7. 第二轮：回程路由标记 ──────────────────────────────────────────────
 i=0
-for var in $iface_list; do
-    ipaddr=$(ip route show | grep default | grep "$var" | awk '{print $3}')
-    if [ -z "$ipaddr" ]; then
-        i=$((i + 1))
-        continue
-    fi
+while IFS=' ' read -r var ipaddr; do
     FW_MARK=$(printf "0x%02x00" $((0x20 + i)))
-
     iptables -t mangle -A eqos_lb \
         -m conntrack --ctstate NEW \
         -d "$ipaddr/24" -j MARK --set-xmark ${FW_MARK}/0xFF00
-
     i=$((i + 1))
-done
+done < "$_tmp"
 
-# ── HTTPS (443) 固定走 WAN0 (0x2000)，保持 TLS 会话连续性 ───────────────
+rm -f "$_tmp"
+
+# ── 8. HTTPS 443 固定走首个可用 WAN ──────────────────────────────────────
 iptables -t mangle -A eqos_lb \
     -p tcp --dport 443 -m conntrack --ctstate NEW \
-    -j MARK --set-xmark 0x2000/0xFF00
+    -j MARK --set-xmark ${first_mark}/0xFF00
 iptables -t mangle -A eqos_lb \
     -p udp --dport 443 -m conntrack --ctstate NEW \
-    -j MARK --set-xmark 0x2000/0xFF00
+    -j MARK --set-xmark ${first_mark}/0xFF00
 
-# ── 全局 CONNMARK save/restore（路由域 bits[15:8]）────────────────────────
-# POSTROUTING: 将 skb->mark[15:8] 保存回 ct_mark[15:8]（NEW 连接首包）
+# ── 9. 全局 CONNMARK save/restore（路由域 bits[15:8]）────────────────────
 iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \
     -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
 iptables -t mangle -A POSTROUTING -m conntrack --ctstate NEW \
     -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00
 
-# PREROUTING: ESTABLISHED/RELATED 连接还原路由 ct_mark → skb->mark
 iptables -t mangle -D PREROUTING -i br-lan \
     -m conntrack --ctstate ESTABLISHED,RELATED \
     -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
