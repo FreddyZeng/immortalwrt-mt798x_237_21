@@ -24,31 +24,31 @@ grep -Fq 'case "$dl" in' "$EQOS" ||
 grep -Fq 'case "$up" in' "$EQOS" ||
     fail "upload speed must be normalized before numeric comparisons"
 
-grep -Fq 'iptables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-mark 46' "$EQOS" ||
+grep -Fq 'iptables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF' "$EQOS" ||
     fail "configured VIP must install unified CONNMARK 46"
 
-grep -Fq 'ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-mark 46' "$EQOS" ||
+grep -Fq 'ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF' "$EQOS" ||
     fail "configured VIP must install unified IPv6 CONNMARK 46"
 
-grep -Fq 'iptables -t mangle -I eqos -s 192.168.0.0/16 -m u32 --u32 "0xc&0x0000FF00=0x00006E00:0x00007700" -m u32 --u32 "0xc&0x000000FF=0x0000000A:0x00000027" -j CONNMARK --set-mark 46' "$EQOS" ||
+grep -Fq 'iptables -t mangle -I eqos -s 192.168.0.0/16 -m u32 --u32 "0xc&0x0000FF00=0x00006E00:0x00007700" -m u32 --u32 "0xc&0x000000FF=0x0000000A:0x00000027" -j CONNMARK --set-xmark 46/0xFF' "$EQOS" ||
     fail "static VIP source range must install unified CONNMARK 46"
 
-grep -Fq 'iptables -t mangle -A eqos -m mark --mark 46 -j DSCP --set-dscp 46' "$EQOS" ||
+grep -Fq 'iptables -t mangle -A eqos -m mark --mark 46/0xFF -j DSCP --set-dscp 46' "$EQOS" ||
     fail "global mark 46 to DSCP 46 translation is missing"
 
-grep -Fq 'ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-mark 2' "$EQOS" ||
+grep -Fq 'ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 2/0xFF' "$EQOS" ||
     fail "IPv6 hardware limit rule must set CONNMARK 2"
 
 UP_LIMIT_BLOCK=$(sed -n '/if \[ \$up -ne 0 \] || \[ \$dl -ne 0 \]; then/,/fi/p' "$EQOS")
-echo "$UP_LIMIT_BLOCK" | grep -Fq 'iptables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-mark 2' ||
+echo "$UP_LIMIT_BLOCK" | grep -Fq 'iptables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 2/0xFF' ||
     fail "unified limit CONNMARK 2 rule must be installed"
 
 if grep -Eq 'ebtables -t nat .* eqos' "$EQOS"; then
     fail "ebtables rules must be completely removed from eqos script"
 fi
 
-grep -Fq 'qos_mark = skb->mark;' "$HNAT_HOOK" ||
-    fail "HNAT must use exact skb mark for trusted policy markers"
+grep -Fq 'qos_mark = skb->mark & 0xFF;' "$HNAT_HOOK" ||
+    fail "HNAT must safely extract lower 8 bits of skb mark for policy matching"
 
 grep -Fq 'dir == HQOS_DOWNLOAD && qos_mark == 46' "$HNAT_HOOK" ||
     fail "HNAT must honor trusted VIP download mark 46"

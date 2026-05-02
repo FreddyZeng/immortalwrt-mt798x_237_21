@@ -2047,7 +2047,8 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
         hash_ip = (dir == HQOS_DOWNLOAD) ? new_dip_val : orig_sip;
     }
 
-    qos_mark = skb->mark;  // 提取完整 mark 进行精确匹配，防止高位 mark 碰撞 VIP/限速判断
+    // 提取完整 QoS mark (仅匹配低8位)，防止受到多线路由 (mwan3 等) 高位 mark 的干扰
+    qos_mark = skb->mark & 0xFF;
 
     if (dir == HQOS_DOWNLOAD) {
         if (skb->protocol == htons(ETH_P_IP)) {

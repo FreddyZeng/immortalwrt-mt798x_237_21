@@ -29,8 +29,8 @@ start_qos() {
 iptables_stop() {
     iptables -t mangle -D FORWARD  -j eqos
     ip6tables -t mangle -D FORWARD  -j eqos
-    iptables -t mangle -D FORWARD -j CONNMARK --restore-mark 2>/dev/null
-    ip6tables -t mangle -D FORWARD -j CONNMARK --restore-mark 2>/dev/null
+    iptables -t mangle -D FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --mask 0xFF 2>/dev/null
+    ip6tables -t mangle -D FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --mask 0xFF 2>/dev/null
     echo 0 > /sys/kernel/debug/hnat/qos_toggle
     sed -i '/\/etc\/init.d\/eqos start/d' /etc/firewall.user
     # 清理 dscp_clear 链
@@ -74,11 +74,11 @@ iptables_start_prepare() {
     ip6tables -t mangle -D FORWARD -j dscp_clear 2>/dev/null
     ip6tables -t mangle -I FORWARD 1 -j dscp_clear
 
-    # 新架构: 统一连接跟踪标记还原 (优先级最高, 必须在 dscp_clear 和 eqos 之前)
-    iptables -t mangle -D FORWARD -j CONNMARK --restore-mark 2>/dev/null
-    iptables -t mangle -I FORWARD 1 -j CONNMARK --restore-mark
-    ip6tables -t mangle -D FORWARD -j CONNMARK --restore-mark 2>/dev/null
-    ip6tables -t mangle -I FORWARD 1 -j CONNMARK --restore-mark
+    # 新架构: 统一连接跟踪标记还原 (仅还原低8位 0xFF，保护 mwan3 等多线高位 mark)
+    iptables -t mangle -D FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --mask 0xFF 2>/dev/null
+    iptables -t mangle -I FORWARD 1 -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --mask 0xFF
+    ip6tables -t mangle -D FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --mask 0xFF 2>/dev/null
+    ip6tables -t mangle -I FORWARD 1 -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --mask 0xFF
 }
 
 iptables_start_inital() {
@@ -87,11 +87,11 @@ iptables_start_inital() {
     iptables -t mangle -D FORWARD  -j eqos
     iptables -t mangle -A FORWARD  -j eqos
 
-    # 全局 DSCP 同步规则: 根据 CONNMARK 还原后的 mark 自动同步 DSCP 给软件队列使用
-    iptables -t mangle -A eqos -m mark --mark 46 -j DSCP --set-dscp 46
-    ip6tables -t mangle -A eqos -m mark --mark 46 -j DSCP --set-dscp 46
-    iptables -t mangle -A eqos -m mark --mark 2 -j DSCP --set-dscp 2
-    ip6tables -t mangle -A eqos -m mark --mark 2 -j DSCP --set-dscp 2
+    # 全局 DSCP 同步规则: 根据 CONNMARK 还原后的 mark (匹配低8位) 自动同步 DSCP 给软件队列使用
+    iptables -t mangle -A eqos -m mark --mark 46/0xFF -j DSCP --set-dscp 46
+    ip6tables -t mangle -A eqos -m mark --mark 46/0xFF -j DSCP --set-dscp 46
+    iptables -t mangle -A eqos -m mark --mark 2/0xFF -j DSCP --set-dscp 2
+    ip6tables -t mangle -A eqos -m mark --mark 2/0xFF -j DSCP --set-dscp 2
     echo 1 > /sys/kernel/debug/hnat/qos_toggle
     # 基线调度器配置 (后续 start 会完整覆盖)
     echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch0
@@ -183,8 +183,8 @@ case "$1" in
     # 偏移 0xc = 源 IP 起始 (字节 12-15 = 192.168.x.y)
     # &0x0000FF00 掩码提取第三字节 x, =0x6E00:0x7700 即 110-119
     # &0x000000FF 掩码提取第四字节 y, =0x0A:0x27 即 10-39
-    # 新架构: 使用 CONNMARK, 只需要抓取上传方向(源IP), CONNMARK 会自动标记整个双向连接
-    iptables -t mangle -I eqos -s 192.168.0.0/16 -m u32 --u32 "0xc&0x0000FF00=0x00006E00:0x00007700" -m u32 --u32 "0xc&0x000000FF=0x0000000A:0x00000027" -j CONNMARK --set-mark 46
+    # 新架构: 使用 CONNMARK, 只需要抓取上传方向(源IP), CONNMARK 会自动标记整个双向连接 (加 0xFF 掩码保护)
+    iptables -t mangle -I eqos -s 192.168.0.0/16 -m u32 --u32 "0xc&0x0000FF00=0x00006E00:0x00007700" -m u32 --u32 "0xc&0x000000FF=0x0000000A:0x00000027" -j CONNMARK --set-xmark 46/0xFF
     logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-05] install unified static VIP marker: src=192.168.110-119.10-39, connmark=46"
 
     # 192.168.109.0/24 网段: 仅加速小包 UDP（游戏包）
@@ -237,20 +237,20 @@ case "$1" in
 
     if [ "$id" -eq 64 ]; then
         # 清理旧规则
-        iptables -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-mark 46 2>/dev/null
-        ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-mark 46 2>/dev/null
+        iptables -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF 2>/dev/null
+        ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF 2>/dev/null
 
-        # 重新应用新规则
-        iptables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-mark 46
-        ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-mark 46
+        # 重新应用新规则 (带掩码保护高位 mark)
+        iptables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF
+        ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF
         logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-04] install unified VIP marker: mac=$macaddr, connmark=46"
 
     elif [ "$id" -lt 64 ]; then
         # 限速设备: 强制标记 CONNMARK 2 → HNAT 识别为 mark 2 → 映射到 Q31/Q63 (硬件限速队列)
         # 全局规则会自动将 mark 2 转换为 DSCP 2 供 CAKE 软件队列使用
         # 删除旧规则时, 先从累加器减去该设备的速率。
-        iptables -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-mark 2 2>/dev/null
-        ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-mark 2 2>/dev/null
+        iptables -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 2/0xFF 2>/dev/null
+        ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 2/0xFF 2>/dev/null
 
         # 如果删除的规则存在(即重新添加同一设备), 需要先减去旧速率
         # 检查该设备是否已有记录, 如有则减去其旧速率后再加新速率
@@ -289,9 +289,9 @@ case "$1" in
         echo $dl > "$old_dl_file"
 
         if [ $up -ne 0 ] || [ $dl -ne 0 ]; then
-            iptables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-mark 2
-            ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-mark 2
-            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-06] install unified limit marker: mac=$macaddr, connmark=2, up=${up}, dl=${dl}"
+            iptables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 2/0xFF
+            ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 2/0xFF
+            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-06] install unified limit marker: mac=$macaddr, connmark=2/0xFF, up=${up}, dl=${dl}"
         fi
 
         if [ $up -ne 0 ]; then
