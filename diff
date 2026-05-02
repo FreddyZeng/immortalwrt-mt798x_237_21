@@ -1,0 +1,1778 @@
+diff --git a/.gitmodules b/.gitmodules
+new file mode 100644
+index 0000000000..cccd855b99
+--- /dev/null
++++ b/.gitmodules
+@@ -0,0 +1,9 @@
++[submodule "package/network/services/wifidog-ng"]
++	path = package/network/services/wifidog-ng
++	url = https://github.com/FreddyZeng/wifidog-ng.git
++[submodule "wifidog-ng-authserver"]
++	path = wifidog-ng-authserver
++	url = ssh://fanrong@gitpssh.175208.xyz:2222/Route/wifidog-ng-authserver.git
++[submodule "package/luci-app-sms-tool"]
++	path = package/luci-app-sms-tool
++	url = https://github.com/4IceG/luci-app-sms-tool.git
+diff --git a/PRD/qos-hardening.md b/PRD/qos-hardening.md
+new file mode 100644
+index 0000000000..9cf71ec63c
+--- /dev/null
++++ b/PRD/qos-hardening.md
+@@ -0,0 +1,7 @@
++# QoS Hardening PRD
++
++<!-- FID: F-QOS01 -->
++
++## 1. 核心需求
++<!-- CID: C-FQOS01-01 | commit: pending | 日期: 2026-05-02 -->
++重构 MT798x HNAT 硬件流控的数据路径，实现精准的物理端口分流、消除内网子网猜测、修复编译语法错误，并保证关闭 QoS 后的安全降级。
+diff --git a/design/qos-architecture.md b/design/qos-architecture.md
+new file mode 100644
+index 0000000000..48ffc2103c
+--- /dev/null
++++ b/design/qos-architecture.md
+@@ -0,0 +1,8 @@
++# QoS Hardening Architecture
++
++<!-- FID: F-QOS01 -->
++
++## 1. 架构重构
++<!-- CID: C-FQOS01-01 | commit: pending | 日期: 2026-05-02 -->
++- 引入物理方向判定 `get_hqos_direction` 以替代废弃的内网猜测代码。
++- 保证 `PPPQ_MODE` 和无 QoS 模式的原始行为隔离，彻底防堵状态机溢出风险。
+diff --git a/docs/cake-sqm-vip-deep-analysis.md b/docs/cake-sqm-vip-deep-analysis.md
+new file mode 100644
+index 0000000000..742f4280e7
+--- /dev/null
++++ b/docs/cake-sqm-vip-deep-analysis.md
+@@ -0,0 +1,194 @@
++# CAKE SQM 魔改逻辑深度分析
++
++CAKE (Common Applications Kept Enhanced) 是 Linux 内核的软件 QoS 调度器，工作在 CPU 路径上。这个补丁对标准 CAKE 做了 6 处核心魔改。
++
++## 魔改 1: VIP IP 直通最高优先级 (tin=7)
++
++`cake_select_tin()` 是 CAKE 选择队列的入口函数。魔改在最前面插入了 VIP 检测：
++
++```c
++// 在所有标准 CAKE 分类逻辑之前执行
++is_priority_ip = is_nat_target_ip_ipv4_k(skb, q);
++if (is_priority_ip) {
++    return &q->tins[highest_priority_tin];  // 直接返回 tin=7，跳过所有后续逻辑
++}
++```
++
++### VIP 检测的三层穿透机制
++
++```
++数据包到达 CAKE
++    │
++    ▼
++第 1 层: IP 头直接检查
++  iph->saddr 或 iph->daddr 在 192.168.110-119.10-39?
++    ├── ✅ 命中 → 返回 tin=7 最高优先级
++    └── ❌ 未命中 (NAT 后 IP 变了)
++         │
++         ▼
++第 2 层: conntrack 记录查找
++  nf_ct_get(skb) 获取连接跟踪
++  检查 original/reply tuple 的 IP
++    ├── ✅ 命中 → 返回 tin=7
++    └── ❌ 无 conntrack 记录
++         │
++         ▼
++第 3 层: 手动 tuple 查找
++  nf_ct_get_tuplepr() 构造 tuple
++  nf_conntrack_find_get() 查表
++    ├── ✅ 命中 → 返回 tin=7
++    └── ❌ 全部未命中 → 走标准 CAKE 分类
++```
++
++**为什么需要三层？** 因为路由器做 NAT 后，出站包的源 IP 已经变成了 WAN 口 IP（不再是 192.168.110.x）。第 1 层只能匹配内网方向的包，外网回来的包必须通过 conntrack 的 NAT 记录追溯到原始内网 IP。
++
++## 魔改 2: 非 VIP 降级保护
++
++标准 CAKE 中，任何 DSCP=EF 的包都能进入 tin=7。魔改后，只有 VIP IP 才能进 tin=7，其他任何路径到达 tin=7 都被强制降到 tin=6：
++
++```c
++// skb->priority 路径
++else if (TC_H_MAJ(skb->priority) == sch->handle ...) {
++    tin = q->tin_order[TC_H_MIN(skb->priority) - 1];
++    if (tin == highest_priority_tin) {
++        tin = highest_priority_tin - 1;  // 强制降级！
++    }
++}
++// mark 路径
++else if (mark && mark <= q->tin_cnt) {
++    tin = q->tin_order[mark - 1];
++    if (tin == highest_priority_tin) {
++        tin = highest_priority_tin - 1;  // 强制降级！
++    }
++}
++// DSCP 路径
++else {
++    dscp = cake_handle_diffserv(skb, wash);
++    tin = q->tin_index[dscp];
++    if (tin == highest_priority_tin) {
++        tin = highest_priority_tin - 1;  // 强制降级！
++    }
++}
++```
++
++**效果**：tin=7 是 VIP 专属通道，即使有人在包里伪造 DSCP EF 标记，也只能到 tin=6。
++
++## 魔改 3: diffserv8 映射表修改
++
++标准 CAKE 的 DSCP→tin 映射 vs 魔改后的：
++
++| DSCP | 标准 CAKE | 魔改后 | 变化原因 |
++|------|----------|--------|---------|
++| CS0 (0) | tin=2 | tin=2 | 不变 |
++| CS1 (8) | tin=1 | tin=0 | 背景流量降到最低 |
++| EF (46) | tin=7 | tin=7 → 但被降级保护拦截到 tin=6 | EF 不再是最高，VIP 才是 |
++| CS6 (48) | tin=6 | tin=5 | 网络控制降级 |
++| CS7 (56) | tin=7 | tin=6 | 网络管理降级 |
++
++核心思想：把标准的 "CS6/CS7 = 最高" 改成 "VIP IP = 最高"，原来的最高级全部往下挤一级。
++
++## 魔改 4: tin=7 和 tin=2 特殊配置
++
++```c
++for (i = 0; i < q->tin_cnt; i++) {
++    if (i == 7) {
++        // VIP 专属 tin: 100% 带宽 + interval=10ms + quantum=65535
++        cake_set_rate(b, q->rate_bps * 10 / 10, mtu,
++                      us_to_ns(q->target), us_to_ns(10000));
++        b->tin_quantum = 65535;  // 最大调度权重
++    } else if (i == 2) {
++        // 默认流量 tin: 90% 带宽 + quantum=65535
++        cake_set_rate(b, q->rate_bps * 9 / 10, mtu,
++                      us_to_ns(q->target), us_to_ns(100000));
++        b->tin_quantum = 65535;
++    } else {
++        // 其他 tin: 90% 带宽 + 标准 quantum
++        cake_set_rate(b, rate, mtu,
++                      us_to_ns(q->target), us_to_ns(100000));
++        b->tin_quantum = max_t(u16, 1U, quantum);
++    }
++}
++```
++
++| tin | 带宽 | interval | quantum | 用途 |
++|-----|------|----------|---------|------|
++| 7 (VIP) | 100% | 10ms | 65535 (最大) | VIP 独占，最激进排队 |
++| 2 (默认) | 90% | 100ms | 65535 | 默认流量，大权重 |
++| 其他 | 90% | 100ms | 标准 | 按比例分配 |
++
++tin=7 interval=10ms 极其激进——标准 CoDel 是 100ms，这里压到 10ms，意味着排队超过 10ms 就开始丢包，保证 VIP 延迟极低。
++
++## 魔改 5: CoDel 全局参数极端调优
++
++```c
++// 标准 CAKE:
++q->interval = 100000;  // 100ms
++q->target   =   5000;  // 5ms
++
++// 魔改后:
++q->interval = 10000;   // 10ms  ← 压缩 10 倍！
++q->target   =  3000;   // 3ms   ← 压缩 40%
++```
++
++**CoDel 算法简述：** 如果队列中包的排队延迟超过 target 且持续 interval 时间，就开始丢包控制延迟。
++
++**魔改效果：** 任何包只要排队超过 3ms 且持续 10ms，就会被丢弃。这对延迟极其敏感的游戏场景有利，但对大文件下载/视频会更激进地丢包。
++
++## 魔改 6: 全局带宽预留
++
++```c
++// 标准:
++u64 rate = q->rate_bps;
++
++// 魔改:
++u64 rate = q->rate_bps * 9 / 10;  // 只使用 90% 带宽
++```
++
++预留 10% 带宽作为缓冲，防止链路完全饱和导致排队延迟飙升。
++
++## CAKE 和 HNAT 的关系总结
++
++```
++数据包到达路由器
++       │
++       ▼
++┌─ HNAT PPE 检查 ─┐
++│  已有 Flow Entry? │
++│                   │
++│  ✅ 是 (已 offload)│──→ 硬件直接转发（QDMA 队列）
++│                   │    CAKE 完全不参与
++│  ❌ 否 (新连接)    │
++└───────┬───────────┘
++        ▼
++  走内核协议栈
++        │
++        ▼
++┌─ iptables mangle ─┐
++│  VIP IP → DSCP=46  │
++│  其他 → DSCP=0     │
++└────────┬───────────┘
++         ▼
++┌─ CAKE qdisc ─────────────────┐
++│  is_nat_target_ip_ipv4_k()   │
++│  VIP IP? → tin=7 (直通)       │
++│  非 VIP? → 标准分类 + 降级保护 │
++│  CoDel: 3ms/10ms 激进丢包    │
++└────────┬─────────────────────┘
++         ▼
++┌─ HNAT POST_ROUTING hook ─┐
++│  建流 offload → PPE       │
++│  记录 qid (基于 DSCP)     │
++│  后续包走硬件              │
++└──────────────────────────┘
++```
++
++CAKE 只处理新连接的前几个包（HNAT offload 前）和无法 offload 的流量。一旦 HNAT 建流成功，后续包全走硬件 QDMA 队列，CAKE 不再参与。
++
++## 109 网段增量补丁 (9999992)
++
++在以上基础上，9999992 补丁新增了 192.168.109.0/24 网段的精细化控制：
++
++- **仅 UDP 且包长 ≤ 300 字节** 的小包走 tin=7 最高优先级
++- 大 UDP 和所有 TCP 走标准 CAKE 分类
++- 通过通用函数指针架构 `ip_range_check_fn` 消除代码重复
++- 与 iptables HNAT 规则保持完全一致
+diff --git a/docs/verify-vip-qos.sh b/docs/verify-vip-qos.sh
+new file mode 100644
+index 0000000000..78c4aa7093
+--- /dev/null
++++ b/docs/verify-vip-qos.sh
+@@ -0,0 +1,325 @@
++#!/bin/sh
++# VIP QoS 精确验证脚本 v2
++# 在路由器上运行: sh /root/speed.sh
++
++echo "============================================"
++echo "  VIP QoS 精确验证 v2"
++echo "============================================"
++echo ""
++
++# ==========================================
++# 1. HNAT 条目精确分类
++# ==========================================
++echo "【1】HNAT 硬件加速条目精确分类"
++echo "--------------------------------------------"
++
++HNAT_FILE="/sys/kernel/debug/hnat/hnat_entry"
++if [ ! -f "$HNAT_FILE" ]; then
++    echo "⚠️  hnat_entry 不存在"
++else
++    ALL=$(cat "$HNAT_FILE")
++    TOTAL=$(echo "$ALL" | wc -l)
++    echo "总 HNAT 条目数: $TOTAL"
++    echo ""
++    echo "  队列说明: dscp_en=true 各流量期望 qid"
++    echo "  ┌──────────────┬──────────────────────┬───────────────────────┐"
++    echo "  │ 流量类型     │ 上传 LAN→WAN(Q0-Q12) │ 下载 WAN→LAN(Q32-Q44) │"
++    echo "  ├──────────────┼──────────────────────┼───────────────────────┤"
++    echo "  │ VIP/游戏UDP  │ qid(0)  → Q0  SP     │ qid(32) → Q32 SP      │"
++    echo "  │ 普通流量     │ qid(11) → Q11 WRR    │ qid(43) → Q43 WRR     │"
++    echo "  └──────────────┴──────────────────────┴───────────────────────┘"
++    echo ""
++
++    # 使用高精度 AWK 解析:
++    # 1. 过滤掉无 NAT 转换的 LAN-to-LAN 互访流量 (通过判断 $3 和 $5 是否相等)
++    # 2. 上传(LAN→WAN): 发生 Source NAT (fw1[1] != fw2[1])，且原始源 IP 是目标 LAN 设备
++    # 3. 下载(WAN→LAN): 发生 Destination NAT (fw1[2] != fw2[2])，且转换后目标 IP 是目标 LAN 设备
++    get_hnat_entries() {
++        local dir=$1
++        local type=$2
++        echo "$ALL" | awk -v dir="$dir" -v type="$type" '{
++            orig = ""; trans = "";
++            if ($4 == "=>") { orig = $3; trans = $5; }
++            else if ($3 == "=>") { orig = $2; trans = $4; }
++            else next;
++            
++            split(orig, fw1, "->"); split(trans, fw2, "->");
++            
++            target_ip = "";
++            if (dir == "UP" && fw1[1] != fw2[1]) {
++                split(fw1[1], ip, ":");
++                target_ip = ip[1];
++            } else if (dir == "DN" && fw1[2] != fw2[2]) {
++                split(fw2[2], ip, ":");
++                target_ip = ip[1];
++            } else {
++                next;
++            }
++            
++            split(target_ip, oct, ".");
++            o1 = oct[1]+0; o2 = oct[2]+0; o3 = oct[3]+0; o4 = oct[4]+0;
++            
++            if (o1 != 192 || o2 != 168) next;
++            
++            is_vip = (o3 >= 110 && o3 <= 119 && o4 >= 10 && o4 <= 39);
++            is_109 = (o3 == 109);
++            
++            if (type == "VIP" && is_vip) { print "    " $0; }
++            else if (type == "109" && is_109) { print "    " $0; }
++            else if (type == "NM" && !is_vip && !is_109) { print "    " $0; }
++        }'
++    }
++
++    # ---- VIP: 192.168.110-119.10-39 ----
++    echo "━━━ ✅ VIP 流量 (192.168.110-119.10-39) ━━━"
++    echo "  期望: 上传 qid(0)/Q0 SP,  下载 qid(32)/Q32 SP"
++    VIP_UP_ENTRIES=$(get_hnat_entries "UP" "VIP")
++    VIP_DN_ENTRIES=$(get_hnat_entries "DN" "VIP")
++    echo "  ↑ 上传 (LAN→WAN, 源IP在VIP范围):"
++    [ -n "$VIP_UP_ENTRIES" ] && echo "$VIP_UP_ENTRIES" | head -5 || echo "    (无)"
++    echo "  ↓ 下载 (WAN→LAN, 目标IP在VIP范围):"
++    [ -n "$VIP_DN_ENTRIES" ] && echo "$VIP_DN_ENTRIES" | head -5 || echo "    (无)"
++    VIP_UP=$(echo "$VIP_UP_ENTRIES" | grep -c "=>")
++    VIP_DN=$(echo "$VIP_DN_ENTRIES" | grep -c "=>")
++    echo "  (上传 $VIP_UP 条 / 下载 $VIP_DN 条 → 期望 qid(0)/qid(32))"
++    echo ""
++
++    # ---- 游戏加速区: 192.168.109.x ----
++    echo "━━━ 🎮 游戏加速 (192.168.109.x) ━━━"
++    echo "  ⚠️  仅 UDP≤300B 打 DSCP=46 → qid(0)/qid(32) SP"
++    echo "  TCP/大包UDP 走普通通道 → qid(11)/qid(43) WRR"
++    N109_UP_ENTRIES=$(get_hnat_entries "UP" "109")
++    N109_DN_ENTRIES=$(get_hnat_entries "DN" "109")
++    echo "  ↑ 上传 (LAN→WAN, 源IP为192.168.109.x):"
++    [ -n "$N109_UP_ENTRIES" ] && echo "$N109_UP_ENTRIES" | head -5 || echo "    (无)"
++    echo "  ↓ 下载 (WAN→LAN, 目标IP为192.168.109.x):"
++    [ -n "$N109_DN_ENTRIES" ] && echo "$N109_DN_ENTRIES" | head -5 || echo "    (无)"
++    N109_UP=$(echo "$N109_UP_ENTRIES" | grep -c "=>")
++    N109_DN=$(echo "$N109_DN_ENTRIES" | grep -c "=>")
++    echo "  (上传 $N109_UP 条 / 下载 $N109_DN 条 → UDP小包期望 qid(0)/qid(32), 其他期望 qid(11)/qid(43))"
++    echo ""
++
++    # ---- 普通流量: 192.168 网段, 非 VIP 非 109 ----
++    echo "━━━ 📦 普通流量 (其他 192.168.x.x 设备) ━━━"
++    echo "  期望: 上传 hash到 Q5-Q29, 下载 hash到 Q37-Q61"
++    NM_UP_ENTRIES=$(get_hnat_entries "UP" "NM")
++    NM_DN_ENTRIES=$(get_hnat_entries "DN" "NM")
++    echo "  ↑ 上传 (LAN→WAN, 源IP为普通设备):"
++    [ -n "$NM_UP_ENTRIES" ] && echo "$NM_UP_ENTRIES" | head -5 || echo "    (无)"
++    echo "  ↓ 下载 (WAN→LAN, 目标IP为普通设备):"
++    [ -n "$NM_DN_ENTRIES" ] && echo "$NM_DN_ENTRIES" | head -5 || echo "    (无)"
++    NM_UP=$(echo "$NM_UP_ENTRIES" | grep -c "=>")
++    NM_DN=$(echo "$NM_DN_ENTRIES" | grep -c "=>")
++    echo "  (上传 $NM_UP 条 / 下载 $NM_DN 条 → 分布于 Q5-Q29/Q37-Q61)"
++fi
++echo ""
++echo "【2】QDMA 全部硬件队列 (DSCP 映射)"
++echo "--------------------------------------------"
++echo "  上行 (LAN→WAN) Queue 0-12  [sch0/sch2 上传调度器]:"
++echo "  Queue | DSCP | 流量类型           | 包数        | 丢包"
++echo "  ------|------|--------------------|-----------|---------"
++
++# 上行队列 Q0-Q12 DSCP 映射 (LAN→WAN, sch0=VIP SP / sch2=普通上传速率限制)
++get_up_label() {
++    case $1 in
++        0)  echo "46     EF    ★VIP/游戏 SP最高   " ;;
++        1)  echo "45            SP次高           " ;;
++        2)  echo "44            SP              " ;;
++        3)  echo "43            SP              " ;;
++        4)  echo "42            SP              " ;;
++        5)  echo "41            SP              " ;;
++        6)  echo "48/56  CS6-7  网络控制 SP      " ;;
++        7)  echo "40     CS5    SP              " ;;
++        8)  echo "32-39  AF4x   高优视频 WRR     " ;;
++        9)  echo "24-31  AF3x   普通视频 WRR     " ;;
++        10) echo "16-23  AF2x   网页/应用 WRR    " ;;
++        11) echo "0      BE    ★普通流量 WRR    " ;;
++        12) echo "8-15   CS1    后台清道夫(低于BE)" ;;
++    esac
++}
++for qid in 0 1 2 3 4 5 6 7 8 9 10 11 12; do
++    FILE="/sys/kernel/debug/hnat/qdma_txq${qid}"
++    PKTS="N/A"; DROP="N/A"
++    if [ -f "$FILE" ]; then
++        PKTS=$(grep "packet count" "$FILE" | awk '{print $3}')
++        DROP=$(grep "packet drop" "$FILE" | awk '{print $3}')
++        [ -z "$PKTS" ] && PKTS="0"
++        [ -z "$DROP" ] && DROP="0"
++    fi
++    LABEL=$(get_up_label $qid)
++    printf "  Q%-5s | %s | %-10s | %-5s\n" "$qid" "$LABEL" "$PKTS" "$DROP"
++done
++
++echo ""
++echo "  下行 (WAN→LAN) Queue 32-44 [sch1/sch3 下载调度器]:"
++echo "  Queue | DSCP | 流量类型           | 包数        | 丢包"
++echo "  ------|------|--------------------|-----------|---------"
++
++get_dn_label() {
++    case $1 in
++        32) echo "46     EF    ★VIP/游戏 SP最高   " ;;
++        33) echo "45            SP次高           " ;;
++        34) echo "44            SP              " ;;
++        35) echo "43            SP              " ;;
++        36) echo "42            SP              " ;;
++        37) echo "41            SP              " ;;
++        38) echo "48/56  CS6-7  网络控制 SP      " ;;
++        39) echo "40     CS5    SP              " ;;
++        40) echo "32-39  AF4x   高优视频 WRR     " ;;
++        41) echo "24-31  AF3x   普通视频 WRR     " ;;
++        42) echo "16-23  AF2x   网页/应用 WRR    " ;;
++        43) echo "0      BE    ★普通流量下行 WRR    " ;;
++        44) echo "8-15   CS1    后台清道夫(低于BE)" ;;
++    esac
++}
++for qid in 32 33 34 35 36 37 38 39 40 41 42 43 44; do
++    FILE="/sys/kernel/debug/hnat/qdma_txq${qid}"
++    PKTS="N/A"; DROP="N/A"
++    if [ -f "$FILE" ]; then
++        PKTS=$(grep "packet count" "$FILE" | awk '{print $3}')
++        DROP=$(grep "packet drop" "$FILE" | awk '{print $3}')
++        [ -z "$PKTS" ] && PKTS="0"
++        [ -z "$DROP" ] && DROP="0"
++    fi
++    LABEL=$(get_dn_label $qid)
++    printf "  Q%-5s | %s | %-10s | %-5s\n" "$qid" "$LABEL" "$PKTS" "$DROP"
++done
++echo ""
++
++
++# ==========================================
++# 3. CAKE SQM 分 tin 详细数据
++# ==========================================
++echo "【3】CAKE SQM Tin 分类统计 (软件路径)"
++echo "--------------------------------------------"
++CAKE_IF=$(tc qdisc show 2>/dev/null | grep cake | awk '{print $5}' | head -1)
++if [ -z "$CAKE_IF" ]; then
++    echo "  CAKE 未运行"
++else
++    echo "接口: $CAKE_IF"
++    echo ""
++    echo "          Tin0      Tin1      Tin2      Tin3      Tin4      Tin5      Tin6  Tin7(VIP)"
++    tc -s qdisc show dev "$CAKE_IF" 2>/dev/null | awk '
++    /^  pkts /   { printf "  pkts:   "; for(i=2;i<=NF;i++) printf "%10s", $i; print "" }
++    /^  bytes /  {
++        printf "  bytes:  "
++        for(i=2;i<=NF;i++) {
++            b=$i+0
++            if(b>=1073741824) s=sprintf("%.1fGB",b/1073741824)
++            else if(b>=1048576) s=sprintf("%.1fMB",b/1048576)
++            else if(b>=1024) s=sprintf("%.1fKB",b/1024)
++            else s=sprintf("%dB",b)
++            printf "%10s", s
++        }
++        print ""
++    }
++    /^  drops /  { printf "  drops:  "; for(i=2;i<=NF;i++) printf "%10s", $i; print "" }
++    /^  interval / { printf "  intrvl: "; for(i=2;i<=NF;i++) printf "%10s", $i; print "" }
++    '
++    echo ""
++    echo "━━━ Tin 7 (VIP专属) vs Tin 2 (默认流量) 对比 ━━━"
++    tc -s qdisc show dev "$CAKE_IF" 2>/dev/null | awk '
++    /^  pkts /    { t2_p=$4; t7_p=$9 }
++    /^  bytes /   { t2_b=$4+0; t7_b=$9+0 }
++    /^  drops /   { t2_d=$4; t7_d=$9 }
++    /^  interval / { t7_i=$9 }
++    END {
++        printf "  Tin7 VIP  (interval=%-5s): %s 包 / %.2fMB / %s 丢包\n", t7_i, t7_p, t7_b/1048576, t7_d
++        printf "  Tin2 默认 (interval=100ms): %s 包 / %.2fMB / %s 丢包\n", t2_p, t2_b/1048576, t2_d
++    }'
++fi
++echo ""
++
++# ==========================================
++# 4. iptables 流量统计
++# ==========================================
++echo "【4】iptables DSCP 标记命中统计"
++echo "--------------------------------------------"
++iptables -t mangle -L eqos -v -n 2>/dev/null | awk '
++/DSCP/ {
++    pkts=$1; bytes=$2
++    if ($0 ~ /192\.168\.109/) {
++        dir=($0 ~ /0\.0\.0\.0\/0.*192\.168\.109/) ? "109网段下行(UDP≤300B)" : "109网段上行(UDP≤300B)"
++        printf "  %-30s %s pkts / %s\n", dir, pkts, bytes
++    } else if ($0 ~ /0\.0\.0\.0\/0.*192\.168\.0\.0/) {
++        printf "  %-30s %s pkts / %s\n", "VIP 下行(110-119.10-39)", pkts, bytes
++    } else if ($0 ~ /192\.168\.0\.0.*0\.0\.0\.0/) {
++        printf "  %-30s %s pkts / %s\n", "VIP 上行(110-119.10-39)", pkts, bytes
++    }
++}'
++echo ""
++
++# ==========================================
++# 5. 实时吞吐对比（连续2次采样）
++# ==========================================
++echo "【5】实时吞吐量采样 (3秒间隔)"
++echo "--------------------------------------------"
++# 读取 QDMA 包计数，重试一次避免 sysfs 瞬间返回空
++read_pkts() {
++    VAL=$(grep "packet count" "$1" 2>/dev/null | awk '{print $3}')
++    [ -z "$VAL" ] && VAL=$(grep "packet count" "$1" 2>/dev/null | awk '{print $3}')
++    echo "${VAL:-0}"
++}
++
++# 范围求和函数 (由于普通流量通过 hash 分布在 Q5-Q29)
++read_pkts_sum() {
++    local total=0
++    for q in $(seq $1 $2); do
++        total=$((total + $(read_pkts /sys/kernel/debug/hnat/qdma_txq$q)))
++    done
++    echo "$total"
++}
++
++Q0_A=$(read_pkts /sys/kernel/debug/hnat/qdma_txq0)
++Q32_A=$(read_pkts /sys/kernel/debug/hnat/qdma_txq32)
++QNM_UP_A=$(read_pkts_sum 5 29)
++QNM_DN_A=$(read_pkts_sum 37 61)
++CAKE_SENT_A=$(tc -s qdisc show dev "$CAKE_IF" 2>/dev/null | awk '/^ Sent /{print $2; exit}')
++CAKE_SENT_A=${CAKE_SENT_A:-0}
++
++sleep 3
++
++Q0_B=$(read_pkts /sys/kernel/debug/hnat/qdma_txq0)
++Q32_B=$(read_pkts /sys/kernel/debug/hnat/qdma_txq32)
++QNM_UP_B=$(read_pkts_sum 5 29)
++QNM_DN_B=$(read_pkts_sum 37 61)
++CAKE_SENT_B=$(tc -s qdisc show dev "$CAKE_IF" 2>/dev/null | awk '/^ Sent /{print $2; exit}')
++CAKE_SENT_B=${CAKE_SENT_B:-0}
++
++calc_pps() {
++    local A=$(echo "$1" | tr -cd '0-9')
++    local B=$(echo "$2" | tr -cd '0-9')
++    A=${A:-0}
++    B=${B:-0}
++    local DIFF=$(( B - A ))
++    if [ "$DIFF" -lt 0 ]; then
++        echo "0"
++    else
++        echo $(( DIFF / 3 ))
++    fi
++}
++
++Q0_RATE=$(calc_pps "$Q0_A" "$Q0_B")
++Q32_RATE=$(calc_pps "$Q32_A" "$Q32_B")
++QNM_UP_RATE=$(calc_pps "$QNM_UP_A" "$QNM_UP_B")
++QNM_DN_RATE=$(calc_pps "$QNM_DN_A" "$QNM_DN_B")
++CAKE_RATE=$(calc_pps "$CAKE_SENT_A" "$CAKE_SENT_B")
++
++echo "  硬件加速 VIP   上行 (Queue  0, sch0 SP): ${Q0_RATE} 包/秒"
++echo "  硬件加速 VIP   下行 (Queue 32, sch1 SP): ${Q32_RATE} 包/秒"
++echo "  硬件加速 普通  上行 (Queue 5-29, sch2 WRR): ${QNM_UP_RATE} 包/秒  ← 自动 Hash"
++echo "  硬件加速 普通  下行 (Queue 37-61, sch3 WRR): ${QNM_DN_RATE} 包/秒  ← 自动 Hash"
++if [ -n "$CAKE_IF" ]; then
++    if [ "$CAKE_RATE" = "N/A" ]; then
++        echo "  软件 SQM (CAKE) 吞吐:         N/A"
++    else
++        echo "  软件 SQM (CAKE) 吞吐:         $(( CAKE_RATE / 1024 )) KB/秒"
++    fi
++fi
++echo ""
++echo "  → Queue 0:     上行 VIP SP > 0  = VIP 硬件加速上行正在工作"
++echo "  → Queue 32:    下行 VIP SP > 0  = VIP 硬件加速下行正在工作"
++echo "  → Queue 5-29:  上行普通 WRR > 0 = 普通流量上行已成功分配到 per-user 队列"
++echo "  → Queue 37-61: 下行普通 WRR > 0 = dscp_en 已生效，下行不再拥堵"
++echo "  → CAKE > 0:    = HNAT 未命中流量走软件路径"
++echo "============================================"
+diff --git a/n60_pro_config_full_new b/n60_pro_config_full_new
+index 92a290ed79..adb72f5330 100644
+--- a/n60_pro_config_full_new
++++ b/n60_pro_config_full_new
+@@ -445,5 +445,3 @@ CONFIG_PACKAGE_kmod-crypto-des=y
+ CONFIG_PACKAGE_kmod-crypto-hmac=y
+ CONFIG_PACKAGE_kmod-crypto-md5=y
+ CONFIG_PACKAGE_kmod-crypto-sha256=y
+-
+-CONFIG_PACKAGE_opennds=y
+diff --git a/package/mtk/applications/luci-app-eqos-mtk/htdocs/luci-static/resources/view/eqos.js b/package/mtk/applications/luci-app-eqos-mtk/htdocs/luci-static/resources/view/eqos.js
+index ccdbd2cd45..0059ce6dd3 100644
+--- a/package/mtk/applications/luci-app-eqos-mtk/htdocs/luci-static/resources/view/eqos.js
++++ b/package/mtk/applications/luci-app-eqos-mtk/htdocs/luci-static/resources/view/eqos.js
+@@ -84,9 +84,14 @@ return view.extend({
+ 		o.datatype = 'and(uinteger,min(0))';
+ 		o.rmempty = false;
+ 
+-		o = s.option(form.Value, 'comment', _('Comment'));
++		o = s.option(form.ListValue, 'comment', _('QoS Mode'));
++		o.value('64', _('VIP (Highest priority, no rate limit)'));
++		o.value('0', _('Rate Limit (Hardware Q31/Q63)'));
++		o.value('65', _('Rate Limit (Software tc)'));
++		o.default = '0';
+ 		o.rmempty = true;
+-		
++		o.description = _('VIP=64: DSCP 46, highest priority queue Q0/Q32. Rate Limit<64: hardware queue Q31/Q63 with min/max rate. Software>64: tc htb software shaping.');
++
+ 		o = s.option(form.Value, 'interfacename', _('InterfaceName(start from 0)'));
+ 		o.datatype = 'and(uinteger,min(0))';
+ 		o.rmempty = true;
+diff --git a/package/mtk/applications/luci-app-eqos-mtk/root/etc/init.d/eqos b/package/mtk/applications/luci-app-eqos-mtk/root/etc/init.d/eqos
+index c656fc69e1..7b454c44a5 100755
+--- a/package/mtk/applications/luci-app-eqos-mtk/root/etc/init.d/eqos
++++ b/package/mtk/applications/luci-app-eqos-mtk/root/etc/init.d/eqos
+@@ -51,12 +51,14 @@ start_service() {
+         fi  
+         
+         if [ "$smarthqos" -eq "1" ]; then  
+-        for i in $(seq 1 31); do
++        # 上行 per-user 队列: Q5-Q29 (跳过 Q0-Q4 优先队列, Q30 背景, Q31 限速)
++        for i in $(seq 5 29); do
+         	if [ "$upload" -ne "0" ]; then
+ 		echo 2 1 $(($upload*225)) 1 $(($upload*1000)) 4 1 > /sys/kernel/debug/hnat/qdma_txq$i
+ 		fi
+ 		done
+-		for i in $(seq 33 63); do
++		# 下行 per-user 队列: Q37-Q61 (跳过 Q32-Q36 优先队列, Q62 背景, Q63 限速)
++		for i in $(seq 37 61); do
+ 		if [ "$download" -ne "0" ]; then
+ 		echo 3 1 $(($download*200)) 1 $(($download*1000)) 4 1 > /sys/kernel/debug/hnat/qdma_txq$i
+ 		fi
+@@ -67,29 +69,15 @@ start_service() {
+ 	bash /usr/sbin/loadbalance "$interface"
+         fi
+         config_foreach parse_device "device"
+-        if [ "$smarthqos" -eq "1" ]; then
+-        rm /etc/hotplug.d/dhcp/99-eqos
+-	cat << 'EOF' > /etc/hotplug.d/dhcp/99-eqos
+-#!/bin/sh
+-
+-# 只有在新增 DHCP 租约时才执行操作
+-if [ "$ACTION" = "add" ]; then
+-
+-    # 执行指定的命令
+-    /etc/init.d/dhcp_mark.sh eqos init
+-fi
+-EOF
+-
+-        chmod +x /etc/hotplug.d/dhcp/99-eqos
+-        /etc/init.d/dnsmasq restart
+-        /etc/init.d/dhcp_mark.sh eqos init
+-        fi   
++        # smarthqos DHCP DSCP 分配已禁用:
++        # dhcp_mark.sh 会给每个设备随机分配 DSCP 1-31, 与我们的 DSCP→队列映射冲突
++        # per-user 隔离现在由内核 IP hash (last_octet % 25) 实现, 不需要 DHCP 分配
+ }
+ 
+ stop_service() {
+ 	eqos stop
+ 	iptables -t mangle -F PREROUTING
+-	rm /etc/hotplug.d/dhcp/99-eqos
++	rm -f /etc/hotplug.d/dhcp/99-eqos
+ }
+ 
+ reload_service() {
+diff --git a/package/mtk/applications/luci-app-eqos-mtk/root/usr/sbin/eqos b/package/mtk/applications/luci-app-eqos-mtk/root/usr/sbin/eqos
+index a4bb1b4a26..b0002749b6 100755
+--- a/package/mtk/applications/luci-app-eqos-mtk/root/usr/sbin/eqos
++++ b/package/mtk/applications/luci-app-eqos-mtk/root/usr/sbin/eqos
+@@ -32,18 +32,23 @@ iptables_stop() {
+     ebtables -t nat -D POSTROUTING  -j eqos -p ipv6
+     echo 0 > /sys/kernel/debug/hnat/qos_toggle
+     sed -i '/\/etc\/init.d\/eqos start/d' /etc/firewall.user
+-    iptables -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 0
+-    iptables -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 0
+-    ip6tables -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 0
+-    ip6tables -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 0
++    # 清理 dscp_clear 链
++    iptables -t mangle -D FORWARD -j dscp_clear 2>/dev/null
++    iptables -t mangle -F dscp_clear 2>/dev/null
++    iptables -t mangle -X dscp_clear 2>/dev/null
++    ip6tables -t mangle -D FORWARD -j dscp_clear 2>/dev/null
++    ip6tables -t mangle -F dscp_clear 2>/dev/null
++    ip6tables -t mangle -X dscp_clear 2>/dev/null
+     echo "10 0" > /sys/kernel/debug/hnat/hnat_setting
+     echo "11 1" >/sys/kernel/debug/hnat/hnat_setting
+     for i in $(seq 0 31); do
+-    echo 0 0 0 0 0 4 4 > $hqos_path/qdma_txq$i
++    echo 0 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq$i
+     done
+     for i in $(seq 32 63); do
+-    echo 1 0 0 0 0 4 4 > $hqos_path/qdma_txq$i
++    echo 1 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq$i
+     done
++    # 清零限速累加器和per-device速率记录
++    rm -f /tmp/eqos_q31_rate /tmp/eqos_q63_rate /tmp/eqos_dev_up_* /tmp/eqos_dev_dl_*
+     echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch0
+     echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch1
+     echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch2
+@@ -51,14 +56,22 @@ iptables_stop() {
+ }
+ 
+ iptables_start_prepare() {
+-    iptables -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 0
+-    iptables -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 0
+-    iptables -t mangle -A FORWARD -i br-lan -j DSCP --set-dscp 0
+-    iptables -t mangle -A FORWARD -o br-lan -j DSCP --set-dscp 0
+-    ip6tables -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 0
+-    ip6tables -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 0
+-    ip6tables -t mangle -A FORWARD -i br-lan -j DSCP --set-dscp 0
+-    ip6tables -t mangle -A FORWARD -o br-lan -j DSCP --set-dscp 0
++    # EF(46) 降级为 VA(44) 即时语音, Q0 只留给 eqos 指定的 VIP 设备
++    # VA(44) 保留, 走 Q2 实时交互队列
++    # 其他全部清零, eqos 链会重新标记: VIP=46, 限速=2, 109小包=46
++    iptables -t mangle -N dscp_clear 2>/dev/null
++    iptables -t mangle -F dscp_clear
++    iptables -t mangle -A dscp_clear -m dscp --dscp 44 -j RETURN
++    iptables -t mangle -A dscp_clear -m dscp --dscp 46 -j DSCP --set-dscp 44
++    iptables -t mangle -D FORWARD -j dscp_clear 2>/dev/null
++    iptables -t mangle -I FORWARD 1 -j dscp_clear
++
++    ip6tables -t mangle -N dscp_clear 2>/dev/null
++    ip6tables -t mangle -F dscp_clear
++    ip6tables -t mangle -A dscp_clear -m dscp --dscp 44 -j RETURN
++    ip6tables -t mangle -A dscp_clear -m dscp --dscp 46 -j DSCP --set-dscp 44
++    ip6tables -t mangle -D FORWARD -j dscp_clear 2>/dev/null
++    ip6tables -t mangle -I FORWARD 1 -j dscp_clear
+ }
+ 
+ iptables_start_inital() {
+@@ -67,10 +80,17 @@ iptables_start_inital() {
+     iptables -t mangle -D FORWARD  -j eqos
+     iptables -t mangle -A FORWARD  -j eqos
+     echo 1 > /sys/kernel/debug/hnat/qos_toggle
++    # 基线调度器配置 (后续 start 会完整覆盖)
+     echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch0
+     echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch1
++    echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch2
++    echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch3
++    # VIP 队列 SP(weight=0): Q0(上行VIP) Q32(下行VIP)
++    # 默认队列 SP(weight=0): Q1(上行默认) Q33(下行默认) — 对应内核 qid=33
+     echo 0 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq0
+     echo 1 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq8
++    echo 0 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq1
++    echo 1 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq33
+     echo "11 1" >/sys/kernel/debug/hnat/hnat_setting
+     uci -q set "turboacc.config.fastpath_mh_eth_hnat_bind_rate"="1"
+     uci -q commit "turboacc"
+@@ -80,85 +100,25 @@ iptables_start_inital() {
+ }
+ 
+ dscp_to_queue() {
+-
+     local dscp=$1
+ 
+-    # Initialize queue and offset
+-    local queue=5  # 初始化队列值
+-    local offset=0
+-
+-    # Keep trying with decreasing DSCP values until a match is found or DSCP becomes negative
+-    while [ $dscp -ge 0 ]; do  # DSCP最大值为63(6位二进制)
+     if [ $dscp -eq 46 ]; then
+-        queue=0
+-        offset=0  # EF - 实时语音流，最高优先级
+-        break
+-    elif [ $dscp -eq 46 ]; then  # Note: This is a duplicate condition from the original code
+-        queue=0
+-        offset=0  # EF - 实时语音流，最高优先级
+-        break
+-    elif [ $dscp -eq 45 ]; then
+-        queue=1
+-        offset=0  # EF - 实时语音流，最高优先级
+-        break
+-    elif [ $dscp -eq 44 ]; then
+-        queue=2
+-        offset=0
+-        break
+-    elif [ $dscp -eq 43 ]; then
+-        queue=3
+-        offset=0
+-        break
+-    elif [ $dscp -eq 42 ]; then
+-        queue=4
+-        offset=0
+-        break
+-    elif [ $dscp -eq 41 ]; then
+-        queue=5
+-        offset=0
+-        break
+-    elif [ $dscp -eq 56 ]; then
+-        queue=5
+-        offset=1  # CS7 - 网络管理流
+-        break
+-    elif [ $dscp -eq 48 ]; then
+-        queue=5
+-        offset=1  # CS6 - 网络控制流
+-        break
+-    elif [ $dscp -eq 40 ]; then
+-        queue=5
+-        offset=2  # CS5 - 视频会议，关键业务应用
+-        break
+-    elif [ $dscp -ge 32 ] && [ $dscp -le 39 ]; then
+-        queue=5
+-        offset=3  # AF4x - 高优视频流
+-        break
+-    elif [ $dscp -ge 24 ] && [ $dscp -le 31 ]; then
+-        queue=5
+-        offset=4  # AF3x - 普通视频流
+-        break
++        echo 0    # EF → Q0 (CAKE tin7)
++    elif [ $dscp -eq 48 ] || [ $dscp -eq 56 ]; then
++        echo 1    # CS6/CS7 → Q1 (CAKE tin6)
++    elif [ $dscp -eq 32 ] || [ $dscp -eq 40 ] || [ $dscp -eq 44 ]; then
++        echo 2    # CS4/CS5/VA → Q2 (CAKE tin5)
+     elif [ $dscp -ge 16 ] && [ $dscp -le 23 ]; then
+-        queue=5
+-        offset=5  # AF2x - 网页、应用、交互
+-        break
+-    elif [ $dscp -ge 8 ] && [ $dscp -le 15 ]; then
+-        queue=5
+-        offset=7  # AF1x / CS1 - 背景任务，低优先级流
+-        break
+-    elif [ $dscp -eq 0 ]; then
+-        queue=5
+-        offset=6  # CS0 - 默认流量，正常优先级
+-        break
++        echo 3    # CS2/AF2x → Q3 (CAKE tin4)
++    elif ([ $dscp -ge 24 ] && [ $dscp -le 31 ]) || ([ $dscp -ge 33 ] && [ $dscp -le 39 ]); then
++        echo 4    # AF3x/AF4x → Q4 (CAKE tin3)
++    elif [ $dscp -eq 2 ]; then
++        echo 31   # 限速设备专用 DSCP → Q31 (硬件限速队列)
++    elif [ $dscp -eq 1 ] || ([ $dscp -ge 8 ] && [ $dscp -le 15 ]); then
++        echo 30   # LE/CS1/AF1x → Q30 (CAKE tin0+1, 背景最低)
++    else
++        echo 5    # CS0(0) + 未定义 → Q5 (默认, 内核中按IP hash到Q5-Q29)
+     fi
+-
+-    dscp=$((dscp - 1))
+-    done
+-
+-    # Calculate final queue value
+-    local result=$((queue + offset))
+-
+-    # Return result
+-    echo $result
+ }
+ 
+ 
+@@ -169,38 +129,46 @@ case "$1" in
+     ;;
+     "start")
+     stop_qos
++    # 清零限速累加器和per-device速率记录
++    echo 0 > /tmp/eqos_q31_rate
++    echo 0 > /tmp/eqos_q63_rate
++    rm -f /tmp/eqos_dev_up_* /tmp/eqos_dev_dl_*
+     iptables_start_prepare
+ #        start_qos $2 $3
+     iptables_start_inital
+     echo 1 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch0
+     echo 1 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch1
+-    echo 1 sp $(($3*1000*10/10)) > /sys/kernel/debug/hnat/qdma_sch2
+-    echo 1 sp $(($2*1000*10/10)) > /sys/kernel/debug/hnat/qdma_sch3
+-
+-    for i in $(seq 6 31); do
+-    echo 2 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq$i
++    echo 1 wrr $(($3*1000*10/10)) > /sys/kernel/debug/hnat/qdma_sch2
++    echo 1 wrr $(($2*1000*10/10)) > /sys/kernel/debug/hnat/qdma_sch3
++
++    # qdma_txq 格式: scheduler min_en min_rate max_en max_rate weight resv
++    # === 上行 Q0-Q31 ===
++    # Q0-Q4: 优先队列 → sch0 (SP, 不限速)
++    for i in $(seq 0 4); do
++        echo 0 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq$i
+     done
+-    for i in $(seq 38 63); do
+-    echo 3 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq$i
++    # Q5-Q29: per-user 默认队列 → sch2 (WRR 等权重=4)
++    for i in $(seq 5 29); do
++        echo 2 0 0 0 0 4 0 > /sys/kernel/debug/hnat/qdma_txq$i
+     done
+-
+-    echo 2 1 2000 1 $(($3*1000*10/10)) 1 4 > /sys/kernel/debug/hnat/qdma_txq11
+-    echo 3 1 3000 1 $(($2*1000*10/10)) 1 4 > /sys/kernel/debug/hnat/qdma_txq43
+-
+-    for i in $(seq 0 5); do
+-    echo 0 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq$i
++    # Q30: 背景 DSCP (LE/CS1/AF1x) → sch2 (WRR 低权重=1)
++    echo 2 0 0 0 0 1 0 > /sys/kernel/debug/hnat/qdma_txq30
++    # Q31: 限速设备专用 → sch2 (WRR 权重=1, 由 add 命令设 min/max rate)
++    echo 2 0 0 0 0 1 0 > /sys/kernel/debug/hnat/qdma_txq31
++
++    # === 下行 Q32-Q63 ===
++    # Q32-Q36: 优先队列 → sch1 (SP, 不限速)
++    for i in $(seq 32 36); do
++        echo 1 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq$i
+     done
+-    for i in $(seq 32 37); do
+-    echo 1 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq$i
++    # Q37-Q61: per-user 默认队列 → sch3 (WRR 等权重=4)
++    for i in $(seq 37 61); do
++        echo 3 0 0 0 0 4 0 > /sys/kernel/debug/hnat/qdma_txq$i
+     done
+-
+-    #echo 2 1 3000 0 0 256 4 > /sys/kernel/debug/hnat/qdma_txq1
+-    #echo 3 1 5000 0 0 256 4 > /sys/kernel/debug/hnat/qdma_txq33
+-    #echo 2 1 3000 0 0 256 4 > /sys/kernel/debug/hnat/qdma_txq2
+-    #echo 3 1 5000 0 0 256 4 > /sys/kernel/debug/hnat/qdma_txq34
+-    echo 2 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq0
+-    echo 1 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq8
+-    echo 3 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq32
++    # Q62: 背景 DSCP (LE/CS1/AF1x) → sch3 (WRR 低权重=1)
++    echo 3 0 0 0 0 1 0 > /sys/kernel/debug/hnat/qdma_txq62
++    # Q63: 限速设备专用 → sch3 (WRR 权重=1, 由 add 命令设 min/max rate)
++    echo 3 0 0 0 0 1 0 > /sys/kernel/debug/hnat/qdma_txq63
+ 
+     #iptables -t mangle -D eqos -m iprange --src-range 192.168.110.10-192.168.110.39 -j MARK --set-mark 0x99
+     #iptables -t mangle -D eqos -m iprange --dst-range 192.168.110.10-192.168.110.39 -j MARK --set-mark 0x99
+@@ -215,19 +183,26 @@ case "$1" in
+     #iptables -t mangle -I eqos -m iprange  --src-range 192.168.110.10-192.168.110.39 -j DSCP --set-dscp 46
+     #iptables -t mangle -I eqos -m iprange  --dst-range 192.168.110.10-192.168.110.39 -j DSCP --set-dscp 46
+     
+-    # 插入使用 u32 模块实现更精确“并且”判断的规则
++    # 插入使用 u32 模块实现更精确"并且"判断的规则
++    # u32 模块读取 4 字节为 32 位整数，必须使用位掩码隔离单个字节
++    #
+     # 源IP: 192.168.x.y, x=[110-119], y=[10-39]
+     # -s 192.168.0.0/16 确保是 192.168 开头
+-    # -m u32 --u32 "14=110:119" 匹配源IP第三个字节 (偏移 12+2=14) 在 110-119 之间
+-    # -m u32 --u32 "15=10:39" 匹配源IP第四个字节 (偏移 12+3=15) 在 10-39 之间
+-    iptables -t mangle -I eqos -s 192.168.0.0/16 -m u32 --u32 "14=110:119" -m u32 --u32 "15=10:39" -j DSCP --set-dscp 46
++    # 偏移 0xc = 源 IP 起始 (字节 12-15 = 192.168.x.y)
++    # &0x0000FF00 掩码提取第三字节 x, =0x6E00:0x7700 即 110-119
++    # &0x000000FF 掩码提取第四字节 y, =0x0A:0x27 即 10-39
++    iptables -t mangle -I eqos -s 192.168.0.0/16 -m u32 --u32 "0xc&0x0000FF00=0x00006E00:0x00007700" -m u32 --u32 "0xc&0x000000FF=0x0000000A:0x00000027" -j DSCP --set-dscp 46
+ 
+     # 目标IP: 192.168.x.y, x=[110-119], y=[10-39]
+-    # -d 192.168.0.0/16 确保是 192.168 开头
+-    # -m u32 --u32 "18=110:119" 匹配目标IP第三个字节 (偏移 16+2=18) 在 110-119 之间
+-    # -m u32 --u32 "19=10:39" 匹配目标IP第四个字节 (偏移 16+3=19) 在 10-39 之间
+-    iptables -t mangle -I eqos -d 192.168.0.0/16 -m u32 --u32 "18=110:119" -m u32 --u32 "19=10:39" -j DSCP --set-dscp 46
++    # 偏移 0x10 = 目标 IP 起始 (字节 16-19)
++    # 同样使用位掩码提取第三、四字节
++    iptables -t mangle -I eqos -d 192.168.0.0/16 -m u32 --u32 "0x10&0x0000FF00=0x00006E00:0x00007700" -m u32 --u32 "0x10&0x000000FF=0x0000000A:0x00000027" -j DSCP --set-dscp 46
+ 
++    # 192.168.109.0/24 网段: 仅加速小包 UDP（游戏包）
++    # 条件: UDP 协议 + 包长度 ≤ 300 字节
++    # 大于 300 的 UDP 和所有 TCP（视频/下载）不标记，走默认队列
++    iptables -t mangle -I eqos -s 192.168.109.0/24 -p udp -m length --length 0:300 -j DSCP --set-dscp 46
++    iptables -t mangle -I eqos -d 192.168.109.0/24 -p udp -m length --length 0:300 -j DSCP --set-dscp 46
+ 
+     # Delete existing rules properly
+     #iptables -t mangle -D eqos -m iprange --src-range 192.168.110.2-192.168.110.9 -j MARK --set-mark 0x99
+@@ -248,60 +223,93 @@ case "$1" in
+     ip="$2"
+     dl="$3"
+     up="$4"
+-    id="$5" idpair=$((id+32))
++    id="$5"
+     macaddr="$6"
++    interface="$7"
+     cnt=$(tc class show dev $dev | wc -l)
+ 
+ 
+-
+-    dscp=$id
+-
+-    up_id=$(dscp_to_queue $id)
+-    down_id=$((up_id+32))
+-
+-
+     if [ $id -eq 64 ]; then
+ 
+-        iptables -t mangle -D eqos -s $ip -j DSCP --set-dscp 46
+-        iptables -t mangle -D eqos -d $ip -j DSCP --set-dscp 46
+-        ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j MARK --set-mark 46
+-        ebtables -t nat -D eqos -p ipv6 -d $macaddr -j mark --mark-set 46
++        iptables -t mangle -D eqos -s $ip -j DSCP --set-dscp 46 2>/dev/null
++        iptables -t mangle -D eqos -d $ip -j DSCP --set-dscp 46 2>/dev/null
++        # BUG-fix: IPv6 上行必须使用 DSCP 而非 MARK，否则硬件 HNAT QoS 无法识别
++        ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j DSCP --set-dscp 46 2>/dev/null
++        ebtables -t nat -D eqos -p ipv6 -d $macaddr -j mark --mark-set 46 2>/dev/null
+ 
+         iptables -t mangle -A eqos -s $ip -j DSCP --set-dscp 46
+-        ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j MARK --set-mark 46
++        ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j DSCP --set-dscp 46
+ 
+         iptables -t mangle -A eqos -d $ip -j DSCP --set-dscp 46
+         ebtables -t nat -A eqos -p ipv6 -d $macaddr -j mark --mark-set 46
+ 
+     elif [ $id -lt 64 ]; then
+-        iptables -t mangle -D eqos -s $ip -j DSCP --set-dscp ${dscp}
+-        iptables -t mangle -D eqos -d $ip -j DSCP --set-dscp ${dscp}
+-        ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j MARK --set-mark ${dscp}
+-        ebtables -t nat -D eqos -p ipv6 -d $macaddr -j mark --mark-set ${dscp}
+-
++        # 限速设备: 强制标记 DSCP 2 → 内核映射到 Q31/Q63 (硬件限速队列)
++        # BUG-4 fix: 删除旧规则时, 先从累加器减去该设备的速率
++        iptables -t mangle -D eqos -s $ip -j DSCP --set-dscp 2 2>/dev/null
++        iptables -t mangle -D eqos -d $ip -j DSCP --set-dscp 2 2>/dev/null
++        # BUG-fix: 同上，必须使用 DSCP
++        ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j DSCP --set-dscp 2 2>/dev/null
++        ebtables -t nat -D eqos -p ipv6 -d $macaddr -j mark --mark-set 2 2>/dev/null
++
++        # 如果删除的规则存在(即重新添加同一设备), 需要先减去旧速率
++        # 检查该设备是否已有记录, 如有则减去其旧速率后再加新速率
++        old_up_file="/tmp/eqos_dev_up_${ip}"
++        old_dl_file="/tmp/eqos_dev_dl_${ip}"
++        old_up=$(cat "$old_up_file" 2>/dev/null || echo 0)
++        old_dl=$(cat "$old_dl_file" 2>/dev/null || echo 0)
++
++        # 从总累加器中减去该设备的旧速率
++        if [ "$old_up" -gt 0 ]; then
++            cur_up=$(cat /tmp/eqos_q31_rate 2>/dev/null || echo 0)
++            new_total=$((cur_up - old_up))
++            [ $new_total -lt 0 ] && new_total=0
++            echo $new_total > /tmp/eqos_q31_rate
++            if [ $new_total -gt 0 ]; then
++                echo 2 1 ${new_total} 1 ${new_total} 1 1 > /sys/kernel/debug/hnat/qdma_txq31
++            else
++                echo 2 0 0 0 0 1 0 > /sys/kernel/debug/hnat/qdma_txq31
++            fi
++        fi
++        if [ "$old_dl" -gt 0 ]; then
++            cur_dl=$(cat /tmp/eqos_q63_rate 2>/dev/null || echo 0)
++            new_total=$((cur_dl - old_dl))
++            [ $new_total -lt 0 ] && new_total=0
++            echo $new_total > /tmp/eqos_q63_rate
++            if [ $new_total -gt 0 ]; then
++                echo 3 1 ${new_total} 1 ${new_total} 1 1 > /sys/kernel/debug/hnat/qdma_txq63
++            else
++                echo 3 0 0 0 0 1 0 > /sys/kernel/debug/hnat/qdma_txq63
++            fi
++        fi
+ 
+-        iptables -t mangle -A eqos -s $ip -j DSCP --set-dscp ${dscp}
+-        ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j MARK --set-mark ${dscp}
++        iptables -t mangle -A eqos -s $ip -j DSCP --set-dscp 2
++        ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j MARK --set-mark 2
+ 
+-        if [ $up_id -ne 0 ]; then
++        # 限速设备统一使用 Q31(上行)/Q63(下行) 背景队列
++        # 记录每设备速率用于后续删除时减法, 再累加到总限速
++        echo $up > "$old_up_file"
++        echo $dl > "$old_dl_file"
+ 
+         if [ $up -ne 0 ]; then
+-            echo 2 1 ${up} 0 0 4 1 > /sys/kernel/debug/hnat/qdma_txq${up_id}
+-        else
+-            echo 2 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq${up_id}
++            cur_up=$(cat /tmp/eqos_q31_rate 2>/dev/null || echo 0)
++            new_up=$((cur_up + up))
++            echo $new_up > /tmp/eqos_q31_rate
++            echo 2 1 ${new_up} 1 ${new_up} 1 1 > /sys/kernel/debug/hnat/qdma_txq31
+         fi
+ 
+         if [ $dl -ne 0 ]; then
+-            echo 3 1 ${dl} 0 0 4 1 > /sys/kernel/debug/hnat/qdma_txq${down_id}
+-        else
+-            echo 3 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq${down_id}
+-        fi
+-
++            cur_dl=$(cat /tmp/eqos_q63_rate 2>/dev/null || echo 0)
++            new_dl=$((cur_dl + dl))
++            echo $new_dl > /tmp/eqos_q63_rate
++            echo 3 1 ${new_dl} 1 ${new_dl} 1 1 > /sys/kernel/debug/hnat/qdma_txq63
+         fi
+ 
++        iptables -t mangle -A eqos -d $ip -j DSCP --set-dscp 2
++        ebtables -t nat -A eqos -p ipv6 -d $macaddr -j mark --mark-set 2
+ 
+-        iptables -t mangle -A eqos -d $ip -j DSCP --set-dscp ${dscp}
+-        ebtables -t nat -A eqos -p ipv6 -d $macaddr -j mark --mark-set ${dscp}
++        # 刷新 HNAT 表, 强制已有流重新绑定到新队列
++        echo 1 > /sys/kernel/debug/hnat/hnat_entry
+     else
+         iptables -t mangle -D eqos -s $ip -j MARK --set-mark 0x99
+         iptables -t mangle -D eqos -d $ip -j MARK --set-mark 0x99
+@@ -320,6 +328,14 @@ case "$1" in
+         tc class add dev ${dev}-ifb parent 1:1 classid 1:1$cnt htb rate ${up}kbit ceil ${up}kbit
+         tc filter add dev ${dev}-ifb parent 1:0 protocol ip u32 match ip src $ip flowid 1:1$cnt
+     fi
++
++    # per-device WAN 路由选择: 指定接口序号则锁定到对应 WAN 出口
++    if [ "$interface" ]; then
++        iptables -t mangle -D PREROUTING -s $ip -m conntrack --ctstate NEW -j MARK --set-mark 2"$interface"
++        iptables -t mangle -A PREROUTING -s $ip -m conntrack --ctstate NEW -j MARK --set-mark 2"$interface"
++        iptables -t mangle -D PREROUTING -i br-lan -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark
++        iptables -t mangle -A PREROUTING -i br-lan -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark
++    fi
+     ;;
+     *)
+     echo "Usage: $0 <command> [options]"
+diff --git a/package/network/services/wifidog-ng b/package/network/services/wifidog-ng
+new file mode 160000
+index 0000000000..db4de1cb18
+--- /dev/null
++++ b/package/network/services/wifidog-ng
+@@ -0,0 +1 @@
++Subproject commit db4de1cb1859b49d1c560569ca0e15a2f38d28e1
+diff --git a/target/linux/mediatek/files-5.4/drivers/net/ethernet/mediatek/mtk_eth_soc.c b/target/linux/mediatek/files-5.4/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+index 4497837847..a6790fd5a7 100644
+--- a/target/linux/mediatek/files-5.4/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/target/linux/mediatek/files-5.4/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -1006,7 +1006,7 @@ static int mtk_tx_map(struct sk_buff *skb, struct net_device *dev,
+ 	int i, n_desc = 1;
+ 	u32 txd4 = 0, txd5 = 0, txd6 = 0;
+ 	u32 fport;
+-	u32 qid = 0;
++	u32 qid = 1;
+ 	int k = 0;
+ 
+ 	itxd = ring->next_free;
+@@ -1031,12 +1031,14 @@ static int mtk_tx_map(struct sk_buff *skb, struct net_device *dev,
+ 
+ 	nr_frags = skb_shinfo(skb)->nr_frags;
+ 
++        /* get QDMA queue id from skb->mark */
+         qid = skb->mark & (MTK_QDMA_TX_MASK);
+ 
+-#if defined(CONFIG_MEDIATEK_NETSYS_V2)
+-	if(!qid && mac->id)
+-		qid = MTK_QDMA_GMAC2_QID;
+-#endif
++        /* 如果 CPU 侧没有配置 mark (qid=0), 则根据出站接口提供安全的兜底队列，
++         * 绝对防止普通流量占用硬件级的 VIP 队列 (Q0和Q32) */
++        if (!qid) {
++            qid = mac->id ? 1 : 33;  // GMAC2(WAN) 上行兜底Q1, GMAC1(LAN) 下行兜底Q33
++        }
+ 
+ 	if (MTK_HAS_CAPS(eth->soc->caps, MTK_NETSYS_V2)) {
+ 		/* set the forward port */
+diff --git a/target/linux/mediatek/files-5.4/drivers/net/ethernet/mediatek/mtk_hnat/hnat.c b/target/linux/mediatek/files-5.4/drivers/net/ethernet/mediatek/mtk_hnat/hnat.c
+index f677d2c693..bc83886c82 100644
+--- a/target/linux/mediatek/files-5.4/drivers/net/ethernet/mediatek/mtk_hnat/hnat.c
++++ b/target/linux/mediatek/files-5.4/drivers/net/ethernet/mediatek/mtk_hnat/hnat.c
+@@ -755,7 +755,7 @@ static int hnat_probe(struct platform_device *pdev)
+ 	hnat_priv->nf_stat_en = true; /* enable nf_stat_en by default */
+ 	hnat_priv->ipv6_en = true; /* enable ipv6 by default */
+ 	hnat_priv->guest_en = true; /* enable guest wifi by default */
+-	hnat_priv->dscp_en = false;
++	hnat_priv->dscp_en = false;  /* 默认关闭, eqos start 时通过 hnat_setting "10 1" 开启 */
+ 	hnat_priv->macvlan_support = false;
+ 	err = hnat_init_debugfs(hnat_priv);
+ 	if (err)
+diff --git a/target/linux/mediatek/files-5.4/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c b/target/linux/mediatek/files-5.4/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
+index a37d4273f4..4f855ea47f 100644
+--- a/target/linux/mediatek/files-5.4/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
++++ b/target/linux/mediatek/files-5.4/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
+@@ -1422,88 +1422,95 @@ struct foe_entry ppe_fill_info_blk(struct ethhdr *eth, struct foe_entry entry,
+ }
+ 
+ /**
+- * 输入: TOS字节（IP头部的第二字节）
++ * 流量方向枚举
++ * HQOS_UPLOAD:   LAN→WAN, 使用上行队列 Q0-Q31 (sch0/sch2)
++ * HQOS_DOWNLOAD: WAN→LAN, 使用下行队列 Q32-Q63 (sch1/sch3)
++ * HQOS_LOCAL:    LAN→LAN/WiFi等本地流量, 不应受 WAN 限速
+  */
+-static uint8_t dscp_to_queue(uint8_t tos) {
+-    uint8_t dscp = tos >> 2;  // 提取高6位为DSCP
+-    uint8_t queue = 5;  // 初始化队列值
+-    uint8_t offset = 0;
+-
+-    // 不断尝试，每次减少1，直到找到匹配或DSCP值减到0
+-    while (dscp >= 0) {  // DSCP最大值为63(6位二进制)
+-        if (dscp == 46) {
+-            queue = 0;
+-            offset = 0;  // EF - 实时语音流，最高优先级
+-            break;
+-        } else if (dscp == 46) {
+-            queue = 0;
+-            offset = 0;  // EF - 实时语音流，最高优先级
+-            break;
+-        } else if (dscp == 45) {
+-            queue = 1;
+-            offset = 0;  // EF - 实时语音流，最高优先级
+-            break;
+-        } else if (dscp == 44) {
+-            queue = 2;
+-            offset = 0;
+-            break;
+-        } else if (dscp == 43) {
+-            queue = 3;
+-            offset = 0;
+-            break;
+-        } else if (dscp == 42) {
+-            queue = 4;
+-            offset = 0;
+-            break;
+-        } else if (dscp == 41) {
+-            queue = 5;
+-            offset = 0;
+-            break;
+-        } else if (dscp == 56) {
+-            queue = 5;
+-            offset = 1;  // CS7 - 网络管理流
+-            break;
+-        } else if (dscp == 48) {
+-            queue = 5;
+-            offset = 1;  // CS6 - 网络控制流
+-            break;
+-        } else if (dscp == 40) {
+-            queue = 5;
+-            offset = 2;  // CS5 - 视频会议，关键业务应用
+-            break;
+-        } else if (dscp >= 32 && dscp <= 39) {
+-            queue = 5;
+-            offset = 3;  // AF4x - 高优视频流
+-            break;
+-        } else if (dscp >= 24 && dscp <= 31) {
+-            queue = 5;
+-            offset = 4;  // AF3x - 普通视频流
+-            break;
+-        } else if (dscp >= 16 && dscp <= 23) {
+-            queue = 5;
+-            offset = 5;  // AF2x - 网页、应用、交互
+-            break;
+-        } else if (dscp >= 8 && dscp <= 15) {
+-            queue = 5;
+-            offset = 7;  // AF1x / CS1 - 背景任务，低优先级流
+-            break;
+-        } else if (dscp == 0) {
+-            queue = 5;
+-            offset = 6;  // CS0 - 默认流量，正常优先级
+-            break;
+-        }
++enum hqos_direction {
++    HQOS_UPLOAD   = 0,
++    HQOS_DOWNLOAD = 1,
++    HQOS_LOCAL    = 2,
++};
++
++/**
++ * 判断流量方向, 完全不使用 IS_WAN/IS_LAN (它们定义相同, 无法区分)
++ *
++ * 判断优先级:
++ *   1) 物理目标判定: 只要发往 WAN (GMAC2) 必定为上行
++ *   2) 物理来源判定: 只要来自 WAN 必定为下行
++ *   3) 内部互访: 局域网、Wi-Fi 间互访兜底为本地流量 (不限速)
++ */
++
++
++static enum hqos_direction get_hqos_direction(const struct sk_buff *skb, u32 gmac,
++					      const struct net_device *dev) {
++    bool from_wan = FROM_GE_WAN(skb);
++    bool from_lan = FROM_GE_LAN(skb) || FROM_GE_VIRTUAL(skb);
++    bool to_wan = (gmac == NR_GMAC2_PORT);
++    bool to_wifi = get_wifi_hook_if_index_from_dev(dev) != 0;
++    bool to_lan_switch = (gmac == NR_GMAC1_PORT);
+ 
+-        dscp--;
++    /* 因素 1: 只要物理目的地是 WAN，必定是上行 (Upload) */
++    if (to_wan) {
++        return HQOS_UPLOAD;
+     }
+ 
+-    queue = queue + offset;
++    /* 因素 2: 只要物理来源是 WAN，且目的地不是 WAN，必定是下行 (Download) */
++    if (from_wan) {
++        return HQOS_DOWNLOAD;
++    }
++
++    /* 因素 3: 物理来源是 LAN/Wi-Fi/CPU，目的地也是 LAN/Wi-Fi，属于内网互访 (Local) */
++    if (to_lan_switch || to_wifi) {
++        return HQOS_LOCAL;
++    }
++
++    /* 因素 4: 来源是 LAN，但目的地不是 LAN/Wi-Fi/WAN (例如发往 CPU 虚拟接口 MapE/VPN) */
++    if (from_lan) {
++        return HQOS_UPLOAD; // 视为上行处理
++    }
+ 
+-    return queue;
++    return HQOS_LOCAL; // 默认内部流转兜底
+ }
+ 
+-// 判断 DSCP 是否为默认白名单（只允许 CS0 使用默认队列）
+-static inline bool is_default_whitelist(uint8_t dscp) {
+-    return (dscp == 0);  // 可以在此扩展更多白名单，例如 dscp == 4 等
++/**
++ * 输入: TOS字节, 局域网侧IP地址 (网络字节序)
++ * 输出: 硬件队列ID (0-31, 连续)
++ *
++ * 队列布局 (队列号越小优先级越高):
++ *   Q0     = EF(46)              VIP最高优先级   (CAKE tin7)
++ *   Q1     = CS6(48)/CS7(56)     网络控制        (CAKE tin6)
++ *   Q2     = CS4(32)/CS5(40)/VA(44) 实时         (CAKE tin5)
++ *   Q3     = CS2/AF2x(16-23)    交互应用        (CAKE tin4)
++ *   Q4     = AF3x(24-31)/AF4x(33-39) 视频流     (CAKE tin3)
++ *   Q5-Q29 = CS0(0) + 未定义     per-user队列    (CAKE tin2, 按IP hash)
++ *   Q30    = LE(1)/CS1/AF1x(8-15) 背景最低      (CAKE tin0+1)
++ *   Q31    = 限速设备专用           硬件限速队列
++ */
++static uint8_t dscp_to_queue(uint8_t tos, __be32 lan_ip) {
++    uint8_t dscp = tos >> 2;  // 提取高6位为DSCP
++
++    if (dscp == 46) {
++        return 0;   // EF → Q0 (CAKE tin7)
++    } else if (dscp == 48 || dscp == 56) {
++        return 1;   // CS6/CS7 → Q1 (CAKE tin6)
++    } else if (dscp == 32 || dscp == 40 || dscp == 44) {
++        return 2;   // CS4/CS5/VA → Q2 (CAKE tin5)
++    } else if (dscp >= 16 && dscp <= 23) {
++        return 3;   // CS2/AF2x → Q3 (CAKE tin4)
++    } else if ((dscp >= 24 && dscp <= 31) || (dscp >= 33 && dscp <= 39)) {
++        return 4;   // AF3x/AF4x → Q4 (CAKE tin3)
++    } else if (dscp == 2) {
++        return 31;  // 限速设备专用 DSCP → Q31 (硬件限速队列)
++    } else if (dscp == 1 || (dscp >= 8 && dscp <= 15)) {
++        return 30;  // LE/CS1/AF1x → Q30 (CAKE tin0+1, 背景最低)
++    } else {
++        // CS0(0) + 未定义 → 按IP last_octet hash 分配到 Q5-Q29
++        // 25个队列, 实现 per-user 硬件队列隔离
++        uint8_t last_octet = ((const uint8_t *)&lan_ip)[3];
++        return 5 + (last_octet % 25);
++    }
+ }
+ 
+ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
+@@ -1522,12 +1529,16 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
+ 	enum ip_conntrack_info ctinfo;
+ 	u32 gmac = NR_DISCARD;
+ 	int udp = 0;
+-	u32 qid = 43;
++	u32 qid = 1;    // 默认 Q1 (sch0 上行), dscp_en开启后由dscp_to_queue覆盖
+ 	int port_id = 0;
+ 	int mape = 0;
+ 	u8  dscp = 0;
+ 	struct net_device *master_dev = (struct net_device *)dev;
+ 	struct mtk_mac *mac;
++	__be32 hash_ip = 0;
++	__be32 orig_sip = 0;
++	__be32 new_dip_val = 0;
++	enum hqos_direction dir = HQOS_LOCAL;
+ 
+ 	ct = nf_ct_get(skb, &ctinfo);
+ 	
+@@ -1612,6 +1623,7 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
+ 
+ 				entry.ipv4_dslite.bfib1.rmt = 1;
+ 				entry.ipv4_dslite.iblk2.dscp = iph->tos;
++				dscp = iph->tos;  // BUG-2 fix: 同步局部变量用于 dscp_to_queue()
+ 				entry.ipv4_dslite.vlan1 = hw_path->vlan_id;
+ 				if (hnat_priv->data->per_flow_accounting)
+ 					entry.ipv4_dslite.iblk2.mibf = 1;
+@@ -1740,6 +1752,7 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
+ 			entry.ipv6_5t_route.iblk2.dscp =
+ 				(ip6h->priority << 4 |
+ 				 (ip6h->flow_lbl[0] >> 4));
++			dscp = entry.ipv6_5t_route.iblk2.dscp;  // BUG-1 fix: 同步局部变量用于 dscp_to_queue()
+ 			break;
+ 
+ 		case NEXTHDR_IPIP:
+@@ -1939,35 +1952,90 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
+ 		return 0;
+ 	}
+ 
+-	if (IS_HQOS_MODE || skb->mark >= MAX_PPPQ_PORT_NUM)
++    // 首先判断物理方向，这对队列划分和内网 IP 提取至关重要
++    dir = get_hqos_direction(skb, gmac, dev);
++
++	if (IS_HQOS_MODE || skb->mark >= MAX_PPPQ_PORT_NUM) {
+ 		qid = skb->mark & (MTK_QDMA_TX_MASK);
+-	else if (IS_PPPQ_MODE && (IS_DSA_1G_LAN(dev) || IS_DSA_WAN(dev)))
++	}
++	else if (IS_PPPQ_MODE && (IS_DSA_1G_LAN(dev) || IS_DSA_WAN(dev))) {
+ 		qid = port_id & MTK_QDMA_TX_MASK;
+-	else
+-		qid = 43;
+-
++	}
++	else {
++		qid = (dir == HQOS_UPLOAD) ? 1 : 33; // 常规默认队列
++	}
+ 
++    // 防御性兜底：防止被异常的 mark 或 port_id 污染为 0
++    // 绝对不允许未经显式授权的流量占用 VIP Q0/Q32
++    if (!qid) {
++        qid = (dir == HQOS_UPLOAD) ? 1 : 33;
++    }
+ 
+-    if (IS_HQOS_MODE && (hnat_priv->dscp_en)) {
++    // 从 FOE entry 中提取 LAN IP 用于方向判断和 per-user 队列分配
++    // NAPT 地址映射:
++    //   上行: sip=LAN(111.x) → new_sip=WAN(101.88), dip=服务器 → new_dip=服务器
++    //   下行: sip=服务器 → new_sip=服务器, dip=WAN(101.88) → new_dip=LAN(111.x)
++    // 所以: 上行 LAN IP = sip, 下行 LAN IP = new_dip
++    if (IS_IPV4_HNAPT(&entry) || IS_IPV4_HNAT(&entry)) {
++        orig_sip = htonl(entry.ipv4_hnapt.sip);
++        new_dip_val = htonl(entry.ipv4_hnapt.new_dip);
++
++        // 基于精准方向确定真实内网 IP，用于 WRR per-user hash 隔离，彻底消除子网猜测
++        hash_ip = (dir == HQOS_DOWNLOAD) ? new_dip_val : orig_sip;
++    } else if (IS_IPV4_DSLITE(&entry) || IS_IPV4_MAPE(&entry) || IS_IPV4_MAPT(&entry)) {
++        orig_sip = htonl(entry.ipv4_dslite.sip);
++#if defined(CONFIG_MEDIATEK_NETSYS_V2)
++        new_dip_val = htonl(entry.ipv4_dslite.new_dip);
++#endif
++        hash_ip = (dir == HQOS_DOWNLOAD) ? new_dip_val : orig_sip;
++    } else if (IS_IPV6_5T_ROUTE(&entry)) {
++        // IPv6 (BUG fix: 修复下载流量错误 Hash 服务器 IP 导致隔离失效)
++        // 提取精准的 LAN 侧 IPv6 尾部用于 hash
++        if (dir == HQOS_DOWNLOAD) {
++            hash_ip = htonl(entry.ipv6_5t_route.ipv6_dip3);
++        } else {
++            hash_ip = htonl(entry.ipv6_5t_route.ipv6_sip3);
++        }
++    } else if (IS_IPV6_3T_ROUTE(&entry)) {
++        if (dir == HQOS_DOWNLOAD) {
++            hash_ip = htonl(entry.ipv6_3t_route.ipv6_dip3);
++        } else {
++            hash_ip = htonl(entry.ipv6_3t_route.ipv6_sip3);
++        }
++    } else if (IS_IPV6_6RD(&entry)) {
++        // 6RD: tunnel_sipv4/dipv4 是IPv4
++        orig_sip = htonl(entry.ipv6_6rd.tunnel_sipv4);
++        new_dip_val = htonl(entry.ipv6_6rd.tunnel_dipv4);
+ 
+-	qid = dscp_to_queue(dscp);
++        hash_ip = (dir == HQOS_DOWNLOAD) ? new_dip_val : orig_sip;
++    }
+ 
+-	    if (!IS_WAN(dev) && strncmp(dev->name, "apcli", 5) != 0 && strncmp(dev->name, "ifb4apcli", 9) != 0) {
+-		    qid = qid + 32;
+-	    }
++    // 外来的 EF(46) 必须降级为 VA(44), 保护内网 VIP 队列不被外部流量挤占
++    // 且必须在 dscp_to_queue 之前执行，确保被分配到正确的 tin5 限速队列
++    if (dir == HQOS_DOWNLOAD && (dscp & 0xFC) == 0xB8) {
++        dscp = (dscp & 0x03) | 0xB0; // 降级为 0xB0 (DSCP 44)
++        
++        // 更新硬件表 entry 中的 dscp，使发出的包也变为 44
++        if (IS_IPV4_HNAPT(&entry) || IS_IPV4_HNAT(&entry)) {
++            entry.ipv4_hnapt.iblk2.dscp = dscp;
++        } else if (IS_IPV4_DSLITE(&entry) || IS_IPV4_MAPE(&entry) || IS_IPV4_MAPT(&entry)) {
++            entry.ipv4_dslite.iblk2.dscp = dscp;
++        } else if (IS_IPV6_5T_ROUTE(&entry)) {
++            entry.ipv6_5t_route.iblk2.dscp = dscp;
++        } else if (IS_IPV6_3T_ROUTE(&entry)) {
++            entry.ipv6_3t_route.iblk2.dscp = dscp;
++        } else if (IS_IPV6_6RD(&entry)) {
++            entry.ipv6_6rd.iblk2.dscp = dscp;
++        }
++    }
+ 
+-		// 强制覆盖默认的队列0
+-		if (IS_IPV4_HNAPT(&entry) || IS_IPV4_HNAT(&entry)) {
+-			entry.ipv4_hnapt.iblk2.qid = qid;
+-		} else if (IS_IPV4_DSLITE(&entry) || IS_IPV4_MAPE(&entry) || IS_IPV4_MAPT(&entry)) {
+-			entry.ipv4_dslite.iblk2.qid = qid;
+-		} else if (IS_IPV6_5T_ROUTE(&entry)) {
+-			entry.ipv6_5t_route.iblk2.qid = qid;
+-		} else if (IS_IPV6_3T_ROUTE(&entry)) {
+-			entry.ipv6_3t_route.iblk2.qid = qid;
+-		} else if (IS_IPV6_6RD(&entry)) {
+-			entry.ipv6_6rd.iblk2.qid = qid;
+-		}
++    if (IS_HQOS_MODE && hnat_priv->dscp_en) {
++        if (dir != HQOS_LOCAL) {
++            qid = dscp_to_queue(dscp, hash_ip);
++            if (dir == HQOS_DOWNLOAD) {
++                qid = qid + 32;
++            }
++        }
+     }
+ 
+ 	if (IS_IPV4_GRP(foe)) {
+diff --git a/target/linux/mediatek/patches-5.4/9999991-reduce-interval.patch b/target/linux/mediatek/patches-5.4/9999991-reduce-interval.patch
+index 60330ac3ab..d2dc1961c5 100644
+--- a/target/linux/mediatek/patches-5.4/9999991-reduce-interval.patch
++++ b/target/linux/mediatek/patches-5.4/9999991-reduce-interval.patch
+@@ -74,7 +74,7 @@ index a43661432..248d0c7c6 100644
+  static const u8 diffserv8[] = {
+ -	2, 0, 1, 2, 4, 2, 2, 2,
+ -	1, 2, 1, 2, 1, 2, 1, 2,
+-+	2, 2, 1, 2, 4, 2, 2, 2,
+++	2, 0, 1, 2, 4, 2, 2, 2,
+ +	0, 2, 1, 2, 1, 2, 1, 2,
+  	5, 2, 4, 2, 4, 2, 4, 2,
+  	3, 2, 3, 2, 3, 2, 3, 2,
+diff --git a/target/linux/mediatek/patches-5.4/9999992-add-109-vip-small-udp.patch b/target/linux/mediatek/patches-5.4/9999992-add-109-vip-small-udp.patch
+new file mode 100644
+index 0000000000..5cee6924af
+--- /dev/null
++++ b/target/linux/mediatek/patches-5.4/9999992-add-109-vip-small-udp.patch
+@@ -0,0 +1,137 @@
++--- a/net/sched/sch_cake.c	2026-04-29 23:41:47.000000000 +0800
+++++ b/net/sched/sch_cake.c	2026-04-29 23:42:52.000000000 +0800
++@@ -1635,21 +1635,37 @@ static bool is_ip_in_range_k(__be32 ip_b
++ 	return true;
++ }
++ 
+++// 判断IP地址是否在 192.168.109.[2-254] 范围内
+++static bool is_ip_in_109_range_k(__be32 ip_be)
+++{
+++	const u8 *p = (const u8 *)&ip_be;
+++
+++	if (p[0] != 192 || p[1] != 168)
+++		return false;
+++	if (p[2] != 109)
+++		return false;
+++	if (p[3] < 2 || p[3] > 254)
+++		return false;
+++	return true;
+++}
++ 
+++// 通用函数指针类型: IP 范围检查
+++typedef bool (*ip_range_check_fn)(__be32 ip_be);
++ 
++-// 从tuple中检查src和dst IP
++-static bool tuple_ips_in_range_k(const struct nf_conntrack_tuple *tuple)
+++// 通用版本: 从 conntrack tuple 中检查 IP
+++static bool tuple_ips_check(const struct nf_conntrack_tuple *tuple, ip_range_check_fn check)
++ {
++ 	if (!tuple) {
++ 		return false;
++ 	}
++ 
++-	if (is_ip_in_range_k(tuple->src.u3.ip) || is_ip_in_range_k(tuple->dst.u3.ip))
+++	if (check(tuple->src.u3.ip) || check(tuple->dst.u3.ip))
++ 		return true;
++ 	return false;
++ }
++ 
++-static bool is_nat_target_ip_ipv4_k(struct sk_buff *skb, struct cake_sched_data *q)
+++// 通用 NAT 穿透 IP 检查: 支持任意 IP 范围检查函数
+++static bool is_nat_target_ip_check(struct sk_buff *skb, ip_range_check_fn check)
++ {
++ 	struct iphdr *iph;
++ 	struct nf_conn *ct = NULL;
++@@ -1661,40 +1677,29 @@ static bool is_nat_target_ip_ipv4_k(stru
++ 
++ 	// 检查是否为 IPv4 数据包
++ 	if (skb_protocol(skb, true) != htons(ETH_P_IP)) {
++-		return false;  // 如果不是 IPv4 数据包，返回 false
+++		return false;
++ 	}
++ 
++ 	iph = ip_hdr(skb);
++ 	if (iph) {
++-		// 直接检查 IPv4 头部中的源和目的地址
++-		if (is_ip_in_range_k(iph->saddr) || is_ip_in_range_k(iph->daddr)) {
++-//			pr_info("Packet source or destination IP is in range\n");
+++		if (check(iph->saddr) || check(iph->daddr)) {
++ 			ret = true;
++ 			return ret;
++ 		}
++ 	}
++ 
++-	// 获取自旋锁，保护连接跟踪的操作
++-	//spin_lock_bh(&q->conntrack_lock);
++-
++-	// 尝试获取连接跟踪记录
++ 	ct = nf_ct_get(skb, &ctinfo);
++ 	if (ct) {
++-		// 获取连接跟踪的原始元组和回复元组
++ 		tuple_origin = nf_ct_tuple(ct, IP_CT_DIR_ORIGINAL);
++ 		tuple_reply = nf_ct_tuple(ct, IP_CT_DIR_REPLY);
++ 
++-		// 检查元组是否在指定的 IP 范围内
++-		if (tuple_ips_in_range_k(tuple_origin) || tuple_ips_in_range_k(tuple_reply)) {
++-//			pr_info("Connection tuple is in range\n");
+++		if (tuple_ips_check(tuple_origin, check) || tuple_ips_check(tuple_reply, check)) {
++ 			ret = true;
++ 		}
++ 	} else {
++-		// 如果没有找到连接跟踪记录，尝试根据数据包获取元组
++ 		if (nf_ct_get_tuplepr(skb, skb_network_offset(skb),
++ 				NFPROTO_IPV4, dev_net(skb->dev),
++ 				&skb_tuple)) {
++-//			pr_info("Trying to find tuple from skb\n");
++ 			hash = nf_conntrack_find_get(dev_net(skb->dev),
++ 										  &nf_ct_zone_dflt,
++ 										  &skb_tuple);
++@@ -1704,8 +1709,7 @@ static bool is_nat_target_ip_ipv4_k(stru
++ 					tuple_origin = nf_ct_tuple(ct, IP_CT_DIR_ORIGINAL);
++ 					tuple_reply = nf_ct_tuple(ct, IP_CT_DIR_REPLY);
++ 
++-					if (tuple_ips_in_range_k(tuple_origin) || tuple_ips_in_range_k(tuple_reply)) {
++-//						pr_info("Found matching tuple from skb\n");
+++					if (tuple_ips_check(tuple_origin, check) || tuple_ips_check(tuple_reply, check)) {
++ 						ret = true;
++ 					}
++ 
++@@ -1715,11 +1719,19 @@ static bool is_nat_target_ip_ipv4_k(stru
++ 		}
++ 	}
++ 
+++	return ret;
+++}
++ 
++-	// 释放自旋锁
++-	//spin_unlock_bh(&q->conntrack_lock);
+++// 便捷包装: 检查 110-119 VIP 范围
+++static bool is_nat_target_ip_ipv4_k(struct sk_buff *skb, struct cake_sched_data *q)
+++{
+++	return is_nat_target_ip_check(skb, is_ip_in_range_k);
+++}
++ 
++-	return ret;
+++// 便捷包装: 检查 109 网段
+++static bool is_nat_target_ip_109_k(struct sk_buff *skb)
+++{
+++	return is_nat_target_ip_check(skb, is_ip_in_109_range_k);
++ }
++ 
++ 
++@@ -1750,6 +1762,15 @@ static struct cake_tin_data *cake_select
++ 		return &q->tins[highest_priority_tin];
++ 	}
++ 
+++	// 109 网段: 仅 UDP 且包长 ≤ 300 字节的小包走最高优先级
+++	if (is_nat_target_ip_109_k(skb)) {
+++		struct iphdr *iph_109 = ip_hdr(skb);
+++		if (iph_109 && iph_109->protocol == IPPROTO_UDP &&
+++		    qdisc_pkt_len(skb) <= 300) {
+++			return &q->tins[highest_priority_tin];
+++		}
+++	}
+++
++ //	/* 首先获取 IP 头 */
++ //	iph = cake_get_iphdr(skb, &_ipv6h);
++ //
+diff --git a/target/linux/mediatek/patches-5.4/9999993-fix-diffserv8-le-cs2-tin.patch b/target/linux/mediatek/patches-5.4/9999993-fix-diffserv8-le-cs2-tin.patch
+new file mode 100644
+index 0000000000..113a081306
+--- /dev/null
++++ b/target/linux/mediatek/patches-5.4/9999993-fix-diffserv8-le-cs2-tin.patch
+@@ -0,0 +1,11 @@
++--- a/net/sched/sch_cake.c
+++++ b/net/sched/sch_cake.c
++@@ -323,7 +323,7 @@
++ static const u8 diffserv8[] = {
++ 	2, 0, 1, 2, 4, 2, 2, 2,
++ 	0, 2, 1, 2, 1, 2, 1, 2,
++-	5, 2, 4, 2, 4, 2, 4, 2,
+++	4, 2, 4, 2, 4, 2, 4, 2,
++ 	3, 2, 3, 2, 3, 2, 3, 2,
++ 	5, 2, 3, 2, 3, 2, 3, 2,
++ 	5, 2, 2, 2, 5, 2, 7, 2,
+diff --git a/target/linux/mediatek/patches-5.4/9999994-fix-109-vip-small-udp-bugs.patch b/target/linux/mediatek/patches-5.4/9999994-fix-109-vip-small-udp-bugs.patch
+new file mode 100644
+index 0000000000..8a916af634
+--- /dev/null
++++ b/target/linux/mediatek/patches-5.4/9999994-fix-109-vip-small-udp-bugs.patch
+@@ -0,0 +1,40 @@
++--- a/net/sched/sch_cake.c
+++++ b/net/sched/sch_cake.c
++@@ -1667,7 +1667,8 @@ static bool tuple_ips_check(const struct
++ // 通用 NAT 穿透 IP 检查: 支持任意 IP 范围检查函数
++ static bool is_nat_target_ip_check(struct sk_buff *skb, ip_range_check_fn check)
++ {
++-	struct iphdr *iph;
+++	struct iphdr _iph;
+++	const struct iphdr *iph;
++ 	struct nf_conn *ct = NULL;
++ 	enum ip_conntrack_info ctinfo;
++ 	const struct nf_conntrack_tuple *tuple_origin = NULL, *tuple_reply = NULL;
++@@ -1680,7 +1681,8 @@ static bool is_nat_target_ip_check(struc
++ 		return false;
++ 	}
++ 
++-	iph = ip_hdr(skb);
+++	// 安全获取 IP 头部，避免越界访问 (BUG-7修复)
+++	iph = skb_header_pointer(skb, skb_network_offset(skb), sizeof(_iph), &_iph);
++ 	if (iph) {
++ 		if (check(iph->saddr) || check(iph->daddr)) {
++ 			ret = true;
++@@ -1713,6 +1715,7 @@ static bool is_nat_target_ip_check(struc
++ 						ret = true;
++ 					}
++ 
+++					// BUG-6 fix: 释放通过 nf_conntrack_find_get 取得的引用
++ 					nf_ct_put(ct);
++ 				}
++ 			}
++@@ -1764,7 +1767,8 @@ static struct cake_tin_data *cake_select
++ 
++ 	// 109 网段: 仅 UDP 且包长 ≤ 300 字节的小包走最高优先级
++ 	if (is_nat_target_ip_109_k(skb)) {
++-		struct iphdr *iph_109 = ip_hdr(skb);
+++		struct iphdr _iph_109;
+++		const struct iphdr *iph_109 = skb_header_pointer(skb, skb_network_offset(skb), sizeof(_iph_109), &_iph_109);
++ 		if (iph_109 && iph_109->protocol == IPPROTO_UDP &&
++ 		    qdisc_pkt_len(skb) <= 300) {
++ 			return &q->tins[highest_priority_tin];
+diff --git a/task/CHANGE_INDEX.md b/task/CHANGE_INDEX.md
+new file mode 100644
+index 0000000000..516bed9365
+--- /dev/null
++++ b/task/CHANGE_INDEX.md
+@@ -0,0 +1,26 @@
++# 变更索引
++
++> 通过 FID 查看某个需求的所有相关改动。
++> 格式参考: smart-commit SKILL.md §5.3
++
++<!-- 下一个 FID 编号: F-002 -->
++<!-- 下一个 BID 编号: B-001 -->
++
++---
++
++## F-QOS01: MT798x QoS Datapath Hardening 【活跃】
++- PRD: PRD/qos-hardening.md
++- Design: design/qos-architecture.md
++- Test: test/qos-test.md
++- ADRs: 
++- Diagnostics: 
++- Releases: 
++- Changes:
++  | CID | Commit | PR | 日期 | 描述 | 状态 |
++  |-----|--------|-----|------|------|------|
++  | C-FQOS01-01 | pending | - | 2026-05-02 | MT798x HNAT datapath dead-code cleanup, syntax fix, and fallback QoS refactoring | ✅ 已完成 |
++- Bugs:
++  | BID | 描述 | 引入者 | 修复者 | 状态 |
++  |-----|------|--------|--------|------|
++
++<!-- 新增 Feature 在此下方添加 -->
+diff --git a/task/TASK_LOG.md b/task/TASK_LOG.md
+new file mode 100644
+index 0000000000..70edfad88d
+--- /dev/null
++++ b/task/TASK_LOG.md
+@@ -0,0 +1,20 @@
++# 任务日志
++
++> 按 CID 记录每次 commit 的详细信息。
++> 格式参考: smart-commit SKILL.md §5.2
++
++---
++
++## [2026-05-02] C-FQOS01-01 | commit: pending
++
++- **FID**: F-QOS01
++- **CID**: C-FQOS01-01
++- **类型**: refactor, fix
++- **范围**: mtk_hnat
++- **描述**: Dead code cleanup, syntax error fix, and fallback QoS logic refactoring.
++- **改动文件**: hnat_nf_hook.c
++- **PRD 同步**: ✅ PRD/qos-hardening.md
++- **方案同步**: ✅ design/qos-architecture.md
++- **测试同步**: ✅ test/qos-test.md
++
++<!-- 新增 commit 记录在此下方添加 -->
+diff --git a/task/active_tasks.md b/task/active_tasks.md
+new file mode 100644
+index 0000000000..614184bfa1
+--- /dev/null
++++ b/task/active_tasks.md
+@@ -0,0 +1,13 @@
++# 当前活跃任务
++
++> 记录当前正在进行的任务列表。
++
++| 任务 | FID | 状态 | 负责人 | 开始日期 | 描述 |
++|------|-----|------|--------|---------|------|
++| MT798x QoS Hardening | F-QOS01 | 进行中 | Antigravity | 2026-05-02 | HNAT 数据路径的硬件队列重构与错误修复 |
++
++---
++
++## 已完成任务归档
++
++<!-- 完成的任务移到此处 -->
+diff --git a/test/qos-test.md b/test/qos-test.md
+new file mode 100644
+index 0000000000..2b5f45467e
+--- /dev/null
++++ b/test/qos-test.md
+@@ -0,0 +1,8 @@
++# QoS Hardening Tests
++
++<!-- FID: F-QOS01 -->
++
++## 1. 编译性测试
++<!-- CID: C-FQOS01-01 | commit: pending | 日期: 2026-05-02 -->
++- 修复 `IS_IPV4_DSLITE` 的 `else` 无 `if` 的编译错误。
++- 保证无语法警告。
+diff --git a/wifidog-ng-authserver b/wifidog-ng-authserver
+new file mode 160000
+index 0000000000..18d8380400
+--- /dev/null
++++ b/wifidog-ng-authserver
+@@ -0,0 +1 @@
++Subproject commit 18d8380400a6e2060412545f9deabf530d3aa43b

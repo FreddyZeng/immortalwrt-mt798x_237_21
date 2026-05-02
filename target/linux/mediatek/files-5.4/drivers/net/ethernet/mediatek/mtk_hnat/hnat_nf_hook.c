@@ -1513,6 +1513,21 @@ static uint8_t dscp_to_queue(uint8_t tos, __be32 lan_ip) {
     }
 }
 
+static void hnat_set_entry_dscp(struct foe_entry *entry, u8 dscp)
+{
+    if (IS_IPV4_HNAPT(entry) || IS_IPV4_HNAT(entry)) {
+        entry->ipv4_hnapt.iblk2.dscp = dscp;
+    } else if (IS_IPV4_DSLITE(entry) || IS_IPV4_MAPE(entry) || IS_IPV4_MAPT(entry)) {
+        entry->ipv4_dslite.iblk2.dscp = dscp;
+    } else if (IS_IPV6_5T_ROUTE(entry)) {
+        entry->ipv6_5t_route.iblk2.dscp = dscp;
+    } else if (IS_IPV6_3T_ROUTE(entry)) {
+        entry->ipv6_3t_route.iblk2.dscp = dscp;
+    } else if (IS_IPV6_6RD(entry)) {
+        entry->ipv6_6rd.iblk2.dscp = dscp;
+    }
+}
+
 static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 				     const struct net_device *dev,
 				     struct foe_entry *foe,
@@ -1530,6 +1545,7 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 	u32 gmac = NR_DISCARD;
 	int udp = 0;
 	u32 qid = 1;    // 默认 Q1 (sch0 上行), dscp_en开启后由dscp_to_queue覆盖
+	u32 qos_mark = 0;
 	int port_id = 0;
 	int mape = 0;
 	u8  dscp = 0;
@@ -2010,29 +2026,25 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
         hash_ip = (dir == HQOS_DOWNLOAD) ? new_dip_val : orig_sip;
     }
 
+    qos_mark = skb->mark & MTK_QDMA_TX_MASK;
+
+    // eqos 指定 VIP 下行使用可信 mark46, 保留 EF(46) 并进入 Q32。
+    if (dir == HQOS_DOWNLOAD && qos_mark == 46) {
+        dscp = (dscp & 0x03) | 0xB8;
+        hnat_set_entry_dscp(&entry, dscp);
     // 外来的 EF(46) 必须降级为 VA(44), 保护内网 VIP 队列不被外部流量挤占
-    // 且必须在 dscp_to_queue 之前执行，确保被分配到正确的 tin5 限速队列
-    if (dir == HQOS_DOWNLOAD && (dscp & 0xFC) == 0xB8) {
+    // 且必须在 dscp_to_queue 之前执行，确保被分配到正确的 tin5 实时队列
+    } else if (dir == HQOS_DOWNLOAD && (dscp & 0xFC) == 0xB8) {
         dscp = (dscp & 0x03) | 0xB0; // 降级为 0xB0 (DSCP 44)
-        
-        // 更新硬件表 entry 中的 dscp，使发出的包也变为 44
-        if (IS_IPV4_HNAPT(&entry) || IS_IPV4_HNAT(&entry)) {
-            entry.ipv4_hnapt.iblk2.dscp = dscp;
-        } else if (IS_IPV4_DSLITE(&entry) || IS_IPV4_MAPE(&entry) || IS_IPV4_MAPT(&entry)) {
-            entry.ipv4_dslite.iblk2.dscp = dscp;
-        } else if (IS_IPV6_5T_ROUTE(&entry)) {
-            entry.ipv6_5t_route.iblk2.dscp = dscp;
-        } else if (IS_IPV6_3T_ROUTE(&entry)) {
-            entry.ipv6_3t_route.iblk2.dscp = dscp;
-        } else if (IS_IPV6_6RD(&entry)) {
-            entry.ipv6_6rd.iblk2.dscp = dscp;
-        }
+        hnat_set_entry_dscp(&entry, dscp);
     }
 
     if (IS_HQOS_MODE && hnat_priv->dscp_en) {
         if (dir != HQOS_LOCAL) {
-            if ((skb->mark & MTK_QDMA_TX_MASK) == 2) {
+            if (qos_mark == 2) {
                 qid = (dir == HQOS_DOWNLOAD) ? 63 : 31;
+            } else if (dir == HQOS_DOWNLOAD && qos_mark == 46) {
+                qid = 32;
             } else {
                 qid = dscp_to_queue(dscp, hash_ip);
                 if (dir == HQOS_DOWNLOAD) {

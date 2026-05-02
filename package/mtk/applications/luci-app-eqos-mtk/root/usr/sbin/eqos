@@ -197,6 +197,8 @@ case "$1" in
     # 偏移 0x10 = 目标 IP 起始 (字节 16-19)
     # 同样使用位掩码提取第三、四字节
     iptables -t mangle -I eqos -d 192.168.0.0/16 -m u32 --u32 "0x10&0x0000FF00=0x00006E00:0x00007700" -m u32 --u32 "0x10&0x000000FF=0x0000000A:0x00000027" -j DSCP --set-dscp 46
+    iptables -t mangle -I eqos -d 192.168.0.0/16 -m u32 --u32 "0x10&0x0000FF00=0x00006E00:0x00007700" -m u32 --u32 "0x10&0x000000FF=0x0000000A:0x00000027" -j MARK --set-mark 46
+    logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-05] install trusted static VIP download marker: dst=192.168.110-119.10-39, mark=46, queue=32"
 
     # 192.168.109.0/24 网段: 仅加速小包 UDP（游戏包）
     # 条件: UDP 协议 + 包长度 ≤ 300 字节
@@ -243,6 +245,7 @@ case "$1" in
 
         iptables -t mangle -D eqos -s $ip -j DSCP --set-dscp 46 2>/dev/null
         iptables -t mangle -D eqos -d $ip -j DSCP --set-dscp 46 2>/dev/null
+        iptables -t mangle -D eqos -d $ip -j MARK --set-mark 46 2>/dev/null
         # IPv6 上行使用 DSCP, HNAT dscp_en 按 IPv6 Traffic Class 选择队列。
         ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j DSCP --set-dscp 46 2>/dev/null
         ebtables -t nat -D eqos -p ipv6 -d $macaddr -j mark --mark-set 46 2>/dev/null
@@ -251,7 +254,9 @@ case "$1" in
         ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j DSCP --set-dscp 46
 
         iptables -t mangle -A eqos -d $ip -j DSCP --set-dscp 46
+        iptables -t mangle -A eqos -d $ip -j MARK --set-mark 46
         ebtables -t nat -A eqos -p ipv6 -d $macaddr -j mark --mark-set 46
+        logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-04] install trusted VIP download marker: ip=$ip, mac=$macaddr, mark=46, queue=32"
 
     elif [ "$id" -lt 64 ]; then
         # 限速设备: 强制标记 DSCP 2 → 内核映射到 Q31/Q63 (硬件限速队列)

@@ -18,6 +18,15 @@ grep -Fq 'case "$id" in' "$EQOS" ||
 grep -Fq 'legacy qos mode fallback' "$EQOS" ||
     fail "legacy comment fallback diagnostic log is missing"
 
+grep -Fq 'iptables -t mangle -A eqos -d $ip -j MARK --set-mark 46' "$EQOS" ||
+    fail "configured IPv4 VIP download must install trusted mark 46"
+
+grep -Fq 'iptables -t mangle -I eqos -d 192.168.0.0/16 -m u32 --u32 "0x10&0x0000FF00=0x00006E00:0x00007700" -m u32 --u32 "0x10&0x000000FF=0x0000000A:0x00000027" -j MARK --set-mark 46' "$EQOS" ||
+    fail "static IPv4 VIP download range must install trusted mark 46"
+
+grep -Fq 'ebtables -t nat -A eqos -p ipv6 -d $macaddr -j mark --mark-set 46' "$EQOS" ||
+    fail "configured IPv6 VIP download must install trusted mark 46"
+
 grep -Fq 'ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j DSCP --set-dscp 2' "$EQOS" ||
     fail "IPv6 hardware limit rule must set DSCP 2"
 
@@ -25,11 +34,26 @@ if grep -Eq 'ip6tables .* -A eqos .* MARK --set-mark 2' "$EQOS"; then
     fail "IPv6 hardware limit rule still uses MARK"
 fi
 
-grep -Fq 'if ((skb->mark & MTK_QDMA_TX_MASK) == 2)' "$HNAT_HOOK" ||
+grep -Fq 'qos_mark = skb->mark & MTK_QDMA_TX_MASK;' "$HNAT_HOOK" ||
+    fail "HNAT must normalize skb mark once before queue selection"
+
+grep -Fq 'dir == HQOS_DOWNLOAD && qos_mark == 46' "$HNAT_HOOK" ||
+    fail "HNAT must honor trusted VIP download mark 46"
+
+grep -Fq 'dscp = (dscp & 0x03) | 0xB8;' "$HNAT_HOOK" ||
+    fail "trusted VIP download mark 46 must preserve EF DSCP"
+
+grep -Fq 'qid = 32;' "$HNAT_HOOK" ||
+    fail "trusted VIP download mark 46 must map to Q32"
+
+grep -Fq 'if (qos_mark == 2)' "$HNAT_HOOK" ||
     fail "HNAT must honor mark 2 as hardware limit fallback"
 
 grep -Fq 'qid = (dir == HQOS_DOWNLOAD) ? 63 : 31;' "$HNAT_HOOK" ||
     fail "HNAT mark 2 fallback must map to Q31/Q63"
+
+grep -Fq 'qid = dscp_to_queue(dscp, hash_ip);' "$HNAT_HOOK" ||
+    fail "HNAT mark 0/default path must fall back to DSCP mapping"
 
 grep -Fq '+	u8 highest_priority_tin = 0;' "$CAKE_PATCH" ||
     fail "CAKE highest_priority_tin must be initialized"
@@ -53,6 +77,9 @@ fi
 
 grep -Fq '48/56  CS6-7  网络控制 SP' "$VERIFY_QOS" ||
     fail "verification script Q1/Q33 label must match HNAT DSCP mapping"
+
+grep -Fq '46/MARK46 EF 可信VIP下行 SP' "$VERIFY_QOS" ||
+    fail "verification script Q32 label must show trusted VIP download queue"
 
 grep -Fq '32/40/44 CS4/5/VA 实时 SP' "$VERIFY_QOS" ||
     fail "verification script Q2/Q34 label must match HNAT DSCP mapping"

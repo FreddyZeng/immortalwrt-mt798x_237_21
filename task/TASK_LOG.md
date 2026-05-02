@@ -24,7 +24,7 @@
 - **CID**: C-FQOS01-02
 - **类型**: fix, test
 - **范围**: luci-app-eqos-mtk, CAKE patch
-- **描述**: Fix IPv6 hardware limit DSCP/mark queue binding, legacy comment mode parsing, standalone CAKE highest tin guard patch, and verification DSCP queue labels.
+- **描述**: Fix IPv6 hardware limit DSCP/mark queue binding, trusted VIP download Q32 marker, legacy comment mode parsing, standalone CAKE highest tin guard patch, and verification DSCP queue labels.
 - **改动文件**: root/usr/sbin/eqos, hnat_nf_hook.c, 9999995-fix-cake-highest-tin-guard.patch, docs/verify-vip-qos.sh, test/qos-regression.sh, PRD/design/test/task/bugs
 - **PRD 同步**: ✅ PRD/qos-hardening.md
 - **方案同步**: ✅ design/qos-architecture.md
