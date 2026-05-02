@@ -2047,7 +2047,7 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
         hash_ip = (dir == HQOS_DOWNLOAD) ? new_dip_val : orig_sip;
     }
 
-    qos_mark = skb->mark & MTK_QDMA_TX_MASK;  // 仅取低6位[0..63], 防止高位mark污染 VIP/限速判断
+    qos_mark = skb->mark;  // 提取完整 mark 进行精确匹配，防止高位 mark 碰撞 VIP/限速判断
 
     // 优先级①: eqos 指定 VIP 下行 mark46 → 保留 EF → Q32 (最高)
     if (dir == HQOS_DOWNLOAD && qos_mark == 46) {
