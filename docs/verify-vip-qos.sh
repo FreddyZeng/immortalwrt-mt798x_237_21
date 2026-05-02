@@ -101,7 +101,7 @@ else
 
     # ---- 普通流量: 192.168 网段, 非 VIP 非 109 ----
     echo "━━━ 📦 普通流量 (其他 192.168.x.x 设备) ━━━"
-    echo "  期望: 上传 qid(11)/Q11 WRR, 下载 qid(43)/Q43 WRR"
+    echo "  期望: 上传 hash到 Q5-Q29, 下载 hash到 Q37-Q61"
     NM_UP_ENTRIES=$(get_hnat_entries "UP" "NM")
     NM_DN_ENTRIES=$(get_hnat_entries "DN" "NM")
     echo "  ↑ 上传 (LAN→WAN, 源IP为普通设备):"
@@ -110,7 +110,7 @@ else
     [ -n "$NM_DN_ENTRIES" ] && echo "$NM_DN_ENTRIES" | head -5 || echo "    (无)"
     NM_UP=$(echo "$NM_UP_ENTRIES" | grep -c "=>")
     NM_DN=$(echo "$NM_DN_ENTRIES" | grep -c "=>")
-    echo "  (上传 $NM_UP 条 / 下载 $NM_DN 条 → 期望 qid(11)/qid(43))"
+    echo "  (上传 $NM_UP 条 / 下载 $NM_DN 条 → 分布于 Q5-Q29/Q37-Q61)"
 fi
 echo ""
 echo "【2】QDMA 全部硬件队列 (DSCP 映射)"
@@ -261,10 +261,19 @@ read_pkts() {
     echo "${VAL:-0}"
 }
 
+# 范围求和函数 (由于普通流量通过 hash 分布在 Q5-Q29)
+read_pkts_sum() {
+    local total=0
+    for q in $(seq $1 $2); do
+        total=$((total + $(read_pkts /sys/kernel/debug/hnat/qdma_txq$q)))
+    done
+    echo "$total"
+}
+
 Q0_A=$(read_pkts /sys/kernel/debug/hnat/qdma_txq0)
 Q32_A=$(read_pkts /sys/kernel/debug/hnat/qdma_txq32)
-Q11_A=$(read_pkts /sys/kernel/debug/hnat/qdma_txq11)
-Q43_A=$(read_pkts /sys/kernel/debug/hnat/qdma_txq43)
+QNM_UP_A=$(read_pkts_sum 5 29)
+QNM_DN_A=$(read_pkts_sum 37 61)
 CAKE_SENT_A=$(tc -s qdisc show dev "$CAKE_IF" 2>/dev/null | awk '/^ Sent /{print $2; exit}')
 CAKE_SENT_A=${CAKE_SENT_A:-0}
 
@@ -272,8 +281,8 @@ sleep 3
 
 Q0_B=$(read_pkts /sys/kernel/debug/hnat/qdma_txq0)
 Q32_B=$(read_pkts /sys/kernel/debug/hnat/qdma_txq32)
-Q11_B=$(read_pkts /sys/kernel/debug/hnat/qdma_txq11)
-Q43_B=$(read_pkts /sys/kernel/debug/hnat/qdma_txq43)
+QNM_UP_B=$(read_pkts_sum 5 29)
+QNM_DN_B=$(read_pkts_sum 37 61)
 CAKE_SENT_B=$(tc -s qdisc show dev "$CAKE_IF" 2>/dev/null | awk '/^ Sent /{print $2; exit}')
 CAKE_SENT_B=${CAKE_SENT_B:-0}
 
@@ -292,14 +301,14 @@ calc_pps() {
 
 Q0_RATE=$(calc_pps "$Q0_A" "$Q0_B")
 Q32_RATE=$(calc_pps "$Q32_A" "$Q32_B")
-Q11_RATE=$(calc_pps "$Q11_A" "$Q11_B")
-Q43_RATE=$(calc_pps "$Q43_A" "$Q43_B")
+QNM_UP_RATE=$(calc_pps "$QNM_UP_A" "$QNM_UP_B")
+QNM_DN_RATE=$(calc_pps "$QNM_DN_A" "$QNM_DN_B")
 CAKE_RATE=$(calc_pps "$CAKE_SENT_A" "$CAKE_SENT_B")
 
 echo "  硬件加速 VIP   上行 (Queue  0, sch0 SP): ${Q0_RATE} 包/秒"
 echo "  硬件加速 VIP   下行 (Queue 32, sch1 SP): ${Q32_RATE} 包/秒"
-echo "  硬件加速 普通  上行 (Queue 11, sch2 WRR): ${Q11_RATE} 包/秒"
-echo "  硬件加速 普通  下行 (Queue 43, sch3 WRR): ${Q43_RATE} 包/秒  ← dscp_en 验证关键"
+echo "  硬件加速 普通  上行 (Queue 5-29, sch2 WRR): ${QNM_UP_RATE} 包/秒  ← 自动 Hash"
+echo "  硬件加速 普通  下行 (Queue 37-61, sch3 WRR): ${QNM_DN_RATE} 包/秒  ← 自动 Hash"
 if [ -n "$CAKE_IF" ]; then
     if [ "$CAKE_RATE" = "N/A" ]; then
         echo "  软件 SQM (CAKE) 吞吐:         N/A"
@@ -308,9 +317,9 @@ if [ -n "$CAKE_IF" ]; then
     fi
 fi
 echo ""
-echo "  → Queue 0:  上行 VIP SP > 0  = VIP 硬件加速上行正在工作"
-echo "  → Queue 32: 下行 VIP SP > 0  = VIP 硬件加速下行正在工作"
-echo "  → Queue 11: 上行普通 WRR > 0 = 普通流量上行已分离"
-echo "  → Queue 43: 下行普通 WRR > 0 = dscp_en 已生效，下行不再混入 Q11"
-echo "  → CAKE > 0  = HNAT 未命中流量走软件路径"
+echo "  → Queue 0:     上行 VIP SP > 0  = VIP 硬件加速上行正在工作"
+echo "  → Queue 32:    下行 VIP SP > 0  = VIP 硬件加速下行正在工作"
+echo "  → Queue 5-29:  上行普通 WRR > 0 = 普通流量上行已成功分配到 per-user 队列"
+echo "  → Queue 37-61: 下行普通 WRR > 0 = dscp_en 已生效，下行不再拥堵"
+echo "  → CAKE > 0:    = HNAT 未命中流量走软件路径"
 echo "============================================"
