@@ -962,7 +962,7 @@ static void mtk_hnat_nf_update(struct sk_buff *skb)
 	if (unlikely(!skb_hnat_is_hashed(skb)))
 		return ;
 		
-	if (unlikely(skb->mark == HNAT_EXCEPTION_TAG))
+	if (unlikely((skb->mark & 0xFF) == HNAT_EXCEPTION_TAG))
 		return ;
  
 	ct = nf_ct_get(skb, &ctinfo);
@@ -2547,7 +2547,7 @@ static unsigned int mtk_hnat_nf_post_routing(
 	if (unlikely(!skb_hnat_is_hashed(skb)))
 		return 0;
 		
-	if (unlikely(skb->mark == HNAT_EXCEPTION_TAG))
+	if (unlikely((skb->mark & 0xFF) == HNAT_EXCEPTION_TAG))
 		return 0;
 
 	if (out->netdev_ops->ndo_flow_offload_check) {
