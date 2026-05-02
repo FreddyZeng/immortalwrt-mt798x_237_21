@@ -13,17 +13,29 @@ iface_list=$(echo "$interface" | tr ',' ' ')
 #   D: --ctstate NEW + /24 + -j MARK          (回程路由 MARK，仅 loadbalance 用)
 iptables-save -t mangle 2>/dev/null | while IFS= read -r _ln; do
     case "$_ln" in
-        # A: nth 负载均衡 CONNMARK (只有 loadbalance 用 -m statistic --mode nth + -j CONNMARK)
+        # A: nth 负载均衡 CONNMARK (186cfba8+ 版，-m statistic + -j CONNMARK)
         "-A PREROUTING "*"-m statistic ""--mode nth"*"-j CONNMARK "*)
             set -- $_ln; shift 2; iptables -t mangle -D PREROUTING "$@" 2>/dev/null ;;
-        # B: connmark restore (br-lan + -m connmark + -j MARK，限定 MARK 动作防止误删 restore 规则)
+        # B: connmark restore (186cfba8+ 版，br-lan + connmark + -j MARK)
         "-A PREROUTING "*"-i br-lan"*"-m connmark"*"-j MARK "*)
             set -- $_ln; shift 2; iptables -t mangle -D PREROUTING "$@" 2>/dev/null ;;
-        # C: HTTPS 443 MARK (--dport 443 + -j MARK，仅 loadbalance 写 443 MARK)
+        # C: HTTPS 443 MARK (任意版本，loadbalance 是唯一在 PREROUTING 写 443 MARK 的)
         "-A PREROUTING "*"--dport 443"*"-j MARK "*)
             set -- $_ln; shift 2; iptables -t mangle -D PREROUTING "$@" 2>/dev/null ;;
-        # D: 回程路由 MARK (限定 /24 + -j MARK + --set-xmark 0x2，精确匹配 loadbalance 的 WAN mark 前缀)
+        # D: 回程路由 MARK xmark 形式 (186cfba8+ 版，--set-xmark 0x2xxx/0xFF00)
         "-A PREROUTING "*"/24"*"-j MARK "*"--set-xmark 0x2"*)
+            set -- $_ln; shift 2; iptables -t mangle -D PREROUTING "$@" 2>/dev/null ;;
+        # E: nth MARK bash 旧版 (直接用 -j MARK --set-mark，不用 CONNMARK)
+        "-A PREROUTING "*"-m statistic ""--mode nth"*"-j MARK "*)
+            set -- $_ln; shift 2; iptables -t mangle -D PREROUTING "$@" 2>/dev/null ;;
+        # F: 回程路由 MARK bash 旧版 (--set-mark 2x，十进制无掩码)
+        "-A PREROUTING "*"/24"*"-j MARK "*"--set-mark 2"*)
+            set -- $_ln; shift 2; iptables -t mangle -D PREROUTING "$@" 2>/dev/null ;;
+        # G: POSTROUTING save-mark 旧版 (无 nfmask/ctmask，我们立即以带掩码版本重装)
+        "-A POSTROUTING "*"--ctstate NEW"*"-j CONNMARK ""--save-mark"*)
+            set -- $_ln; shift 2; iptables -t mangle -D POSTROUTING "$@" 2>/dev/null ;;
+        # H: PREROUTING br-lan restore-mark 旧版 (无 nfmask/ctmask，我们立即以带掩码版本重装)
+        "-A PREROUTING "*"-i br-lan"*"-j CONNMARK ""--restore-mark"*)
             set -- $_ln; shift 2; iptables -t mangle -D PREROUTING "$@" 2>/dev/null ;;
     esac
 done

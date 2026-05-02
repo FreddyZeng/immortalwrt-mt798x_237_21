@@ -37,15 +37,16 @@ start_service() {
 	config_get interface "config" "interface"
 	eqos start "$download" "$upload" "$comment" 
 	
-	local ipv6enabled                              
-        config_get_bool ipv6enabled "config" "ipv6enabled" "0"    
-        ip6tables -t mangle -N eqos
-        ip6tables -t mangle -F eqos
+	local ipv6enabled
+        config_get_bool ipv6enabled "config" "ipv6enabled" "0"
         if [ "$ipv6enabled" -eq "1" ]; then
+            ip6tables -t mangle -N eqos 2>/dev/null
+            ip6tables -t mangle -F eqos
             ip6tables -t mangle -D FORWARD  -j eqos
             ip6tables -t mangle -A FORWARD  -j eqos
         fi
-        
+
+
         if [ "$smarthqos" -eq "1" ]; then  
         # 上行 per-user 队列: Q5-Q29 (跳过 Q0-Q4 优先队列, Q30 背景, Q31 限速)
         for i in $(seq 5 29); do
