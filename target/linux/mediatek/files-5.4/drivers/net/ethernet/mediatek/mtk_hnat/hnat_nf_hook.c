@@ -2046,22 +2046,22 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 
     qos_mark = skb->mark & MTK_QDMA_TX_MASK;  // 仅取低6位[0..63], 防止高位mark污染 VIP/限速判断
 
-    // eqos 指定 VIP 下行使用可信 mark46, 保留 EF(46) 并进入 Q32。
+    // 优先级①: eqos 指定 VIP 下行 mark46 → 保留 EF → Q32 (最高)
     if (dir == HQOS_DOWNLOAD && qos_mark == 46) {
         dscp = (dscp & 0x03) | 0xB8;
         hnat_set_entry_dscp(&entry, dscp);
-    // 外来的 EF(46) 必须降级为 VA(44), 保护内网 VIP 队列不被外部流量挤占
-    // 且必须在 dscp_to_queue 之前执行，确保被分配到正确的 tin5 实时队列
-    } else if (dir == HQOS_DOWNLOAD && (dscp & 0xFC) == 0xB8) {
-        dscp = (dscp & 0x03) | 0xB0; // 降级为 0xB0 (DSCP 44)
-        hnat_set_entry_dscp(&entry, dscp);
-    // [HNAT-C-QOS109-02] 109网段 UDP 小包(≤300B) 下行: 重标记为 CS6(TOS=0xC0)
-    // dscp_to_queue(0xC0) → dscp=48 → Q1 → +32 → Q33, 与 CS6/CS7 下行队列对齐
+    // 优先级②: [HNAT-C-QOS109-02] 109网段 UDP 小包(≤300B) 下行强制 CS6(TOS=0xC0)
+    // 必须在外部 EF 降级之前: eqos 对 109 UDP 标记 DSCP=46, 若不提前拦截
+    // 则降级分支先触发 → VA/Q34, 109 小包永远无法到达 Q33
     } else if (dir == HQOS_DOWNLOAD &&
                is_ip_in_109_range_hnat(hash_ip) &&
                udp &&
                skb->len <= 300) {
-        dscp = 48 << 2;  // CS6: DSCP=48, TOS=0xC0
+        dscp = 48 << 2;  // CS6: DSCP=48, TOS=0xC0 → dscp_to_queue → Q1 → +32 = Q33
+        hnat_set_entry_dscp(&entry, dscp);
+    // 优先级③: 外来 EF(46) 降级为 VA(44), 防止外部流量占用 VIP Q32/Q0
+    } else if (dir == HQOS_DOWNLOAD && (dscp & 0xFC) == 0xB8) {
+        dscp = (dscp & 0x03) | 0xB0; // VA: TOS=0xB0, DSCP=44 → Q34
         hnat_set_entry_dscp(&entry, dscp);
     }
 
