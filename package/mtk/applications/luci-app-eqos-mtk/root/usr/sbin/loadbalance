@@ -19,7 +19,7 @@ done
 i=0
 for var in $iface_list; do
     ipaddr=$(ip route show | grep default | grep "$var" | awk '{print $3}')
-    FW_MARK=$(printf "0x%02x00" "2${i}")
+    FW_MARK=$(printf "0x%02x00" $((0x20 + i)))
 
     # 删除旧规则
     iptables -t mangle -D PREROUTING -i br-lan -m conntrack --ctstate NEW \
@@ -51,7 +51,7 @@ done
 i=0
 for var in $iface_list; do
     ipaddr=$(ip route show | grep default | grep "$var" | awk '{print $3}')
-    FW_MARK=$(printf "0x%02x00" "2${i}")
+    FW_MARK=$(printf "0x%02x00" $((0x20 + i)))
 
     iptables -t mangle -D PREROUTING -m conntrack --ctstate NEW \
         -d "$ipaddr/24" -j MARK --set-xmark ${FW_MARK}/0xFF00 2>/dev/null
