@@ -22,6 +22,7 @@
   | C-FQOS01-02 | pending | - | 2026-05-02 | Fix QoS regression findings for IPv6 limit DSCP/mark, trusted VIP download Q32 marker, zero-speed limit cancellation, exact mark matching, legacy mode parsing, CAKE highest tin guard, and verification queue labels | ✅ 已完成 |
   | C-FQOS01-03 | pending | - | 2026-05-02 | Refactor DOWNLOAD QoS marking logic to cleanly isolate IPv4 and IPv6 rule sets | ✅ 已完成 |
   | C-FQOS01-04 | pending | - | 2026-05-02 | Refactor eqos ruleset to a unified CONNMARK architecture, solving IPv6 HNAT bypass | ✅ 已完成 |
+  | C-FQOS02-01 | pending | - | 2026-05-02 | Migrate Multi-WAN loadbalance and eqos routing marks to 16-bit high-order space (0xFF00) to isolate from QoS marks | ✅ 已完成 |
 - Bugs:
   | BID | 描述 | 引入者 | 修复者 | 状态 |
   |-----|------|--------|--------|------|

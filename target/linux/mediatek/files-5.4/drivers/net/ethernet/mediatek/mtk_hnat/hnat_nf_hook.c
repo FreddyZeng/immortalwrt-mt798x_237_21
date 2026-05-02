@@ -2082,8 +2082,12 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 
     if (IS_HQOS_MODE && hnat_priv->dscp_en) {
         if (dir != HQOS_LOCAL) {
-            if (qos_mark == 2) {
-                qid = (dir == HQOS_DOWNLOAD) ? 63 : 31;
+            // bit7(0x80)=下行限速→Q63, bit6(0x40)=上行限速→Q31
+            // VIP mark=46=0x2E: bit7=0,bit6=0，精确匹配在下方，不冲突
+            if ((qos_mark & 0x80) && dir == HQOS_DOWNLOAD) {
+                qid = 63;  // [HNAT-C-FQOS01-05-①] 下行限速 → Q63
+            } else if ((qos_mark & 0x40) && dir == HQOS_UPLOAD) {
+                qid = 31;  // [HNAT-C-FQOS01-05-②] 上行限速 → Q31
             } else if (dir == HQOS_DOWNLOAD && qos_mark == 46) {
                 qid = 32;
             } else {
