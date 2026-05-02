@@ -23,7 +23,11 @@ start_qos() {
     tc class add dev ${dev}-ifb parent 1: classid 1:1 htb rate ${up}mbit
 
     tc qdisc add dev $dev ingress
-    tc filter add dev $dev parent ffff: protocol ip u32 match u32 0 0 flowid 1:1 action mirred egress redirect dev ${dev}-ifb
+    tc filter add dev $dev parent ffff: protocol ip u32 match u32 0 0 \
+        flowid 1:1 action mirred egress redirect dev ${dev}-ifb
+    # IPv6 下行流量同样重定向到 IFB （flower 配合 kmod-sched-flower）
+    tc filter add dev $dev parent ffff: protocol ipv6 u32 match u32 0 0 \
+        flowid 1:1 action mirred egress redirect dev ${dev}-ifb 2>/dev/null || true
 }
 
 iptables_stop() {
@@ -383,9 +387,13 @@ case "$1" in
     if [ "$id" -gt 64 ]; then
         tc class add dev $dev parent 1:1 classid 1:1$cnt htb rate ${dl}kbit ceil ${dl}kbit
         tc filter add dev $dev parent 1:0 protocol ip u32 match ip dst $ip flowid 1:1$cnt
+        # IPv6: flower 按目标 MAC 匹配下行
+        tc filter add dev $dev parent 1:0 protocol ipv6 flower dst_mac $macaddr flowid 1:1$cnt 2>/dev/null || true
 
         tc class add dev ${dev}-ifb parent 1:1 classid 1:1$cnt htb rate ${up}kbit ceil ${up}kbit
         tc filter add dev ${dev}-ifb parent 1:0 protocol ip u32 match ip src $ip flowid 1:1$cnt
+        # IPv6: flower 按源 MAC 匹配上行
+        tc filter add dev ${dev}-ifb parent 1:0 protocol ipv6 flower src_mac $macaddr flowid 1:1$cnt 2>/dev/null || true
     fi
 
     # per-device WAN 路由选择: 指定接口序号则锁定到对应 WAN 出口

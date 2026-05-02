@@ -5,40 +5,42 @@
 interface=$1
 iface_list=$(echo "$interface" | tr ',' ' ')
 
-# ── 1. 精确迁移清理：只删旧版 loadbalance 特有规则形态 ───────────────────
-# 不泛删所有 0xFF00（避免误删 mwan3 等），只匹配三种旧版特征：
-#   A: -m statistic --mode nth + -j CONNMARK  (nth 负载均衡，仅 loadbalance 用)
-#   B: -i br-lan + -m connmark + -j MARK      (connmark restore，仅 loadbalance 用)
-#   C: --dport 443 + -j MARK                  (HTTPS 固定出口，仅 loadbalance 用)
-#   D: --ctstate NEW + /24 + -j MARK          (回程路由 MARK，仅 loadbalance 用)
-iptables-save -t mangle 2>/dev/null | while IFS= read -r _ln; do
-    case "$_ln" in
-        # A: nth 负载均衡 CONNMARK (186cfba8+ 版，-m statistic + -j CONNMARK)
-        "-A PREROUTING "*"-m statistic ""--mode nth"*"-j CONNMARK "*)
-            set -- $_ln; shift 2; iptables -t mangle -D PREROUTING "$@" 2>/dev/null ;;
-        # B: connmark restore (186cfba8+ 版，br-lan + connmark + -j MARK)
-        "-A PREROUTING "*"-i br-lan"*"-m connmark"*"-j MARK "*)
-            set -- $_ln; shift 2; iptables -t mangle -D PREROUTING "$@" 2>/dev/null ;;
-        # C: HTTPS 443 MARK (任意版本，loadbalance 是唯一在 PREROUTING 写 443 MARK 的)
-        "-A PREROUTING "*"--dport 443"*"-j MARK "*)
-            set -- $_ln; shift 2; iptables -t mangle -D PREROUTING "$@" 2>/dev/null ;;
-        # D: 回程路由 MARK xmark 形式 (186cfba8+ 版，--set-xmark 0x2xxx/0xFF00)
-        "-A PREROUTING "*"/24"*"-j MARK "*"--set-xmark 0x2"*)
-            set -- $_ln; shift 2; iptables -t mangle -D PREROUTING "$@" 2>/dev/null ;;
-        # E: nth MARK bash 旧版 (直接用 -j MARK --set-mark，不用 CONNMARK)
-        "-A PREROUTING "*"-m statistic ""--mode nth"*"-j MARK "*)
-            set -- $_ln; shift 2; iptables -t mangle -D PREROUTING "$@" 2>/dev/null ;;
-        # F: 回程路由 MARK bash 旧版 (--set-mark 2x，十进制无掩码)
-        "-A PREROUTING "*"/24"*"-j MARK "*"--set-mark 2"*)
-            set -- $_ln; shift 2; iptables -t mangle -D PREROUTING "$@" 2>/dev/null ;;
-        # G: POSTROUTING save-mark 旧版 (无 nfmask/ctmask，我们立即以带掩码版本重装)
-        "-A POSTROUTING "*"--ctstate NEW"*"-j CONNMARK ""--save-mark"*)
-            set -- $_ln; shift 2; iptables -t mangle -D POSTROUTING "$@" 2>/dev/null ;;
-        # H: PREROUTING br-lan restore-mark 旧版 (无 nfmask/ctmask，我们立即以带掩码版本重装)
-        "-A PREROUTING "*"-i br-lan"*"-j CONNMARK ""--restore-mark"*)
-            set -- $_ln; shift 2; iptables -t mangle -D PREROUTING "$@" 2>/dev/null ;;
-    esac
-done
+# ── 1. 精确迁移清理：只删旧版 loadbalance 特有规则 ─────────────────────
+# G/H: 精确模板删除（格式固定，升级时必须清理旧版无掩码规则）
+iptables -t mangle -D PREROUTING -i br-lan \
+    -m conntrack --ctstate ESTABLISHED,RELATED \
+    -j CONNMARK --restore-mark 2>/dev/null
+iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \
+    -j CONNMARK --save-mark 2>/dev/null
+
+# A-F: 扫描旧版直写 PREROUTING 规则（形态可变，仅首次启动时执行）
+# _eqos_lb_new=1 表示 eqos_lb 链刚刚不存在 → 来自旧版升级，需要清理旧直写规则
+_eqos_lb_new=1
+iptables -t mangle -L eqos_lb >/dev/null 2>&1 && _eqos_lb_new=0
+if [ "$_eqos_lb_new" -eq 1 ]; then
+    iptables-save -t mangle 2>/dev/null | while IFS= read -r _ln; do
+        case "$_ln" in
+            # A: nth CONNMARK (186cfba8+ 版)
+            "-A PREROUTING "*"-m statistic ""--mode nth"*"-j CONNMARK "*)
+                set -- $_ln; shift 2; iptables -t mangle -D PREROUTING "$@" 2>/dev/null ;;
+            # B: connmark restore → MARK (186cfba8+ 版)
+            "-A PREROUTING "*"-i br-lan"*"-m connmark"*"-j MARK "*)
+                set -- $_ln; shift 2; iptables -t mangle -D PREROUTING "$@" 2>/dev/null ;;
+            # C: HTTPS 443 MARK (loadbalance 专有，任意版本)
+            "-A PREROUTING "*"--dport 443"*"-j MARK "*)
+                set -- $_ln; shift 2; iptables -t mangle -D PREROUTING "$@" 2>/dev/null ;;
+            # D: 回程路由 --set-xmark 0x2xxx (186cfba8+ 版)
+            "-A PREROUTING "*"/24"*"-j MARK "*"--set-xmark 0x2"*)
+                set -- $_ln; shift 2; iptables -t mangle -D PREROUTING "$@" 2>/dev/null ;;
+            # E: nth MARK bash 旧版 (-j MARK 不用 CONNMARK)
+            "-A PREROUTING "*"-m statistic ""--mode nth"*"-j MARK "*)
+                set -- $_ln; shift 2; iptables -t mangle -D PREROUTING "$@" 2>/dev/null ;;
+            # F: 回程路由 --set-mark 2x bash 旧版 (十进制无掩码)
+            "-A PREROUTING "*"/24"*"-j MARK "*"--set-mark 2"*)
+                set -- $_ln; shift 2; iptables -t mangle -D PREROUTING "$@" 2>/dev/null ;;
+        esac
+    done
+fi
 
 # ── 2. 创建/清空专属子链 ──────────────────────────────────────────────────
 iptables -t mangle -N eqos_lb 2>/dev/null
@@ -120,15 +122,20 @@ iptables -t mangle -A eqos_lb \
     -j MARK --set-xmark ${first_mark}/0xFF00
 
 # ── 9. 全局 CONNMARK save/restore（路由域 bits[15:8]）────────────────────
+# 使用 -m comment eqos_lb 标签，使精确 -D 只删本脚本安装的规则
 iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \
+    -m comment --comment "eqos_lb" \
     -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
 iptables -t mangle -A POSTROUTING -m conntrack --ctstate NEW \
+    -m comment --comment "eqos_lb" \
     -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00
 iptables -t mangle -D PREROUTING -i br-lan \
     -m conntrack --ctstate ESTABLISHED,RELATED \
+    -m comment --comment "eqos_lb" \
     -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
 iptables -t mangle -A PREROUTING -i br-lan \
     -m conntrack --ctstate ESTABLISHED,RELATED \
+    -m comment --comment "eqos_lb" \
     -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00
 
 ip route flush cache
