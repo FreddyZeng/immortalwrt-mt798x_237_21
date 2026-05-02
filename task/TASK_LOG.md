@@ -30,4 +30,16 @@
 - **方案同步**: ✅ design/qos-architecture.md
 - **测试同步**: ✅ test/qos-test.md
 
+## [2026-05-02] C-FQOS01-03 | commit: pending
+
+- **FID**: F-QOS01
+- **CID**: C-FQOS01-03
+- **类型**: refactor
+- **范围**: mtk_hnat
+- **描述**: Refactor DOWNLOAD QoS marking logic to cleanly isolate IPv4 and IPv6 rule sets, resolving structural mixing of protocol-specific checks.
+- **改动文件**: hnat_nf_hook.c
+- **PRD 同步**: ✅ PRD/qos-hardening.md
+- **方案同步**: ✅ design/qos-architecture.md
+- **测试同步**: ✅ test/qos-test.md
+
 <!-- 新增 commit 记录在此下方添加 -->
