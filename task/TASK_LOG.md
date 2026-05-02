@@ -77,3 +77,4 @@
 - **测试同步**: ✅ test/qos-regression.sh
 
 <!-- 新增 commit 记录在此下方添加 -->
+- [x] (2026-05-02) `B-004`: Fixed legacy `--set-mark` logic in `eqos` script which lacked masks and zeroed out upper routing bits used by `mwan3`. Replaced all `--set-mark 0x99` with `--set-xmark 0x99/0xFF` and `--set-mark 2"$interface"` with `--set-xmark 2"$interface"/0xFF00`.

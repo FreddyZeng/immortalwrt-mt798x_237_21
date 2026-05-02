@@ -181,11 +181,11 @@ case "$1" in
     # Q63: 限速设备专用 → sch3 (WRR 权重=1, 由 add 命令设 min/max rate)
     echo 3 0 0 0 0 1 0 > /sys/kernel/debug/hnat/qdma_txq63
 
-    #iptables -t mangle -D eqos -m iprange --src-range 192.168.110.10-192.168.110.39 -j MARK --set-mark 0x99
-    #iptables -t mangle -D eqos -m iprange --dst-range 192.168.110.10-192.168.110.39 -j MARK --set-mark 0x99
+    #iptables -t mangle -D eqos -m iprange --src-range 192.168.110.10-192.168.110.39 -j MARK --set-xmark 0x99/0xFF
+    #iptables -t mangle -D eqos -m iprange --dst-range 192.168.110.10-192.168.110.39 -j MARK --set-xmark 0x99/0xFF
 
-    #iptables -t mangle -I eqos -m iprange  --src-range 192.168.110.10-192.168.110.39 -j MARK --set-mark 0x99
-    #iptables -t mangle -I eqos -m iprange  --dst-range 192.168.110.10-192.168.110.39 -j MARK --set-mark 0x99
+    #iptables -t mangle -I eqos -m iprange  --src-range 192.168.110.10-192.168.110.39 -j MARK --set-xmark 0x99/0xFF
+    #iptables -t mangle -I eqos -m iprange  --dst-range 192.168.110.10-192.168.110.39 -j MARK --set-xmark 0x99/0xFF
 
 
     #iptables -t mangle -D eqos -m iprange --src-range 192.168.110.10-192.168.110.39 -j DSCP --set-dscp 46
@@ -213,18 +213,18 @@ case "$1" in
     iptables -t mangle -I eqos -d 192.168.109.0/24 -p udp -m length --length 0:300 -j DSCP --set-dscp 46
 
     # Delete existing rules properly
-    #iptables -t mangle -D eqos -m iprange --src-range 192.168.110.2-192.168.110.9 -j MARK --set-mark 0x99
-    #iptables -t mangle -D eqos -m iprange --dst-range 192.168.110.2-192.168.110.9 -j MARK --set-mark 0x99
+    #iptables -t mangle -D eqos -m iprange --src-range 192.168.110.2-192.168.110.9 -j MARK --set-xmark 0x99/0xFF
+    #iptables -t mangle -D eqos -m iprange --dst-range 192.168.110.2-192.168.110.9 -j MARK --set-xmark 0x99/0xFF
 
-    #iptables -t mangle -D eqos -m iprange --src-range 192.168.110.40-192.168.110.254 -j MARK --set-mark 0x99
-    #iptables -t mangle -D eqos -m iprange --dst-range 192.168.110.40-192.168.110.254 -j MARK --set-mark 0x99
+    #iptables -t mangle -D eqos -m iprange --src-range 192.168.110.40-192.168.110.254 -j MARK --set-xmark 0x99/0xFF
+    #iptables -t mangle -D eqos -m iprange --dst-range 192.168.110.40-192.168.110.254 -j MARK --set-xmark 0x99/0xFF
 
     # Add new rules properly
-    #iptables -t mangle -A eqos -m iprange --src-range 192.168.110.2-192.168.110.9 -j MARK --set-mark 0x99
-    #iptables -t mangle -A eqos -m iprange --dst-range 192.168.110.2-192.168.110.9 -j MARK --set-mark 0x99
+    #iptables -t mangle -A eqos -m iprange --src-range 192.168.110.2-192.168.110.9 -j MARK --set-xmark 0x99/0xFF
+    #iptables -t mangle -A eqos -m iprange --dst-range 192.168.110.2-192.168.110.9 -j MARK --set-xmark 0x99/0xFF
 
-    #iptables -t mangle -A eqos -m iprange  --src-range 192.168.110.40-192.168.110.254 -j MARK --set-mark 0x99
-    #iptables -t mangle -A eqos -m iprange  --dst-range 192.168.110.40-192.168.110.254 -j MARK --set-mark 0x99
+    #iptables -t mangle -A eqos -m iprange  --src-range 192.168.110.40-192.168.110.254 -j MARK --set-xmark 0x99/0xFF
+    #iptables -t mangle -A eqos -m iprange  --dst-range 192.168.110.40-192.168.110.254 -j MARK --set-xmark 0x99/0xFF
 
     ;;
     "add")
@@ -330,13 +330,13 @@ case "$1" in
         # 刷新 HNAT 表, 强制已有流重新绑定到新队列
         echo 1 > /sys/kernel/debug/hnat/hnat_entry
     else
-        iptables -t mangle -D eqos -s $ip -j MARK --set-mark 0x99
-        iptables -t mangle -D eqos -d $ip -j MARK --set-mark 0x99
+        iptables -t mangle -D eqos -s $ip -j MARK --set-xmark 0x99/0xFF
+        iptables -t mangle -D eqos -d $ip -j MARK --set-xmark 0x99/0xFF
         if [ $up -ne 0 ]; then
-        iptables -t mangle -A eqos -s $ip -j MARK --set-mark 0x99
+        iptables -t mangle -A eqos -s $ip -j MARK --set-xmark 0x99/0xFF
         fi
         if [ $dl -ne 0 ]; then
-        iptables -t mangle -A eqos -d $ip -j MARK --set-mark 0x99
+        iptables -t mangle -A eqos -d $ip -j MARK --set-xmark 0x99/0xFF
         fi
     fi
 
@@ -350,10 +350,11 @@ case "$1" in
 
     # per-device WAN 路由选择: 指定接口序号则锁定到对应 WAN 出口
     if [ "$interface" ]; then
-        iptables -t mangle -D PREROUTING -s $ip -m conntrack --ctstate NEW -j MARK --set-mark 2"$interface"
-        iptables -t mangle -A PREROUTING -s $ip -m conntrack --ctstate NEW -j MARK --set-mark 2"$interface"
-        iptables -t mangle -D PREROUTING -i br-lan -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark
-        iptables -t mangle -A PREROUTING -i br-lan -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark
+        # 路由标记通常使用高位 (如 mwan3 的 0xFF00)，这里为避免覆盖 QoS 的低8位标记，必须使用掩码
+        iptables -t mangle -D PREROUTING -s $ip -m conntrack --ctstate NEW -j MARK --set-xmark 2"$interface"/0xFF00
+        iptables -t mangle -A PREROUTING -s $ip -m conntrack --ctstate NEW -j MARK --set-xmark 2"$interface"/0xFF00
+        iptables -t mangle -D PREROUTING -i br-lan -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF
+        iptables -t mangle -A PREROUTING -i br-lan -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF
     fi
     ;;
     *)
