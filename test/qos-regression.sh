@@ -33,8 +33,8 @@ grep -Fq 'ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK -
 grep -Fq 'iptables -t mangle -I eqos -s 192.168.0.0/16 -m u32 --u32 "0xc&0x0000FF00=0x00006E00:0x00007700" -m u32 --u32 "0xc&0x000000FF=0x0000000A:0x00000027" -j CONNMARK --set-xmark 46/0xFF' "$EQOS" ||
     fail "static VIP source range must install unified CONNMARK 46"
 
-grep -Fq 'iptables -t mangle -A eqos -m mark --mark 46/0xFF -j DSCP --set-dscp 46' "$EQOS" ||
-    fail "global mark 46 to DSCP 46 translation is missing"
+grep -Fq 'iptables -t mangle -A eqos_apply -m mark --mark 46/0xFF -j DSCP --set-dscp 46' "$EQOS" ||
+    fail "global mark 46 to DSCP 46 translation is missing in eqos_apply"
 
 grep -Fq 'ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 2/0xFF' "$EQOS" ||
     fail "IPv6 hardware limit rule must set CONNMARK 2"
@@ -61,10 +61,10 @@ grep -Fq 'qid = 32;' "$HNAT_HOOK" ||
 
 grep -Fq 'if (qos_mark == 2)' "$HNAT_HOOK" ||
     fail "HNAT must honor mark 2 as hardware limit fallback"
-# 检查 CONNMARK 还原规则的掩码保护
-RESTORE_MARK_CMD="iptables -t mangle -I FORWARD 1 -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF"
+# 检查 CONNMARK 还原规则的掩码保护以及在 eqos_apply 中的延迟应用
+RESTORE_MARK_CMD="iptables -t mangle -A eqos_apply -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF"
 grep -Fq "$RESTORE_MARK_CMD" "$EQOS" ||
-    fail "Global CONNMARK restore rule MUST use --nfmask 0xFF --ctmask 0xFF to protect upper bits"
+    fail "eqos_apply MUST use --nfmask 0xFF --ctmask 0xFF restore-mark to apply ctmark to first packet"
 grep -Fq 'qid = (dir == HQOS_DOWNLOAD) ? 63 : 31;' "$HNAT_HOOK" ||
     fail "HNAT mark 2 fallback must map to Q31/Q63"
 
