@@ -228,12 +228,22 @@ case "$1" in
     interface="$7"
     cnt=$(tc class show dev $dev | wc -l)
 
+    raw_id="$id"
+    case "$id" in
+        ''|*[!0-9]*)
+            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-01] legacy qos mode fallback: ip=$ip, raw_mode=$raw_id, normalized_mode=0"
+            id=0
+            ;;
+        *)
+            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-02] qos mode accepted: ip=$ip, mode=$id"
+            ;;
+    esac
 
-    if [ $id -eq 64 ]; then
+    if [ "$id" -eq 64 ]; then
 
         iptables -t mangle -D eqos -s $ip -j DSCP --set-dscp 46 2>/dev/null
         iptables -t mangle -D eqos -d $ip -j DSCP --set-dscp 46 2>/dev/null
-        # BUG-fix: IPv6 上行必须使用 DSCP 而非 MARK，否则硬件 HNAT QoS 无法识别
+        # IPv6 上行使用 DSCP, HNAT dscp_en 按 IPv6 Traffic Class 选择队列。
         ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j DSCP --set-dscp 46 2>/dev/null
         ebtables -t nat -D eqos -p ipv6 -d $macaddr -j mark --mark-set 46 2>/dev/null
 
@@ -243,12 +253,12 @@ case "$1" in
         iptables -t mangle -A eqos -d $ip -j DSCP --set-dscp 46
         ebtables -t nat -A eqos -p ipv6 -d $macaddr -j mark --mark-set 46
 
-    elif [ $id -lt 64 ]; then
+    elif [ "$id" -lt 64 ]; then
         # 限速设备: 强制标记 DSCP 2 → 内核映射到 Q31/Q63 (硬件限速队列)
-        # BUG-4 fix: 删除旧规则时, 先从累加器减去该设备的速率
+        # 删除旧规则时, 先从累加器减去该设备的速率。
         iptables -t mangle -D eqos -s $ip -j DSCP --set-dscp 2 2>/dev/null
         iptables -t mangle -D eqos -d $ip -j DSCP --set-dscp 2 2>/dev/null
-        # BUG-fix: 同上，必须使用 DSCP
+        # IPv6 上行必须使用 DSCP, 避免 HNAT dscp_en 路径忽略 MARK。
         ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j DSCP --set-dscp 2 2>/dev/null
         ebtables -t nat -D eqos -p ipv6 -d $macaddr -j mark --mark-set 2 2>/dev/null
 
@@ -284,7 +294,8 @@ case "$1" in
         fi
 
         iptables -t mangle -A eqos -s $ip -j DSCP --set-dscp 2
-        ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j MARK --set-mark 2
+        logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-03] install IPv6 limit DSCP rule: ip=$ip, mode=$id, dscp=2"
+        ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j DSCP --set-dscp 2
 
         # 限速设备统一使用 Q31(上行)/Q63(下行) 背景队列
         # 记录每设备速率用于后续删除时减法, 再累加到总限速
@@ -321,7 +332,7 @@ case "$1" in
         fi
     fi
 
-    if [ $id -gt 64 ]; then
+    if [ "$id" -gt 64 ]; then
         tc class add dev $dev parent 1:1 classid 1:1$cnt htb rate ${dl}kbit ceil ${dl}kbit
         tc filter add dev $dev parent 1:0 protocol ip u32 match ip dst $ip flowid 1:1$cnt
 
@@ -348,4 +359,3 @@ case "$1" in
     echo "  $0 add 192.168.22.12 10 2   # down 10kbit/s  up 2kbit/s"
     ;;
 esac
-

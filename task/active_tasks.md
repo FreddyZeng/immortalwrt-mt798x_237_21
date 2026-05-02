@@ -4,7 +4,7 @@
 
 | 任务 | FID | 状态 | 负责人 | 开始日期 | 描述 |
 |------|-----|------|--------|---------|------|
-| MT798x QoS Hardening | F-QOS01 | 进行中 | Antigravity | 2026-05-02 | HNAT 数据路径的硬件队列重构与错误修复 |
+| MT798x QoS Hardening | F-QOS01 | 进行中 | Antigravity | 2026-05-02 | HNAT 数据路径、IPv6 限速和 CAKE 独立补丁最高 tin 保护修复 |
 
 ---
 

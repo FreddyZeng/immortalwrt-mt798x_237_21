@@ -1,0 +1,25 @@
+--- a/net/sched/sch_cake.c
++++ b/net/sched/sch_cake.c
+@@ -1753 +1753 @@
+-	u8 highest_priority_tin;
++	u8 highest_priority_tin = 0;
+@@ -1762 +1762 @@
+-	is_priority_ip = is_nat_target_ip_ipv4_k(skb, q);
++	is_priority_ip = q->tin_cnt > 1 && is_nat_target_ip_ipv4_k(skb, q);
+@@ -1769 +1769 @@
+-	if (is_nat_target_ip_109_k(skb)) {
++	if (q->tin_cnt > 1 && is_nat_target_ip_109_k(skb)) {
+@@ -1818,4 +1817,0 @@
+-	else if (skb->priority == TC_PRIO_MAX) {
+-		tin = highest_priority_tin;
+-	}
+-
+@@ -1826 +1822 @@
+-		if (tin == highest_priority_tin) {
++		if (q->tin_cnt > 1 && tin == highest_priority_tin) {
+@@ -1833 +1829 @@
+-		if (tin == highest_priority_tin) {
++		if (q->tin_cnt > 1 && tin == highest_priority_tin) {
+@@ -1843 +1839 @@
+-		if (tin == highest_priority_tin) {
++		if (q->tin_cnt > 1 && tin == highest_priority_tin) {

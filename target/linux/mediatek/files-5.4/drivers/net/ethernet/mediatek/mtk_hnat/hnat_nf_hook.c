@@ -2031,9 +2031,13 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 
     if (IS_HQOS_MODE && hnat_priv->dscp_en) {
         if (dir != HQOS_LOCAL) {
-            qid = dscp_to_queue(dscp, hash_ip);
-            if (dir == HQOS_DOWNLOAD) {
-                qid = qid + 32;
+            if ((skb->mark & MTK_QDMA_TX_MASK) == 2) {
+                qid = (dir == HQOS_DOWNLOAD) ? 63 : 31;
+            } else {
+                qid = dscp_to_queue(dscp, hash_ip);
+                if (dir == HQOS_DOWNLOAD) {
+                    qid = qid + 32;
+                }
             }
         }
     }

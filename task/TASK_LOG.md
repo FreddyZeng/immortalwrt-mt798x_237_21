@@ -17,4 +17,17 @@
 - **方案同步**: ✅ design/qos-architecture.md
 - **测试同步**: ✅ test/qos-test.md
 
+## [2026-05-02] C-FQOS01-02 | commit: pending
+
+- **FID**: F-QOS01
+- **BID**: B-001
+- **CID**: C-FQOS01-02
+- **类型**: fix, test
+- **范围**: luci-app-eqos-mtk, CAKE patch
+- **描述**: Fix IPv6 hardware limit DSCP/mark queue binding, legacy comment mode parsing, standalone CAKE highest tin guard patch, and verification DSCP queue labels.
+- **改动文件**: root/usr/sbin/eqos, hnat_nf_hook.c, 9999995-fix-cake-highest-tin-guard.patch, docs/verify-vip-qos.sh, test/qos-regression.sh, PRD/design/test/task/bugs
+- **PRD 同步**: ✅ PRD/qos-hardening.md
+- **方案同步**: ✅ design/qos-architecture.md
+- **测试同步**: ✅ test/qos-test.md
+
 <!-- 新增 commit 记录在此下方添加 -->
