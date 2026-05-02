@@ -59,6 +59,9 @@ iptables_stop() {
 }
 
 iptables_start_prepare() {
+    # ipv6enabled 开关：需在此读取，后面所有 ip6tables 内容必须受此开关控制
+    ipv6_en=$(uci -q get eqos.config.ipv6enabled || echo 0)
+
     # EF(46) 降级为 VA(44) 即时语音, Q0 只留给 eqos 指定的 VIP 设备
     # VA(44) 保留, 走 Q2 实时交互队列
     # 其他全部清零, eqos 链会重新标记: VIP=46, 限速=2, 109小包=46
@@ -69,18 +72,22 @@ iptables_start_prepare() {
     iptables -t mangle -D FORWARD -j dscp_clear 2>/dev/null
     iptables -t mangle -I FORWARD 1 -j dscp_clear
 
-    ip6tables -t mangle -N dscp_clear 2>/dev/null
-    ip6tables -t mangle -F dscp_clear
-    ip6tables -t mangle -A dscp_clear -m dscp --dscp 44 -j RETURN
-    ip6tables -t mangle -A dscp_clear -m dscp --dscp 46 -j DSCP --set-dscp 44
-    ip6tables -t mangle -D FORWARD -j dscp_clear 2>/dev/null
-    ip6tables -t mangle -I FORWARD 1 -j dscp_clear
+    if [ "$ipv6_en" = "1" ]; then
+        ip6tables -t mangle -N dscp_clear 2>/dev/null
+        ip6tables -t mangle -F dscp_clear
+        ip6tables -t mangle -A dscp_clear -m dscp --dscp 44 -j RETURN
+        ip6tables -t mangle -A dscp_clear -m dscp --dscp 46 -j DSCP --set-dscp 44
+        ip6tables -t mangle -D FORWARD -j dscp_clear 2>/dev/null
+        ip6tables -t mangle -I FORWARD 1 -j dscp_clear
+    fi
 
     # 新架构: 统一连接跟踪标记还原 (仅还原低8位 0xFF，保护 mwan3 等多线高位 mark)
     iptables -t mangle -D FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF 2>/dev/null
     iptables -t mangle -I FORWARD 1 -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF
-    ip6tables -t mangle -D FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF 2>/dev/null
-    ip6tables -t mangle -I FORWARD 1 -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF
+    if [ "$ipv6_en" = "1" ]; then
+        ip6tables -t mangle -D FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF 2>/dev/null
+        ip6tables -t mangle -I FORWARD 1 -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF
+    fi
 }
 
 iptables_start_inital() {
@@ -110,7 +117,7 @@ iptables_start_inital() {
     #          必须在 eqos_apply 阶段显式 restore，否则 HNAT 首包建表时 mark=0，VIP/限速漏判
     #   - ESTABLISHED,RELATED: 后续包依赖此步还原已存储的 ct_mark
     iptables -t mangle -A eqos_apply -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF
-    ip6tables -t mangle -A eqos_apply -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF
+    [ "$ipv6_en" = "1" ] && ip6tables -t mangle -A eqos_apply -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF
 
     # 全局 DSCP 同步规则 (方向感知): 仅对限速方向设置 DSCP=2，避免非限速方向降级至 Q31
     # VIP mark=46=0x2E: bit6=0, bit7=0 → 两条规则均不命中，VIP DSCP 不受影响

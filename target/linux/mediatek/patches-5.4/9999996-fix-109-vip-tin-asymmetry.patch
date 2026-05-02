@@ -3,7 +3,7 @@
 @@ -1762,11 +1762,14 @@
  		return &q->tins[highest_priority_tin];
  	}
- 
+
 -	// 109 网段: 仅 UDP 且包长 ≤ 300 字节的小包走最高优先级
 +	// 109 网段: 仅 UDP 且包长 ≤ 300 字节的小包走第二优先级 (最高优先级-1)
  	if (is_nat_target_ip_109_k(skb)) {

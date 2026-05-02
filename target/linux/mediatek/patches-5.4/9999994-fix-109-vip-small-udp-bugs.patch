@@ -13,7 +13,7 @@
 @@ -1680,7 +1681,8 @@ static bool is_nat_target_ip_check(struc
  		return false;
  	}
- 
+
 -	iph = ip_hdr(skb);
 +	// 安全获取 IP 头部，避免越界访问 (BUG-7修复)
 +	iph = skb_header_pointer(skb, skb_network_offset(skb), sizeof(_iph), &_iph);
@@ -23,13 +23,13 @@
 @@ -1713,6 +1715,7 @@ static bool is_nat_target_ip_check(struc
  						ret = true;
  					}
- 
+
 +					// BUG-6 fix: 释放通过 nf_conntrack_find_get 取得的引用
  					nf_ct_put(ct);
  				}
  			}
 @@ -1764,7 +1767,8 @@ static struct cake_tin_data *cake_select
- 
+
  	// 109 网段: 仅 UDP 且包长 ≤ 300 字节的小包走最高优先级
  	if (is_nat_target_ip_109_k(skb)) {
 -		struct iphdr *iph_109 = ip_hdr(skb);

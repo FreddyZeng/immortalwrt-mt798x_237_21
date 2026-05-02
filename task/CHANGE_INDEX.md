@@ -13,9 +13,9 @@
 - PRD: PRD/qos-hardening.md
 - Design: design/qos-architecture.md
 - Test: test/qos-regression.sh
-- ADRs: 
-- Diagnostics: 
-- Releases: 
+- ADRs:
+- Diagnostics:
+- Releases:
 - Changes:
   | CID | Commit | PR | 日期 | 描述 | 状态 |
   |-----|--------|-----|------|------|------|

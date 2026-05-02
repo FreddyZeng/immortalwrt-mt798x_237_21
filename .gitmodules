@@ -1,9 +1,0 @@
-[submodule "package/network/services/wifidog-ng"]
-	path = package/network/services/wifidog-ng
-	url = https://github.com/FreddyZeng/wifidog-ng.git
-[submodule "wifidog-ng-authserver"]
-	path = wifidog-ng-authserver
-	url = ssh://fanrong@gitpssh.175208.xyz:2222/Route/wifidog-ng-authserver.git
-[submodule "package/luci-app-sms-tool"]
-	path = package/luci-app-sms-tool
-	url = https://github.com/4IceG/luci-app-sms-tool.git
