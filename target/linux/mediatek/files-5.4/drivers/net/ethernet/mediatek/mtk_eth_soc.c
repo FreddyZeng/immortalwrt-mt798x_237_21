@@ -1034,6 +1034,24 @@ static int mtk_tx_map(struct sk_buff *skb, struct net_device *dev,
         /* get QDMA queue id from skb->mark */
         qid = skb->mark & (MTK_QDMA_TX_MASK);
 
+        /* [P1-Fix] 拦截 QoS 控制面语义 mark, 避免 CPU 发包时误将其解析为真实的 qid */
+        if (skb->mark & 0xFF) {
+            u8 qos_mark = skb->mark & 0xFF;
+            if (qos_mark == 46) {
+                qid = mac->id ? 0 : 32; /* 46: VIP 上行Q0/下行Q32 */
+            } else if (qos_mark == 0x40) {
+                qid = 31; /* 0x40: 上行限速 */
+            } else if (qos_mark == 0x80) {
+                qid = 63; /* 0x80: 下行限速 */
+            } else if (qos_mark == 0xC0) {
+                qid = mac->id ? 31 : 63; /* 0xC0: 双向限速 */
+            }
+            /* 如果包含非队列的随机 mark, 让其走兜底, 不要乱冲其他队列 */
+            else if (qos_mark > MTK_QDMA_TX_MASK) {
+                qid = 0;
+            }
+        }
+
         /* 如果 CPU 侧没有配置 mark (qid=0), 则根据出站接口提供安全的兜底队列，
          * 绝对防止普通流量占用硬件级的 VIP 队列 (Q0和Q32) */
         if (!qid) {

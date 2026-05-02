@@ -197,7 +197,7 @@ get_dn_label() {
         35) echo "16-23  AF2x   交互应用 SP      " ;;
         36) echo "24-31/33-39 AF3x/4x 视频 SP  " ;;
         62) echo "1/8-15 LE/CS1/AF1x 背景 WRR   " ;;
-        63) echo "2/MARK2 LIMIT 限速设备 WRR     " ;;
+        63) echo "MARK0xC0 LIMIT 限速设备 WRR     " ;;
         *)
             if [ "$1" -ge 37 ] && [ "$1" -le 61 ]; then
                 echo "0/未定义 HASH 普通流量 WRR     "

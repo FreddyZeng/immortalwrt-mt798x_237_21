@@ -1,47 +1,89 @@
-interface=$1
-array=(${interface//,/ })
-        PPP_NUM=0
+#!/bin/sh
+# loadbalance - 多 WAN 负载均衡路由标记配置
+# 兼容 POSIX sh (busybox ash / dash / bash 均可运行)
+# 参数: $1 = 逗号分隔的 WAN 接口列表, 如 "pppoe-wan,pppoe-wan2"
+# 标记域: bits[15:8] = 路由 mark (0xFF00 掩码), 与 QoS 低8位完全隔离
 
-        for var in ${array[@]}
-        do
-        let PPP_NUM=PPP_NUM+1
-        done
-        
-        i=0
-        for var in ${array[@]}
-        do
-        ipaddr=$(ip route show |grep default | grep $var | awk '{print $3 }')
-        local FW_MARK=$(printf "0x%02x00" "2${i}")
-        iptables -t mangle -D PREROUTING -i br-lan -m conntrack --ctstate NEW -m statistic --mode nth --every $PPP_NUM --packet $i -j CONNMARK --set-xmark ${FW_MARK}/0xFF00 2>/dev/null
-        iptables -t mangle -D PREROUTING -i br-lan -m connmark --mark ${FW_MARK}/0xFF00 -j MARK --set-xmark ${FW_MARK}/0xFF00 2>/dev/null
-        iptables -t mangle -A PREROUTING -i br-lan -m conntrack --ctstate NEW -m statistic --mode nth --every $PPP_NUM --packet $i -j CONNMARK --set-xmark ${FW_MARK}/0xFF00
-        iptables -t mangle -A PREROUTING -i br-lan -m connmark --mark ${FW_MARK}/0xFF00 -j MARK --set-xmark ${FW_MARK}/0xFF00
-        ip rule del table 2"${i}"0 2>/dev/null
-        ip rule add fwmark ${FW_MARK}/0xff00 table 2"${i}"0
-        ip route del default table 2"${i}"0 2>/dev/null
-        ip route add default via $ipaddr dev $var table 2"${i}"0
-        let i=i+1
-        done
-        
-        
-        i=0
-        for var in ${array[@]}
-        do
-        ipaddr=$(ip route show |grep default | grep $var | awk '{print $3 }')
-        local FW_MARK=$(printf "0x%02x00" "2${i}")
-        iptables -t mangle -D PREROUTING  -m conntrack --ctstate NEW -d $ipaddr/24 -j MARK --set-xmark ${FW_MARK}/0xFF00 2>/dev/null
-        iptables -t mangle -A PREROUTING  -m conntrack --ctstate NEW -d $ipaddr/24 -j MARK --set-xmark ${FW_MARK}/0xFF00
-        let i=i+1
-        done
-        
-        iptables -t mangle -D PREROUTING -p tcp --dport 443 -m conntrack --ctstate NEW -j MARK --set-xmark 0x2000/0xFF00 2>/dev/null
-        iptables -t mangle -A PREROUTING -p tcp --dport 443 -m conntrack --ctstate NEW -j MARK --set-xmark 0x2000/0xFF00
-        
-        iptables -t mangle -D PREROUTING -p udp --dport 443 -m conntrack --ctstate NEW -j MARK --set-xmark 0x2000/0xFF00 2>/dev/null
-        iptables -t mangle -A PREROUTING -p udp --dport 443 -m conntrack --ctstate NEW -j MARK --set-xmark 0x2000/0xFF00
-        
-        iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
-        iptables -t mangle -A POSTROUTING -m conntrack --ctstate NEW -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00
-        iptables -t mangle -D PREROUTING -i br-lan -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
-        iptables -t mangle -A PREROUTING -i br-lan -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00
-        ip route flush cache
+interface=$1
+
+# 将逗号分隔的接口列表转换为空格分隔（POSIX 兼容）
+iface_list=$(echo "$interface" | tr ',' ' ')
+
+# 统计接口数量（用于 nth 负载均衡模式）
+PPP_NUM=0
+for _v in $iface_list; do
+    PPP_NUM=$((PPP_NUM + 1))
+done
+
+# === 第一轮: 安装 LAN→WAN NEW 连接负载均衡 CONNMARK + 返回路由 ===
+i=0
+for var in $iface_list; do
+    ipaddr=$(ip route show | grep default | grep "$var" | awk '{print $3}')
+    FW_MARK=$(printf "0x%02x00" "2${i}")
+
+    # 删除旧规则
+    iptables -t mangle -D PREROUTING -i br-lan -m conntrack --ctstate NEW \
+        -m statistic --mode nth --every $PPP_NUM --packet $i \
+        -j CONNMARK --set-xmark ${FW_MARK}/0xFF00 2>/dev/null
+    iptables -t mangle -D PREROUTING -i br-lan \
+        -m connmark --mark ${FW_MARK}/0xFF00 \
+        -j MARK --set-xmark ${FW_MARK}/0xFF00 2>/dev/null
+
+    # 安装新规则: NEW 连接按 nth 算法分配 WAN 出口 CONNMARK
+    iptables -t mangle -A PREROUTING -i br-lan -m conntrack --ctstate NEW \
+        -m statistic --mode nth --every $PPP_NUM --packet $i \
+        -j CONNMARK --set-xmark ${FW_MARK}/0xFF00
+    # ESTABLISHED 连接从 CONNMARK 还原路由标记到 skb->mark
+    iptables -t mangle -A PREROUTING -i br-lan \
+        -m connmark --mark ${FW_MARK}/0xFF00 \
+        -j MARK --set-xmark ${FW_MARK}/0xFF00
+
+    # 路由表: fwmark → WAN 接口
+    ip rule del table "2${i}0" 2>/dev/null
+    ip rule add fwmark ${FW_MARK}/0xff00 table "2${i}0"
+    ip route del default table "2${i}0" 2>/dev/null
+    ip route add default via "$ipaddr" dev "$var" table "2${i}0"
+
+    i=$((i + 1))
+done
+
+# === 第二轮: 安装回程路由标记（目标 IP → WAN 接口路由表）===
+i=0
+for var in $iface_list; do
+    ipaddr=$(ip route show | grep default | grep "$var" | awk '{print $3}')
+    FW_MARK=$(printf "0x%02x00" "2${i}")
+
+    iptables -t mangle -D PREROUTING -m conntrack --ctstate NEW \
+        -d "$ipaddr/24" -j MARK --set-xmark ${FW_MARK}/0xFF00 2>/dev/null
+    iptables -t mangle -A PREROUTING -m conntrack --ctstate NEW \
+        -d "$ipaddr/24" -j MARK --set-xmark ${FW_MARK}/0xFF00
+
+    i=$((i + 1))
+done
+
+# HTTPS (443 TCP/UDP) 固定走第一个 WAN (0x2000)，保持 TLS 会话稳定
+iptables -t mangle -D PREROUTING -p tcp --dport 443 \
+    -m conntrack --ctstate NEW -j MARK --set-xmark 0x2000/0xFF00 2>/dev/null
+iptables -t mangle -A PREROUTING -p tcp --dport 443 \
+    -m conntrack --ctstate NEW -j MARK --set-xmark 0x2000/0xFF00
+
+iptables -t mangle -D PREROUTING -p udp --dport 443 \
+    -m conntrack --ctstate NEW -j MARK --set-xmark 0x2000/0xFF00 2>/dev/null
+iptables -t mangle -A PREROUTING -p udp --dport 443 \
+    -m conntrack --ctstate NEW -j MARK --set-xmark 0x2000/0xFF00
+
+# POSTROUTING: 将 skb->mark[15:8] 保存回 ct_mark[15:8]（仅路由域，不影响 QoS 低8位）
+iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \
+    -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
+iptables -t mangle -A POSTROUTING -m conntrack --ctstate NEW \
+    -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00
+
+# PREROUTING: ESTABLISHED 连接还原路由 ct_mark → skb->mark（保证每包走正确 WAN）
+iptables -t mangle -D PREROUTING -i br-lan \
+    -m conntrack --ctstate ESTABLISHED,RELATED \
+    -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
+iptables -t mangle -A PREROUTING -i br-lan \
+    -m conntrack --ctstate ESTABLISHED,RELATED \
+    -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00
+
+ip route flush cache

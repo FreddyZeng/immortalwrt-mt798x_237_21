@@ -93,30 +93,36 @@ iptables_start_inital() {
     iptables -t mangle -A FORWARD  -j eqos
     iptables -t mangle -A FORWARD  -j eqos_apply
 
-    ip6tables -t mangle -N eqos 2>/dev/null
-    ip6tables -t mangle -N eqos_apply 2>/dev/null
-    ip6tables -t mangle -F eqos 2>/dev/null
-    ip6tables -t mangle -F eqos_apply 2>/dev/null
-    ip6tables -t mangle -A FORWARD  -j eqos 2>/dev/null
-    ip6tables -t mangle -A FORWARD  -j eqos_apply 2>/dev/null
+    ipv6_en=$(uci -q get eqos.config.ipv6enabled || echo 0)
 
-    # 全局应用链 (eqos_apply): 在 eqos 链完成 set-xmark 之后执行
-    # 这一步极其关键: CONNMARK --set-xmark 仅仅修改了内存表中的状态，并没有同步到当前这第一个数据包上。
-    # 必须通过 restore-mark 强制将刚刚打上的状态赋给当前 skb->mark，否则第一包(也是触发硬件加速编程的包)将漏判！
-    iptables -t mangle -A eqos_apply -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF
-    ip6tables -t mangle -A eqos_apply -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF
+    if [ "$ipv6_en" = "1" ]; then
+        ip6tables -t mangle -N eqos 2>/dev/null
+        ip6tables -t mangle -N eqos_apply 2>/dev/null
+        ip6tables -t mangle -F eqos 2>/dev/null
+        ip6tables -t mangle -F eqos_apply 2>/dev/null
+        ip6tables -t mangle -A FORWARD  -j eqos 2>/dev/null
+        ip6tables -t mangle -A FORWARD  -j eqos_apply 2>/dev/null
+    fi
+
+    # 全局还原链 (eqos_apply): 将 ct_mark 复制回 skb->mark
+    # 必须覆盖 NEW + ESTABLISHED,RELATED:
+    #   - NEW: eqos chain 刚通过 CONNMARK --set-xmark 写入 ct_mark (只写 ct_mark 不写 skb->mark)
+    #          必须在 eqos_apply 阶段显式 restore，否则 HNAT 首包建表时 mark=0，VIP/限速漏判
+    #   - ESTABLISHED,RELATED: 后续包依赖此步还原已存储的 ct_mark
+    iptables -t mangle -A eqos_apply -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF
+    ip6tables -t mangle -A eqos_apply -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF
 
     # 全局 DSCP 同步规则 (方向感知): 仅对限速方向设置 DSCP=2，避免非限速方向降级至 Q31
     # VIP mark=46=0x2E: bit6=0, bit7=0 → 两条规则均不命中，VIP DSCP 不受影响
     # bit6(0x40)=上行限速: 仅对 LAN→WAN 包 (-i br-lan) 设置 DSCP=2 → dscp_to_queue→Q31
     iptables  -t mangle -A eqos_apply -i br-lan     -m mark --mark 0x40/0x40 -j DSCP --set-dscp 2
-    ip6tables -t mangle -A eqos_apply -i br-lan     -m mark --mark 0x40/0x40 -j DSCP --set-dscp 2
+    [ "$ipv6_en" = "1" ] && ip6tables -t mangle -A eqos_apply -i br-lan     -m mark --mark 0x40/0x40 -j DSCP --set-dscp 2
     # bit7(0x80)=下行限速: 仅对 WAN→LAN 包 (! -i br-lan) 设置 DSCP=2 → dscp_to_queue→Q63
     iptables  -t mangle -A eqos_apply ! -i br-lan   -m mark --mark 0x80/0x80 -j DSCP --set-dscp 2
-    ip6tables -t mangle -A eqos_apply ! -i br-lan   -m mark --mark 0x80/0x80 -j DSCP --set-dscp 2
+    [ "$ipv6_en" = "1" ] && ip6tables -t mangle -A eqos_apply ! -i br-lan   -m mark --mark 0x80/0x80 -j DSCP --set-dscp 2
     # VIP 下行标记同步: mark=46 → DSCP=46 (覆盖 dscp_clear 的 EF→VA 降级)
     iptables  -t mangle -A eqos_apply -m mark --mark 46/0xFF -j DSCP --set-dscp 46
-    ip6tables -t mangle -A eqos_apply -m mark --mark 46/0xFF -j DSCP --set-dscp 46
+    [ "$ipv6_en" = "1" ] && ip6tables -t mangle -A eqos_apply -m mark --mark 46/0xFF -j DSCP --set-dscp 46
     echo 1 > /sys/kernel/debug/hnat/qos_toggle
     # 基线调度器配置 (后续 start 会完整覆盖)
     echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch0
@@ -141,7 +147,7 @@ iptables_start_inital() {
 
 case "$1" in
     "stop")
-#        stop_qos
+        stop_qos
     iptables_stop
     ;;
     "start")
@@ -151,7 +157,7 @@ case "$1" in
     echo 0 > /tmp/eqos_q63_rate
     rm -f /tmp/eqos_dev_up_* /tmp/eqos_dev_dl_*
     iptables_start_prepare
-#        start_qos $2 $3
+        start_qos $2 $3
     iptables_start_inital
     echo 1 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch0
     echo 1 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch1
@@ -263,24 +269,28 @@ case "$1" in
     if [ "$id" -eq 64 ]; then
         # 清理旧规则
         iptables -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF 2>/dev/null
+        [ -n "$ip" ] && iptables -t mangle -D eqos -d $ip -j CONNMARK --set-xmark 46/0xFF 2>/dev/null
         ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF 2>/dev/null
 
         # 重新应用新规则 (带掩码保护高位 mark)
         iptables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF
+        [ -n "$ip" ] && iptables -t mangle -A eqos -d $ip -j CONNMARK --set-xmark 46/0xFF
         ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF
-        logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-04] install unified VIP marker: mac=$macaddr, connmark=46"
+        logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-04] install unified VIP marker: mac=$macaddr, ip=$ip, connmark=46"
 
     elif [ "$id" -lt 64 ]; then
         # 限速设备: bit6(0x40)=上行限速→Q31, bit7(0x80)=下行限速→Q63
         # 方案B: 穷举删除所有可能的旧限速规则（防止规则泄漏）
         for _xm in 0x40 0x80 0xC0; do
             iptables  -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${_xm}/0xC0 2>/dev/null
+            [ -n "$ip" ] && iptables  -t mangle -D eqos -d $ip -j CONNMARK --set-xmark ${_xm}/0xC0 2>/dev/null
             ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${_xm}/0xC0 2>/dev/null
         done
 
         # 检查该设备是否已有记录, 如有则减去其旧速率后再加新速率
-        old_up_file="/tmp/eqos_dev_up_${ip}"
-        old_dl_file="/tmp/eqos_dev_dl_${ip}"
+        # [P1-Fix] 使用唯一的 macaddr 作为缓存文件名，防止 IPv6-only (IP为空) 时不同设备发生文件碰撞
+        old_up_file="/tmp/eqos_dev_up_${macaddr}"
+        old_dl_file="/tmp/eqos_dev_dl_${macaddr}"
         old_up=$(cat "$old_up_file" 2>/dev/null || echo 0)
         old_dl=$(cat "$old_dl_file" 2>/dev/null || echo 0)
 
@@ -318,8 +328,9 @@ case "$1" in
         [ $dl -ne 0 ] && xmark=$((xmark | 0x80))
         if [ $xmark -ne 0 ]; then
             iptables  -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${xmark}/0xC0
+            [ -n "$ip" ] && iptables  -t mangle -A eqos -d $ip -j CONNMARK --set-xmark ${xmark}/0xC0
             ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${xmark}/0xC0
-            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-05-③] install directional limit marker: mac=$macaddr, xmark=${xmark}/0xC0, up=${up}, dl=${dl}"
+            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-05-③] install directional limit marker: mac=$macaddr, ip=$ip, xmark=${xmark}/0xC0, up=${up}, dl=${dl}"
         fi
 
         if [ $up -ne 0 ]; then
@@ -359,7 +370,7 @@ case "$1" in
 
     # per-device WAN 路由选择: 指定接口序号则锁定到对应 WAN 出口
     if [ "$interface" ]; then
-        local rm_val=$(printf "0x%02x00" "2${interface}")
+        rm_val=$(printf "0x%02x00" "2${interface}")
         # 路由标记通常使用高位 (0xFF00)，这里为避免覆盖 QoS 的低8位标记，必须使用掩码
         iptables -t mangle -D PREROUTING -s $ip -m conntrack --ctstate NEW -j MARK --set-xmark ${rm_val}/0xFF00 2>/dev/null
         iptables -t mangle -A PREROUTING -s $ip -m conntrack --ctstate NEW -j MARK --set-xmark ${rm_val}/0xFF00

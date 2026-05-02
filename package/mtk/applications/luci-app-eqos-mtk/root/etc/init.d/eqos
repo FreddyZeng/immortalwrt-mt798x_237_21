@@ -62,7 +62,7 @@ start_service() {
 	fi 
         iptables -t mangle -F PREROUTING
         if [ $interface ]; then
-	bash /usr/sbin/loadbalance "$interface"
+	/usr/sbin/loadbalance "$interface"
         fi
         config_foreach parse_device "device"
         # smarthqos DHCP DSCP 分配已禁用:

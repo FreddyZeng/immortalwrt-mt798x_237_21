@@ -33,15 +33,15 @@ grep -Fq 'ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK -
 grep -Fq 'iptables -t mangle -I eqos -s 192.168.0.0/16 -m u32 --u32 "0xc&0x0000FF00=0x00006E00:0x00007700" -m u32 --u32 "0xc&0x000000FF=0x0000000A:0x00000027" -j CONNMARK --set-xmark 46/0xFF' "$EQOS" ||
     fail "static VIP source range must install unified CONNMARK 46"
 
-grep -Fq 'iptables -t mangle -A eqos_apply -m mark --mark 46/0xFF -j DSCP --set-dscp 46' "$EQOS" ||
+grep -Fq 'iptables  -t mangle -A eqos_apply -m mark --mark 46/0xFF -j DSCP --set-dscp 46' "$EQOS" ||
     fail "global mark 46 to DSCP 46 translation is missing in eqos_apply"
 
-grep -Fq 'ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 2/0xFF' "$EQOS" ||
-    fail "IPv6 hardware limit rule must set CONNMARK 2"
+grep -Fq 'ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${xmark}/0xC0' "$EQOS" ||
+    fail "IPv6 hardware limit rule must set directional CONNMARK"
 
-UP_LIMIT_BLOCK=$(sed -n '/if \[ \$up -ne 0 \] || \[ \$dl -ne 0 \]; then/,/fi/p' "$EQOS")
-echo "$UP_LIMIT_BLOCK" | grep -Fq 'iptables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 2/0xFF' ||
-    fail "unified limit CONNMARK 2 rule must be installed"
+UP_LIMIT_BLOCK=$(sed -n '/if \[ \$xmark -ne 0 \]; then/,/fi/p' "$EQOS")
+echo "$UP_LIMIT_BLOCK" | grep -Fq 'iptables  -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${xmark}/0xC0' ||
+    fail "unified limit CONNMARK 0xC0 rule must be installed"
 
 if grep -Eq 'ebtables -t nat .* eqos' "$EQOS"; then
     fail "ebtables rules must be completely removed from eqos script"
@@ -59,14 +59,14 @@ grep -Fq 'dscp = (dscp & 0x03) | 0xB8;' "$HNAT_HOOK" ||
 grep -Fq 'qid = 32;' "$HNAT_HOOK" ||
     fail "trusted VIP download mark 46 must map to Q32"
 
-grep -Fq 'if (qos_mark == 2)' "$HNAT_HOOK" ||
-    fail "HNAT must honor mark 2 as hardware limit fallback"
+grep -Fq 'if ((qos_mark & 0x80) && dir == HQOS_DOWNLOAD)' "$HNAT_HOOK" ||
+    fail "HNAT must honor mark 0x80 as hardware down limit"
 # 检查 CONNMARK 还原规则的掩码保护以及在 eqos_apply 中的延迟应用
-RESTORE_MARK_CMD="iptables -t mangle -A eqos_apply -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF"
+RESTORE_MARK_CMD="iptables -t mangle -A eqos_apply -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF"
 grep -Fq "$RESTORE_MARK_CMD" "$EQOS" ||
-    fail "eqos_apply MUST use --nfmask 0xFF --ctmask 0xFF restore-mark to apply ctmark to first packet"
-grep -Fq 'qid = (dir == HQOS_DOWNLOAD) ? 63 : 31;' "$HNAT_HOOK" ||
-    fail "HNAT mark 2 fallback must map to Q31/Q63"
+    fail "eqos_apply MUST use --nfmask 0xFF --ctmask 0xFF restore-mark to apply ctmark to ALL packets"
+grep -Fq 'qid = 63;  // [HNAT-C-FQOS01-05-①] 下行限速 → Q63' "$HNAT_HOOK" ||
+    fail "HNAT mark 0x80 fallback must map to Q63"
 
 grep -Fq 'qid = dscp_to_queue(dscp, hash_ip);' "$HNAT_HOOK" ||
     fail "HNAT mark 0/default path must fall back to DSCP mapping"
@@ -100,8 +100,8 @@ grep -Fq '46/MARK46 EF 可信VIP下行 SP' "$VERIFY_QOS" ||
 grep -Fq '32/40/44 CS4/5/VA 实时 SP' "$VERIFY_QOS" ||
     fail "verification script Q2/Q34 label must match HNAT DSCP mapping"
 
-grep -Fq '2/MARK2 LIMIT 限速设备 WRR' "$VERIFY_QOS" ||
-    fail "verification script Q63 label must show DSCP2/MARK2 limit queue"
+grep -Fq 'MARK0xC0 LIMIT 限速设备 WRR' "$VERIFY_QOS" ||
+    fail "verification script Q63 label must show DSCP2/MARK0xC0 limit queue"
 
 if grep -Eq 'echo "4[1-5][[:space:]]+SP' "$VERIFY_QOS"; then
     fail "verification script still uses obsolete DSCP 41-45 SP labels"
