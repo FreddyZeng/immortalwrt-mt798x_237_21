@@ -26,7 +26,7 @@ else
     echo "  │ 流量类型     │ 上传 LAN→WAN(Q0-Q31) │ 下载 WAN→LAN(Q32-Q63) │"
     echo "  ├──────────────┼──────────────────────┼───────────────────────┤"
     echo "  │ 指定VIP      │ qid(0)  → Q0  SP     │ qid(32) → Q32 SP      │"
-    echo "  │ 109小包UDP   │ qid(0)  → Q0  SP     │ qid(34) → Q34 SP      │"
+    echo "  │ 109小包UDP   │ qid(0)  → Q0  SP     │ qid(33) → Q33 SP      │"
     echo "  │ 普通流量     │ hash → Q5-Q29 WRR    │ hash → Q37-Q61 WRR    │"
     echo "  └──────────────┴──────────────────────┴───────────────────────┘"
     echo ""
@@ -87,7 +87,7 @@ else
 
     # ---- 游戏加速区: 192.168.109.x ----
     echo "━━━ 🎮 游戏加速 (192.168.109.x) ━━━"
-    echo "  仅 UDP≤300B 打 DSCP=46；上传 qid(0)，下载 EF 降级后 qid(34)"
+    echo "  仅 UDP≤300B 打 DSCP=46/CS6；上传 qid(0)/Q0，下载 HNAT CS6重标记 qid(33)/Q33"
     echo "  TCP/大包UDP 走普通通道 → hash到 Q5-Q29/Q37-Q61 WRR"
     N109_UP_ENTRIES=$(get_hnat_entries "UP" "109")
     N109_DN_ENTRIES=$(get_hnat_entries "DN" "109")
@@ -97,7 +97,7 @@ else
     [ -n "$N109_DN_ENTRIES" ] && echo "$N109_DN_ENTRIES" | head -5 || echo "    (无)"
     N109_UP=$(echo "$N109_UP_ENTRIES" | grep -c "=>")
     N109_DN=$(echo "$N109_DN_ENTRIES" | grep -c "=>")
-    echo "  (上传 $N109_UP 条 / 下载 $N109_DN 条 → UDP小包期望 qid(0)/qid(34), 其他走 hash 队列)"
+    echo "  (上传 $N109_UP 条 / 下载 $N109_DN 条 → UDP小包期望 qid(0)/qid(33), 其他走 hash 队列)"
     echo ""
 
     # ---- 普通流量: 192.168 网段, 非 VIP 非 109 ----
