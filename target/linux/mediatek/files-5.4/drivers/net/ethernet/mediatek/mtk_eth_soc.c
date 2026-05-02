@@ -1031,13 +1031,14 @@ static int mtk_tx_map(struct sk_buff *skb, struct net_device *dev,
 
 	nr_frags = skb_shinfo(skb)->nr_frags;
 
-        // CPU慢路径按方向分流: GMAC1(LAN)=下行Q33, GMAC2(WAN)=上行Q1
-        qid = mac->id ? 1 : 33;
+        /* get QDMA queue id from skb->mark */
+        qid = skb->mark & (MTK_QDMA_TX_MASK);
 
-#if defined(CONFIG_MEDIATEK_NETSYS_V2)
-	if(!qid && mac->id)
-		qid = 1;  // GMAC2(WAN)上行兜底Q1
-#endif
+        /* 如果 CPU 侧没有配置 mark (qid=0), 则根据出站接口提供安全的兜底队列，
+         * 绝对防止普通流量占用硬件级的 VIP 队列 (Q0和Q32) */
+        if (!qid) {
+            qid = mac->id ? 1 : 33;  // GMAC2(WAN) 上行兜底Q1, GMAC1(LAN) 下行兜底Q33
+        }
 
 	if (MTK_HAS_CAPS(eth->soc->caps, MTK_NETSYS_V2)) {
 		/* set the forward port */

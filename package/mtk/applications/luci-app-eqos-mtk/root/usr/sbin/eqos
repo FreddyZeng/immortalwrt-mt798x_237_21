@@ -87,6 +87,8 @@ iptables_start_inital() {
     echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch3
     # VIP 队列 SP(weight=0): Q0(上行VIP) Q32(下行VIP)
     # 默认队列 SP(weight=0): Q1(上行默认) Q33(下行默认) — 对应内核 qid=33
+    echo 0 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq0
+    echo 1 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq8
     echo 0 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq1
     echo 1 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq33
     echo "11 1" >/sys/kernel/debug/hnat/hnat_setting

@@ -1437,21 +1437,11 @@ enum hqos_direction {
  * 判断流量方向, 完全不使用 IS_WAN/IS_LAN (它们定义相同, 无法区分)
  *
  * 判断优先级:
- *   1) 109-119 范围: IP 精确判断 (saddr=上行, daddr=下行)
- *   2) 硬件入口标记: FROM_GE_WAN = 下行, FROM_GE_LAN = 上行
- *   3) 其他来源 (WiFi/PPD/EXT): 本地流量, 不限速
+ *   1) 物理目标判定: 只要发往 WAN (GMAC2) 必定为上行
+ *   2) 物理来源判定: 只要来自 WAN 必定为下行
+ *   3) 内部互访: 局域网、Wi-Fi 间互访兜底为本地流量 (不限速)
  */
-// 辅助函数: 判断是否为 RFC1918 局域网私有 IP
-static bool is_private_ipv4(__be32 ip_be) {
-    const uint8_t *p = (const uint8_t *)&ip_be;
-    // 10.0.0.0/8
-    if (p[0] == 10) return true;
-    // 172.16.0.0/12
-    if (p[0] == 172 && p[1] >= 16 && p[1] <= 31) return true;
-    // 192.168.0.0/16
-    if (p[0] == 192 && p[1] == 168) return true;
-    return false;
-}
+
 
 static enum hqos_direction get_hqos_direction(const struct sk_buff *skb, u32 gmac,
 					      const struct net_device *dev) {
@@ -1545,7 +1535,6 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 	u8  dscp = 0;
 	struct net_device *master_dev = (struct net_device *)dev;
 	struct mtk_mac *mac;
-	__be32 lan_ip = 0;
 	__be32 hash_ip = 0;
 	__be32 orig_sip = 0;
 	__be32 new_dip_val = 0;
@@ -1963,80 +1952,62 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 		return 0;
 	}
 
-	if (IS_HQOS_MODE || skb->mark >= MAX_PPPQ_PORT_NUM)
-		qid = 1;    // HQOS模式初始Q1(上行), dscp_en块会覆盖为正确队列
-	else if (IS_PPPQ_MODE && (IS_DSA_1G_LAN(dev) || IS_DSA_WAN(dev)))
-		qid = port_id & MTK_QDMA_TX_MASK;
-	else
-		qid = 1;    // 默认 Q1 (sch0 上行), 避开 Q0/Q32 VIP 专属队列
+    // 首先判断物理方向，这对队列划分和内网 IP 提取至关重要
+    dir = get_hqos_direction(skb, gmac, dev);
 
+    // 恢复 Linux 原生 mark 和 PPPQ 映射逻辑
+    if (skb->mark >= MAX_PPPQ_PORT_NUM) {
+        qid = skb->mark & MTK_QDMA_TX_MASK;
+    } else if (IS_PPPQ_MODE && (IS_DSA_1G_LAN(dev) || IS_DSA_WAN(dev))) {
+        qid = port_id & MTK_QDMA_TX_MASK;
+    } else {
+        qid = (dir == HQOS_UPLOAD) ? 1 : 33; // 常规默认队列
+    }
 
+    // 防御性兜底：防止被异常的 mark 或 port_id 污染为 0
+    // 绝对不允许未经显式授权的流量占用 VIP Q0/Q32
+    if (!qid) {
+        qid = (dir == HQOS_UPLOAD) ? 1 : 33;
+    }
 
     // 从 FOE entry 中提取 LAN IP 用于方向判断和 per-user 队列分配
     // NAPT 地址映射:
     //   上行: sip=LAN(111.x) → new_sip=WAN(101.88), dip=服务器 → new_dip=服务器
     //   下行: sip=服务器 → new_sip=服务器, dip=WAN(101.88) → new_dip=LAN(111.x)
     // 所以: 上行 LAN IP = sip, 下行 LAN IP = new_dip
-    // lan_ip: 用于方向检测(必须是192.168.109-119范围的LAN IP)
-    // hash_ip: 用于per-user队列hash(任意可区分设备的值)
     if (IS_IPV4_HNAPT(&entry) || IS_IPV4_HNAT(&entry)) {
-        const uint8_t *s, *d;
         orig_sip = htonl(entry.ipv4_hnapt.sip);
         new_dip_val = htonl(entry.ipv4_hnapt.new_dip);
-        s = (const uint8_t *)&orig_sip;
-        d = (const uint8_t *)&new_dip_val;
 
-        if (s[0] == 192 && s[1] == 168 && s[2] >= 109 && s[2] <= 119) {
-            lan_ip = orig_sip;
-        } else if (d[0] == 192 && d[1] == 168 && d[2] >= 109 && d[2] <= 119) {
-            lan_ip = new_dip_val;
-        }
-        // BUG-9 fix: 提取真实内网 IP 用于 WRR per-user hash 隔离
-        hash_ip = is_private_ipv4(orig_sip) ? orig_sip : new_dip_val;
+        // 基于精准方向确定真实内网 IP，用于 WRR per-user hash 隔离，彻底消除子网猜测
+        hash_ip = (dir == HQOS_DOWNLOAD) ? new_dip_val : orig_sip;
     } else if (IS_IPV4_DSLITE(&entry) || IS_IPV4_MAPE(&entry) || IS_IPV4_MAPT(&entry)) {
-        const uint8_t *s;
         orig_sip = htonl(entry.ipv4_dslite.sip);
-        s = (const uint8_t *)&orig_sip;
-        if (s[0] == 192 && s[1] == 168 && s[2] >= 109 && s[2] <= 119) {
-            lan_ip = orig_sip;
-        }
 #if defined(CONFIG_MEDIATEK_NETSYS_V2)
-        else {
-            const uint8_t *d;
-            new_dip_val = htonl(entry.ipv4_dslite.new_dip);
-            d = (const uint8_t *)&new_dip_val;
-            if (d[0] == 192 && d[1] == 168 && d[2] >= 109 && d[2] <= 119) {
-                lan_ip = new_dip_val;
-            }
-        }
+        new_dip_val = htonl(entry.ipv4_dslite.new_dip);
 #endif
-        // BUG-9 fix: 提取真实内网 IP 用于 WRR per-user hash 隔离
-        hash_ip = is_private_ipv4(orig_sip) ? orig_sip : new_dip_val;
+        hash_ip = (dir == HQOS_DOWNLOAD) ? new_dip_val : orig_sip;
     } else if (IS_IPV6_5T_ROUTE(&entry)) {
-        // IPv6: 不设 lan_ip(无法子网匹配), 方向由 FROM_GE_WAN/LAN 判断
-        // hash_ip 取 sip3 用于 per-user 队列分配
-        hash_ip = htonl(entry.ipv6_5t_route.ipv6_sip3);
-        if (!hash_ip) hash_ip = htonl(entry.ipv6_5t_route.ipv6_dip3);
+        // IPv6 (BUG fix: 修复下载流量错误 Hash 服务器 IP 导致隔离失效)
+        // 提取精准的 LAN 侧 IPv6 尾部用于 hash
+        if (dir == HQOS_DOWNLOAD) {
+            hash_ip = htonl(entry.ipv6_5t_route.ipv6_dip3);
+        } else {
+            hash_ip = htonl(entry.ipv6_5t_route.ipv6_sip3);
+        }
     } else if (IS_IPV6_3T_ROUTE(&entry)) {
-        hash_ip = htonl(entry.ipv6_3t_route.ipv6_sip3);
-        if (!hash_ip) hash_ip = htonl(entry.ipv6_3t_route.ipv6_dip3);
+        if (dir == HQOS_DOWNLOAD) {
+            hash_ip = htonl(entry.ipv6_3t_route.ipv6_dip3);
+        } else {
+            hash_ip = htonl(entry.ipv6_3t_route.ipv6_sip3);
+        }
     } else if (IS_IPV6_6RD(&entry)) {
-        // 6RD: tunnel_sipv4/dipv4 是IPv4, 可做子网匹配
-        const uint8_t *s, *d;
+        // 6RD: tunnel_sipv4/dipv4 是IPv4
         orig_sip = htonl(entry.ipv6_6rd.tunnel_sipv4);
         new_dip_val = htonl(entry.ipv6_6rd.tunnel_dipv4);
-        s = (const uint8_t *)&orig_sip;
-        d = (const uint8_t *)&new_dip_val;
 
-        if (s[0] == 192 && s[1] == 168 && s[2] >= 109 && s[2] <= 119) {
-            lan_ip = orig_sip;
-        } else if (d[0] == 192 && d[1] == 168 && d[2] >= 109 && d[2] <= 119) {
-            lan_ip = new_dip_val;
-        }
-        hash_ip = lan_ip ? lan_ip : (orig_sip ? orig_sip : new_dip_val);
+        hash_ip = (dir == HQOS_DOWNLOAD) ? new_dip_val : orig_sip;
     }
-
-    dir = get_hqos_direction(skb, gmac, dev);
 
     // 外来的 EF(46) 必须降级为 VA(44), 保护内网 VIP 队列不被外部流量挤占
     // 且必须在 dscp_to_queue 之前执行，确保被分配到正确的 tin5 限速队列
@@ -2057,15 +2028,7 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
         }
     }
 
-    if (dir == HQOS_LOCAL) {
-        qid = 33;
-    } else if (dir == HQOS_UPLOAD) {
-        qid = 1;
-    } else {
-        qid = 33;
-    }
-
-    if (IS_HQOS_MODE && (hnat_priv->dscp_en)) {
+    if (IS_HQOS_MODE && hnat_priv->dscp_en) {
         if (dir != HQOS_LOCAL) {
             qid = dscp_to_queue(dscp, hash_ip);
             if (dir == HQOS_DOWNLOAD) {
