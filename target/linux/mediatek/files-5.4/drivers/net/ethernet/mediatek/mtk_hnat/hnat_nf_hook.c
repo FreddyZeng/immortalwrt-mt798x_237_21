@@ -2044,7 +2044,7 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
         hash_ip = (dir == HQOS_DOWNLOAD) ? new_dip_val : orig_sip;
     }
 
-    qos_mark = skb->mark;
+    qos_mark = skb->mark & MTK_QDMA_TX_MASK;  // 仅取低6位[0..63], 防止高位mark污染 VIP/限速判断
 
     // eqos 指定 VIP 下行使用可信 mark46, 保留 EF(46) 并进入 Q32。
     if (dir == HQOS_DOWNLOAD && qos_mark == 46) {
@@ -2055,6 +2055,14 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
     } else if (dir == HQOS_DOWNLOAD && (dscp & 0xFC) == 0xB8) {
         dscp = (dscp & 0x03) | 0xB0; // 降级为 0xB0 (DSCP 44)
         hnat_set_entry_dscp(&entry, dscp);
+    // [HNAT-C-QOS109-02] 109网段 UDP 小包(≤300B) 下行: 重标记为 CS6(TOS=0xC0)
+    // dscp_to_queue(0xC0) → dscp=48 → Q1 → +32 → Q33, 与 CS6/CS7 下行队列对齐
+    } else if (dir == HQOS_DOWNLOAD &&
+               is_ip_in_109_range_hnat(hash_ip) &&
+               udp &&
+               skb->len <= 300) {
+        dscp = 48 << 2;  // CS6: DSCP=48, TOS=0xC0
+        hnat_set_entry_dscp(&entry, dscp);
     }
 
     if (IS_HQOS_MODE && hnat_priv->dscp_en) {
@@ -2063,13 +2071,6 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
                 qid = (dir == HQOS_DOWNLOAD) ? 63 : 31;
             } else if (dir == HQOS_DOWNLOAD && qos_mark == 46) {
                 qid = 32;
-            } else if (dir == HQOS_DOWNLOAD &&
-                       is_ip_in_109_range_hnat(hash_ip) &&
-                       udp &&
-                       skb->len <= 300) {
-                // [HNAT-C-QOS109-02] 109网段 UDP 小包(≤300B) 下行强制走 Q33
-                // Q33 = CS6/CS7 级别, 与上行 Q1 对称, 保障低延迟
-                qid = 33;
             } else {
                 qid = dscp_to_queue(dscp, hash_ip);
                 if (dir == HQOS_DOWNLOAD) {
