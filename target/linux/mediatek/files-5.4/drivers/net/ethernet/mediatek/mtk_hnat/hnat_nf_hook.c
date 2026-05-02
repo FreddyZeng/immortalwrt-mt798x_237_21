@@ -1955,15 +1955,6 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
     // 首先判断物理方向，这对队列划分和内网 IP 提取至关重要
     dir = get_hqos_direction(skb, gmac, dev);
 
-    // 恢复 Linux 原生 mark 和 PPPQ 映射逻辑
-    if (skb->mark >= MAX_PPPQ_PORT_NUM) {
-        qid = skb->mark & MTK_QDMA_TX_MASK;
-    } else if (IS_PPPQ_MODE && (IS_DSA_1G_LAN(dev) || IS_DSA_WAN(dev))) {
-        qid = port_id & MTK_QDMA_TX_MASK;
-    } else {
-        qid = (dir == HQOS_UPLOAD) ? 1 : 33; // 常规默认队列
-    }
-
 	if (IS_HQOS_MODE || skb->mark >= MAX_PPPQ_PORT_NUM) {
 		qid = skb->mark & (MTK_QDMA_TX_MASK);
 	}
