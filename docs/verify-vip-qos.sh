@@ -100,6 +100,38 @@ else
     echo "  (上传 $N109_UP 条 / 下载 $N109_DN 条 → UDP小包期望 qid(0)/qid(33), 其他走 hash 队列)"
     echo ""
 
+    # ---- Q33 实时计数验证: 唯一能 100% 确认 109 UDP → Q33 的方法 ----
+    echo "  ━━━ 🔬 Q33 实时验证 (109 UDP 小包下行目标队列) ━━━"
+    Q33_FILE="/sys/kernel/debug/hnat/qdma_txq33"
+    Q34_FILE="/sys/kernel/debug/hnat/qdma_txq34"
+    if [ -f "$Q33_FILE" ]; then
+        Q33_BEFORE=$(grep "packet count" "$Q33_FILE" | awk '{print $3}')
+        Q34_BEFORE=$(grep "packet count" "$Q34_FILE" 2>/dev/null | awk '{print $3}')
+        Q33_BEFORE=${Q33_BEFORE:-0}
+        Q34_BEFORE=${Q34_BEFORE:-0}
+        echo "  [当前] Q33 包计数: $Q33_BEFORE  Q34 包计数: $Q34_BEFORE"
+        echo "  → 若有 192.168.109.x 设备正在收发 UDP 小包:"
+        echo "    等待 3 秒后再次采样，Q33 增量 > 0 = ✅ 验证通过"
+        sleep 3
+        Q33_AFTER=$(grep "packet count" "$Q33_FILE" | awk '{print $3}')
+        Q34_AFTER=$(grep "packet count" "$Q34_FILE" 2>/dev/null | awk '{print $3}')
+        Q33_AFTER=${Q33_AFTER:-0}
+        Q34_AFTER=${Q34_AFTER:-0}
+        Q33_DELTA=$((Q33_AFTER - Q33_BEFORE))
+        Q34_DELTA=$((Q34_AFTER - Q34_BEFORE))
+        if [ "$Q33_DELTA" -gt 0 ]; then
+            echo "  ✅ Q33 +${Q33_DELTA} 包 — 109 UDP 小包正确落入 Q33 (CS6/CS7级)"
+        else
+            echo "  ⚠️  Q33 无增量 (${Q33_DELTA}) — 可能无 109 UDP 活跃流量，或流量未被 HNAT offload"
+        fi
+        if [ "$Q34_DELTA" -gt 0 ]; then
+            echo "  ℹ️  Q34 +${Q34_DELTA} 包 — 存在 VA(44)/CS4/CS5 流量 (非 109 小包)"
+        fi
+    else
+        echo "  ⚠️  $Q33_FILE 不存在，HQOS 模式可能未启用"
+    fi
+
+
     # ---- 普通流量: 192.168 网段, 非 VIP 非 109 ----
     echo "━━━ 📦 普通流量 (其他 192.168.x.x 设备) ━━━"
     echo "  期望: 上传 hash到 Q5-Q29, 下载 hash到 Q37-Q61"
