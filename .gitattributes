@@ -2,4 +2,3 @@
 # kernel patch 文件合法包含 " \t" 上下文行（unified diff + kernel tab 缩进），
 # 排除 git diff --check 的误报
 *.patch -whitespace
-

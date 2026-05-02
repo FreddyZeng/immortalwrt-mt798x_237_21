@@ -13,13 +13,17 @@ iface_list=$(echo "$interface" | tr ',' ' ')
 #   D: --ctstate NEW + /24 + -j MARK          (回程路由 MARK，仅 loadbalance 用)
 iptables-save -t mangle 2>/dev/null | while IFS= read -r _ln; do
     case "$_ln" in
+        # A: nth 负载均衡 CONNMARK (只有 loadbalance 用 -m statistic --mode nth + -j CONNMARK)
         "-A PREROUTING "*"-m statistic ""--mode nth"*"-j CONNMARK "*)
             set -- $_ln; shift 2; iptables -t mangle -D PREROUTING "$@" 2>/dev/null ;;
-        "-A PREROUTING "*"-i br-lan"*"-m connmark "*)
+        # B: connmark restore (br-lan + -m connmark + -j MARK，限定 MARK 动作防止误删 restore 规则)
+        "-A PREROUTING "*"-i br-lan"*"-m connmark"*"-j MARK "*)
             set -- $_ln; shift 2; iptables -t mangle -D PREROUTING "$@" 2>/dev/null ;;
+        # C: HTTPS 443 MARK (--dport 443 + -j MARK，仅 loadbalance 写 443 MARK)
         "-A PREROUTING "*"--dport 443"*"-j MARK "*)
             set -- $_ln; shift 2; iptables -t mangle -D PREROUTING "$@" 2>/dev/null ;;
-        "-A PREROUTING "*"--ctstate NEW"*"/24 -j MARK "*)
+        # D: 回程路由 MARK (限定 /24 + -j MARK + --set-xmark 0x2，精确匹配 loadbalance 的 WAN mark 前缀)
+        "-A PREROUTING "*"/24"*"-j MARK "*"--set-xmark 0x2"*)
             set -- $_ln; shift 2; iptables -t mangle -D PREROUTING "$@" 2>/dev/null ;;
     esac
 done

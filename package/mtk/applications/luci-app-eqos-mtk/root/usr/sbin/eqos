@@ -44,6 +44,12 @@ iptables_stop() {
     ip6tables -t mangle -X dscp_clear 2>/dev/null
     echo "10 0" > /sys/kernel/debug/hnat/hnat_setting
     echo "11 1" >/sys/kernel/debug/hnat/hnat_setting
+
+    # 清理 per-device WAN 子链（eqos add 写入的指定 WAN 路由规则）
+    iptables -t mangle -D PREROUTING -j eqos_dev 2>/dev/null
+    iptables -t mangle -F eqos_dev 2>/dev/null
+    iptables -t mangle -X eqos_dev 2>/dev/null
+
     for i in $(seq 0 31); do
     echo 0 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq$i
     done
@@ -99,6 +105,12 @@ iptables_start_inital() {
     iptables -t mangle -D FORWARD  -j eqos_apply 2>/dev/null
     iptables -t mangle -A FORWARD  -j eqos
     iptables -t mangle -A FORWARD  -j eqos_apply
+
+    # per-device WAN 绑定专属子链（防止 eqos add 直写 PREROUTING 导致死机/stop 后残留）
+    iptables -t mangle -N eqos_dev 2>/dev/null
+    iptables -t mangle -F eqos_dev
+    iptables -t mangle -D PREROUTING -j eqos_dev 2>/dev/null
+    iptables -t mangle -I PREROUTING 2 -j eqos_dev
 
     ipv6_en=$(uci -q get eqos.config.ipv6enabled || echo 0)
 
@@ -263,6 +275,7 @@ case "$1" in
     esac
 
     raw_id="$id"
+    ipv6_en=$(uci -q get eqos.config.ipv6enabled || echo 0)
     case "$id" in
         ''|*[!0-9]*)
             logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-01] legacy qos mode fallback: ip=$ip, raw_mode=$raw_id, normalized_mode=0"
@@ -282,7 +295,7 @@ case "$1" in
         # 重新应用新规则 (带掩码保护高位 mark)
         iptables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF
         [ -n "$ip" ] && iptables -t mangle -A eqos -d $ip -j CONNMARK --set-xmark 46/0xFF
-        ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF
+        [ "$ipv6_en" = "1" ] && ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF
         logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-04] install unified VIP marker: mac=$macaddr, ip=$ip, connmark=46"
 
     elif [ "$id" -lt 64 ]; then
@@ -336,7 +349,7 @@ case "$1" in
         if [ $xmark -ne 0 ]; then
             iptables  -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${xmark}/0xC0
             [ -n "$ip" ] && iptables  -t mangle -A eqos -d $ip -j CONNMARK --set-xmark ${xmark}/0xC0
-            ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${xmark}/0xC0
+            [ "$ipv6_en" = "1" ] && ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${xmark}/0xC0
             logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-05-③] install directional limit marker: mac=$macaddr, ip=$ip, xmark=${xmark}/0xC0, up=${up}, dl=${dl}"
         fi
 
@@ -378,11 +391,11 @@ case "$1" in
     # per-device WAN 路由选择: 指定接口序号则锁定到对应 WAN 出口
     if [ "$interface" ]; then
         rm_val=$(printf "0x%02x00" $((0x20 + interface)))
-        # 路由标记通常使用高位 (0xFF00)，这里为避免覆盖 QoS 的低8位标记，必须使用掩码
-        iptables -t mangle -D PREROUTING -s $ip -m conntrack --ctstate NEW -j MARK --set-xmark ${rm_val}/0xFF00 2>/dev/null
-        iptables -t mangle -A PREROUTING -s $ip -m conntrack --ctstate NEW -j MARK --set-xmark ${rm_val}/0xFF00
-        iptables -t mangle -D PREROUTING -i br-lan -s $ip -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
-        iptables -t mangle -A PREROUTING -i br-lan -s $ip -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00
+        # 路由标记写入 eqos_dev 专属子链（eqos start 时 flush，防止设备删除/stop 后残留）
+        iptables -t mangle -D eqos_dev -s $ip -m conntrack --ctstate NEW -j MARK --set-xmark ${rm_val}/0xFF00 2>/dev/null
+        iptables -t mangle -A eqos_dev -s $ip -m conntrack --ctstate NEW -j MARK --set-xmark ${rm_val}/0xFF00
+        iptables -t mangle -D eqos_dev -i br-lan -s $ip -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
+        iptables -t mangle -A eqos_dev -i br-lan -s $ip -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00
     fi
     ;;
     *)
