@@ -1,17 +1,17 @@
 --- a/net/sched/sch_cake.c
 +++ b/net/sched/sch_cake.c
 @@ -1762,11 +1762,14 @@
- 		return &q->tins[highest_priority_tin];
- 	}
-
+ 	return &q->tins[highest_priority_tin];
+ }
+ 
 -	// 109 网段: 仅 UDP 且包长 ≤ 300 字节的小包走最高优先级
 +	// 109 网段: 仅 UDP 且包长 ≤ 300 字节的小包走第二优先级 (最高优先级-1)
- 	if (is_nat_target_ip_109_k(skb)) {
+ 	if (q->tin_cnt > 1 && is_nat_target_ip_109_k(skb)) {
  		struct iphdr *iph_109 = ip_hdr(skb);
  		if (iph_109 && iph_109->protocol == IPPROTO_UDP &&
  		    qdisc_pkt_len(skb) <= 300) {
 -			return &q->tins[highest_priority_tin];
-+			if (q->tin_cnt > 1 && highest_priority_tin > 0)
++			if (highest_priority_tin > 0)
 +				return &q->tins[highest_priority_tin - 1];
 +			else
 +				return &q->tins[highest_priority_tin];
