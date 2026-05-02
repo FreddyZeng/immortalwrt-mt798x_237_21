@@ -25,9 +25,14 @@ start_qos() {
     tc qdisc add dev $dev ingress
     tc filter add dev $dev parent ffff: protocol ip u32 match u32 0 0 \
         flowid 1:1 action mirred egress redirect dev ${dev}-ifb
-    # IPv6 下行流量同样重定向到 IFB （flower 配合 kmod-sched-flower）
+    logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-06-01] install software tc IPv4 ingress redirect: dev=$dev, ifb=${dev}-ifb"
+    # IPv6 下行流量同样重定向到 IFB
     tc filter add dev $dev parent ffff: protocol ipv6 u32 match u32 0 0 \
-        flowid 1:1 action mirred egress redirect dev ${dev}-ifb 2>/dev/null || true
+        flowid 1:1 action mirred egress redirect dev ${dev}-ifb || {
+        logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-02] install software tc IPv6 ingress redirect failed: dev=$dev, ifb=${dev}-ifb"
+        exit 1
+    }
+    logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-06-03] install software tc IPv6 ingress redirect: dev=$dev, ifb=${dev}-ifb"
 }
 
 iptables_stop() {
@@ -387,13 +392,27 @@ case "$1" in
     if [ "$id" -gt 64 ]; then
         tc class add dev $dev parent 1:1 classid 1:1$cnt htb rate ${dl}kbit ceil ${dl}kbit
         tc filter add dev $dev parent 1:0 protocol ip u32 match ip dst $ip flowid 1:1$cnt
-        # IPv6: flower 按目标 MAC 匹配下行
-        tc filter add dev $dev parent 1:0 protocol ipv6 flower dst_mac $macaddr flowid 1:1$cnt 2>/dev/null || true
+        if [ -n "$macaddr" ]; then
+            tc filter add dev $dev parent 1:0 protocol ipv6 flower dst_mac $macaddr flowid 1:1$cnt || {
+                logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-04] install software tc IPv6 download filter failed: mac=$macaddr, flowid=1:1$cnt"
+                exit 1
+            }
+            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-06-05] install software tc IPv6 download filter: mac=$macaddr, flowid=1:1$cnt"
+        else
+            logger -p daemon.warn -t eqos "[EQOS-C-FQOS01-06-06] skip software tc IPv6 download filter: ip=$ip, mac empty"
+        fi
 
         tc class add dev ${dev}-ifb parent 1:1 classid 1:1$cnt htb rate ${up}kbit ceil ${up}kbit
         tc filter add dev ${dev}-ifb parent 1:0 protocol ip u32 match ip src $ip flowid 1:1$cnt
-        # IPv6: flower 按源 MAC 匹配上行
-        tc filter add dev ${dev}-ifb parent 1:0 protocol ipv6 flower src_mac $macaddr flowid 1:1$cnt 2>/dev/null || true
+        if [ -n "$macaddr" ]; then
+            tc filter add dev ${dev}-ifb parent 1:0 protocol ipv6 flower src_mac $macaddr flowid 1:1$cnt || {
+                logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-07] install software tc IPv6 upload filter failed: mac=$macaddr, flowid=1:1$cnt"
+                exit 1
+            }
+            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-06-08] install software tc IPv6 upload filter: mac=$macaddr, flowid=1:1$cnt"
+        else
+            logger -p daemon.warn -t eqos "[EQOS-C-FQOS01-06-09] skip software tc IPv6 upload filter: ip=$ip, mac empty"
+        fi
     fi
 
     # per-device WAN 路由选择: 指定接口序号则锁定到对应 WAN 出口

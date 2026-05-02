@@ -3,6 +3,9 @@ set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 EQOS="$ROOT/package/mtk/applications/luci-app-eqos-mtk/root/usr/sbin/eqos"
+INITD="$ROOT/package/mtk/applications/luci-app-eqos-mtk/root/etc/init.d/eqos"
+LOADBALANCE="$ROOT/package/mtk/applications/luci-app-eqos-mtk/root/usr/sbin/loadbalance"
+MAKEFILE="$ROOT/package/mtk/applications/luci-app-eqos-mtk/Makefile"
 HNAT_HOOK="$ROOT/target/linux/mediatek/files-5.4/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c"
 CAKE_PATCH="$ROOT/target/linux/mediatek/patches-5.4/9999995-fix-cake-highest-tin-guard.patch"
 VERIFY_QOS="$ROOT/docs/verify-vip-qos.sh"
@@ -106,5 +109,31 @@ grep -Fq 'MARK0xC0 LIMIT 限速设备 WRR' "$VERIFY_QOS" ||
 if grep -Eq 'echo "4[1-5][[:space:]]+SP' "$VERIFY_QOS"; then
     fail "verification script still uses obsolete DSCP 41-45 SP labels"
 fi
+
+grep -Fq 'kmod-sched-flower' "$MAKEFILE" ||
+    fail "software tc IPv6 mode must depend on kmod-sched-flower"
+
+grep -Fq 'protocol ipv6 u32' "$EQOS" ||
+    fail "software tc must redirect IPv6 ingress to IFB"
+
+grep -Fq 'protocol ipv6 flower dst_mac $macaddr' "$EQOS" ||
+    fail "software tc IPv6 download filter must match dst_mac"
+
+grep -Fq 'protocol ipv6 flower src_mac $macaddr' "$EQOS" ||
+    fail "software tc IPv6 upload filter must match src_mac"
+
+if grep -Fq '2>/dev/null || true' "$EQOS"; then
+    fail "software tc IPv6 rule installation must not silently ignore failures"
+fi
+
+if grep -Fq 'iptables-save -t mangle' "$LOADBALANCE"; then
+    fail "loadbalance migration cleanup must not scan and broadly delete PREROUTING rules"
+fi
+
+grep -Fq -- '-m comment --comment "eqos_lb"' "$LOADBALANCE" ||
+    fail "loadbalance route mark rules must be tagged with eqos_lb comment"
+
+grep -Fq -- '-m comment --comment "eqos_lb"' "$INITD" ||
+    fail "init.d stop must delete the same comment-tagged eqos_lb rules it installs"
 
 echo "qos regression checks passed"
