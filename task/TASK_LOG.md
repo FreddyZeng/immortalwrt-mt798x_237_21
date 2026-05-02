@@ -66,4 +66,14 @@
 - **改动文件**: root/usr/sbin/eqos, hnat_nf_hook.c, test/qos-regression.sh
 - **测试同步**: ✅ test/qos-regression.sh
 
+## [2026-05-02] B-003 | commit: 7b3380f9fd
+
+- **BID**: B-003
+- **关联 FID**: F-QOS01
+- **类型**: bugfix
+- **范围**: luci-app-eqos-mtk
+- **描述**: Fix first-packet hardware acceleration bypass. `CONNMARK --set-xmark` only sets the connection mark, leaving `skb->mark` as 0 for the first packet. This caused HNAT to program FOE to the wrong queue (Q33). Introduced `eqos_apply` chain to enforce `restore-mark` and DSCP sync after the connection mark is set.
+- **改动文件**: root/usr/sbin/eqos, test/qos-regression.sh
+- **测试同步**: ✅ test/qos-regression.sh
+
 <!-- 新增 commit 记录在此下方添加 -->
