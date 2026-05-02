@@ -73,7 +73,23 @@ start_service() {
 
 stop_service() {
 	eqos stop
-	# eqos stop 已处理 eqos 自身的 iptables 规则，不再全局 flush PREROUTING
+	# 清理 loadbalance 专属子链
+	iptables -t mangle -D PREROUTING -j eqos_lb 2>/dev/null
+	iptables -t mangle -F eqos_lb 2>/dev/null
+	iptables -t mangle -X eqos_lb 2>/dev/null
+	# 清理全局 CONNMARK save/restore 规则
+	iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \
+		-j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
+	iptables -t mangle -D PREROUTING -i br-lan \
+		-m conntrack --ctstate ESTABLISHED,RELATED \
+		-j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
+	# 清理所有 WAN 的 ip rule 和 ip route（最多 8 个 WAN，覆盖配置减少场景）
+	for _ci in 0 1 2 3 4 5 6 7; do
+		_om=$(printf "0x%02x00" $((0x20 + _ci)))
+		ip rule del fwmark ${_om}/0xff00 2>/dev/null
+		ip route flush table "2${_ci}0" 2>/dev/null
+	done
+	ip route flush cache
 	rm -f /etc/hotplug.d/dhcp/99-eqos
 }
 
