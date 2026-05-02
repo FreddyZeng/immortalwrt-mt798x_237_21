@@ -1453,48 +1453,35 @@ static bool is_private_ipv4(__be32 ip_be) {
     return false;
 }
 
-static enum hqos_direction get_hqos_direction(__be32 orig_sip, __be32 new_dip,
-					      __be32 lan_ip,
-					      const struct sk_buff *skb, u32 gmac,
+static enum hqos_direction get_hqos_direction(const struct sk_buff *skb, u32 gmac,
 					      const struct net_device *dev) {
-    // 第一优先: 109-119 范围内, 精确判断方向
-    // 上行: lan_ip == orig_sip (LAN 设备是原始源)
-    // 下行: lan_ip == new_dip (LAN 设备是 NAT 后目标)
-    if (lan_ip) {
-	if (lan_ip == new_dip)
-	    return HQOS_DOWNLOAD;  // NAT后目标是 LAN IP = 下行
-	if (lan_ip == orig_sip)
-	    return HQOS_UPLOAD;    // 原始源是 LAN IP = 上行
-    }
+    bool from_wan = FROM_GE_WAN(skb);
+    bool from_lan = FROM_GE_LAN(skb) || FROM_GE_VIRTUAL(skb);
+    bool to_wan = (gmac == NR_GMAC2_PORT);
+    bool to_wifi = get_wifi_hook_if_index_from_dev(dev) != 0;
+    bool to_lan_switch = (gmac == NR_GMAC1_PORT);
 
-    // 第二优先: 根据底层硬件实际脱出端口(gmac)判断方向, 防止跨端口抢占死锁
-    if (gmac == NR_GMAC2_PORT) {
+    /* 因素 1: 只要物理目的地是 WAN，必定是上行 (Upload) */
+    if (to_wan) {
         return HQOS_UPLOAD;
     }
 
-    if (gmac == NR_PDMA_PORT) {
-        if (FROM_GE_WAN(skb))
-            return HQOS_DOWNLOAD;  // WAN -> CPU/WiFi = 下行
-        
-        // 判断出口 dev 是否是真正的 Wi-Fi 网卡 (属于 wifi_hook_if)
-        if (get_wifi_hook_if_index_from_dev(dev))
-            return HQOS_LOCAL;     // LAN -> WiFi 属于局域网内通讯, 绕过 QoS
-
-        if (FROM_GE_LAN(skb))
-            return HQOS_UPLOAD;    // LAN -> CPU(MapE/虚拟WAN) = 上行
-            
-        return HQOS_LOCAL;         // CPU -> CPU/WiFi 等内部转发
+    /* 因素 2: 只要物理来源是 WAN，且目的地不是 WAN，必定是下行 (Download) */
+    if (from_wan) {
+        return HQOS_DOWNLOAD;
     }
 
-    if (gmac == NR_GMAC1_PORT) {
-        if (FROM_GE_WAN(skb))
-            return HQOS_DOWNLOAD;  // WAN -> LAN = 下行
-            
-        // LAN -> LAN = 局域网互访, 必须返回 LOCAL。如果返回 UPLOAD 会分配 WAN 的队列，但在 GMAC1 物理脱出会发生跨端口队列硬件死锁
+    /* 因素 3: 物理来源是 LAN/Wi-Fi/CPU，目的地也是 LAN/Wi-Fi，属于内网互访 (Local) */
+    if (to_lan_switch || to_wifi) {
         return HQOS_LOCAL;
     }
 
-    return HQOS_LOCAL;
+    /* 因素 4: 来源是 LAN，但目的地不是 LAN/Wi-Fi/WAN (例如发往 CPU 虚拟接口 MapE/VPN) */
+    if (from_lan) {
+        return HQOS_UPLOAD; // 视为上行处理
+    }
+
+    return HQOS_LOCAL; // 默认内部流转兜底
 }
 
 /**
@@ -2049,7 +2036,7 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
         hash_ip = lan_ip ? lan_ip : (orig_sip ? orig_sip : new_dip_val);
     }
 
-    dir = get_hqos_direction(orig_sip, new_dip_val, lan_ip, skb, gmac, dev);
+    dir = get_hqos_direction(skb, gmac, dev);
 
     // 外来的 EF(46) 必须降级为 VA(44), 保护内网 VIP 队列不被外部流量挤占
     // 且必须在 dscp_to_queue 之前执行，确保被分配到正确的 tin5 限速队列
