@@ -2557,6 +2557,7 @@ static ssize_t hnat_mac_vip_list_write(struct file *file,
 	struct mtk_hnat *h = hnat_priv;
 	char buf[64];
 	u8 mac[ETH_ALEN];
+	unsigned int b[6];   /* %hhx 内核 5.4 vsscanf 不支持, 改用 %x + unsigned int */
 	unsigned long flags;
 	size_t len = min(count, sizeof(buf) - 1);
 	int i;
@@ -2566,12 +2567,12 @@ static ssize_t hnat_mac_vip_list_write(struct file *file,
 	buf[len] = '\0';
 
 	if (strncmp(buf, "add ", 4) == 0) {
-		if (sscanf(buf + 4, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
-			   &mac[0], &mac[1], &mac[2],
-			   &mac[3], &mac[4], &mac[5]) != 6) {
+		if (sscanf(buf + 4, "%x:%x:%x:%x:%x:%x",
+			   &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) != 6) {
 			pr_err("[HNAT-C-VIP-04] invalid MAC format\n");
 			return -EINVAL;
 		}
+		for (i = 0; i < ETH_ALEN; i++) mac[i] = (u8)b[i];
 		spin_lock_irqsave(&h->vip_lock, flags);
 		for (i = 0; i < h->vip_mac_num; i++) {
 			if (ether_addr_equal(h->vip_macs[i], mac)) {
@@ -2590,10 +2591,10 @@ static ssize_t hnat_mac_vip_list_write(struct file *file,
 			mac, h->vip_mac_num);
 
 	} else if (strncmp(buf, "del ", 4) == 0) {
-		if (sscanf(buf + 4, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
-			   &mac[0], &mac[1], &mac[2],
-			   &mac[3], &mac[4], &mac[5]) != 6)
+		if (sscanf(buf + 4, "%x:%x:%x:%x:%x:%x",
+			   &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) != 6)
 			return -EINVAL;
+		for (i = 0; i < ETH_ALEN; i++) mac[i] = (u8)b[i];
 		spin_lock_irqsave(&h->vip_lock, flags);
 		for (i = 0; i < h->vip_mac_num; i++) {
 			if (ether_addr_equal(h->vip_macs[i], mac)) {
