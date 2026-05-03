@@ -151,6 +151,48 @@ if grep -Fq 'iptables-save -t mangle' "$LOADBALANCE"; then
     fail "loadbalance migration cleanup must not scan and broadly delete PREROUTING rules"
 fi
 
+if grep -Fq "awk '{print \$3}'" "$LOADBALANCE"; then
+    fail "loadbalance must not parse default gateway with brittle awk field 3"
+fi
+
+if grep -Fq 'ip route add default via "$ipaddr" dev "$var" table "$TABLE"' "$LOADBALANCE"; then
+    fail "loadbalance must not assume every default route has a via gateway"
+fi
+
+if grep -Fq '$ipaddr/24' "$LOADBALANCE"; then
+    fail "loadbalance must not use gateway-subnet rules derived from brittle ipaddr variable"
+fi
+
+grep -Fq 'lb_default_route_for_iface()' "$LOADBALANCE" ||
+    fail "loadbalance must resolve default routes with a structured parser"
+
+grep -Fq 'route_dev == ifname || route_dev ~ ("(^|[-_.])" ifname "$")' "$LOADBALANCE" ||
+    fail "loadbalance route parser must accept exact device names and logical wan suffixes"
+
+grep -Fq 'ip route replace default via "$gateway" dev "$route_dev" table "$TABLE"' "$LOADBALANCE" ||
+    fail "loadbalance must install gateway default routes with resolved route_dev"
+
+grep -Fq 'ip route replace default dev "$route_dev" table "$TABLE"' "$LOADBALANCE" ||
+    fail "loadbalance must install point-to-point default routes without gateway"
+
+LB_ROUTE_LINE=$(grep -n 'ip route replace default via "$gateway" dev "$route_dev" table "$TABLE"' "$LOADBALANCE" | head -1 | cut -d: -f1)
+LB_RULE_LINE=$(grep -n 'ip rule add fwmark ${FW_MARK}/0xff00 table "$TABLE"' "$LOADBALANCE" | head -1 | cut -d: -f1)
+[ -n "$LB_ROUTE_LINE" ] && [ -n "$LB_RULE_LINE" ] && [ "$LB_ROUTE_LINE" -lt "$LB_RULE_LINE" ] ||
+    fail "loadbalance must install route before adding fwmark policy rule"
+
+LB_JUMP_LINE=$(grep -n 'iptables -t mangle -I PREROUTING 1 -j eqos_lb' "$LOADBALANCE" | head -1 | cut -d: -f1)
+[ -n "$LB_JUMP_LINE" ] && [ "$LB_RULE_LINE" -lt "$LB_JUMP_LINE" ] ||
+    fail "loadbalance must attach eqos_lb after route and policy rule setup succeeds"
+
+grep -Fq 'lb_abort "route_failed"' "$LOADBALANCE" ||
+    fail "loadbalance route install failure must cleanup partial route/rule state"
+
+grep -Fq 'lb_abort "jump_failed"' "$LOADBALANCE" ||
+    fail "loadbalance PREROUTING jump failure must cleanup partial route/rule state"
+
+grep -Fq 'gateway=none' "$LOADBALANCE" ||
+    fail "loadbalance diagnostics must distinguish point-to-point routes without gateway"
+
 grep -Fq 'for _packet in 0 1 2 3 4 5 6 7; do' "$LOADBALANCE" ||
     fail "loadbalance exact cleanup must enumerate compressed nth packet indexes independently"
 
