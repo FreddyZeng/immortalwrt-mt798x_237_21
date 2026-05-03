@@ -19,14 +19,14 @@ lb_cleanup_route_tables() {
 
 lb_cleanup_global_marks() {
     reason="$1"
-    iptables -t mangle -D PREROUTING -j eqos_lb 2>/dev/null
-    iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \
+    while iptables -t mangle -D PREROUTING -j eqos_lb 2>/dev/null; do :; done
+    while iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \
         -m comment --comment "eqos_lb" \
-        -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
-    iptables -t mangle -D PREROUTING -i br-lan \
+        -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null; do :; done
+    while iptables -t mangle -D PREROUTING -i br-lan \
         -m conntrack --ctstate ESTABLISHED,RELATED \
         -m comment --comment "eqos_lb" \
-        -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
+        -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null; do :; done
     logger -p daemon.debug -t loadbalance \
         "[LB-C-FQOS02-03-21] cleanup global mark rules: reason=$reason, chain=eqos_lb, mask=0xFF00"
 }

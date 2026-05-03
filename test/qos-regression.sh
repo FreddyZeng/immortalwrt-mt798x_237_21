@@ -205,6 +205,24 @@ grep -Fq 'lb_abort "no_available_wan"' "$LOADBALANCE" ||
 grep -Fq 'iptables -t mangle -D PREROUTING -j eqos_lb 2>/dev/null' "$LOADBALANCE" ||
     fail "loadbalance cleanup must detach eqos_lb PREROUTING jump"
 
+grep -Fq 'while iptables -t mangle -D PREROUTING -j eqos_lb 2>/dev/null; do :; done' "$LOADBALANCE" ||
+    fail "loadbalance cleanup must remove all duplicate eqos_lb PREROUTING jumps"
+
+grep -Fq 'while iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \' "$LOADBALANCE" ||
+    fail "loadbalance cleanup must remove all duplicate eqos_lb save-mark rules"
+
+grep -Fq 'while iptables -t mangle -D PREROUTING -i br-lan \' "$LOADBALANCE" ||
+    fail "loadbalance cleanup must remove all duplicate eqos_lb restore-mark rules"
+
+grep -Fq 'while iptables -t mangle -D PREROUTING -j eqos_lb 2>/dev/null; do :; done' "$INITD" ||
+    fail "init.d stop must remove all duplicate eqos_lb PREROUTING jumps"
+
+grep -Fq 'while iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \' "$INITD" ||
+    fail "init.d stop must remove all duplicate eqos_lb save-mark rules"
+
+grep -Fq 'while iptables -t mangle -D PREROUTING -i br-lan \' "$INITD" ||
+    fail "init.d stop must remove all duplicate eqos_lb restore-mark rules"
+
 grep -Fq 'gateway=none' "$LOADBALANCE" ||
     fail "loadbalance diagnostics must distinguish point-to-point routes without gateway"
 
