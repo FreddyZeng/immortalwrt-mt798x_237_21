@@ -1526,6 +1526,7 @@ static bool is_vip_mac_hnat(const struct foe_entry *e)
 {
 	u32 dmac_hi_sw;
 	u16 dmac_lo_sw;
+	const u8 *mac;
 	int i, num;
 
 	if (!IS_IPV4_GRP(e))
@@ -1538,9 +1539,9 @@ static bool is_vip_mac_hnat(const struct foe_entry *e)
 
 	num = smp_load_acquire(&hnat_priv->vip_mac_num);
 	for (i = 0; i < num; i++) {
-		const u8 *mac = hnat_priv->vip_macs[i];
-		if (*((const u32 *)mac)       == dmac_hi_sw &&
-		    *((const u16 *)&mac[4])   == dmac_lo_sw)
+		mac = hnat_priv->vip_macs[i];
+		if (*((const u32 *)mac)     == dmac_hi_sw &&
+		    *((const u16 *)&mac[4]) == dmac_lo_sw)
 			return true;
 	}
 	return false;
