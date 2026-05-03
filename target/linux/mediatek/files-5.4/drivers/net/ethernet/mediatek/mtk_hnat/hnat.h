@@ -705,6 +705,11 @@ struct mtk_hnat {
 	spinlock_t		vip_lock;
 	__be32			vip_ips[HNAT_VIP_MAX];
 	int			vip_ip_num;
+	/* [HNAT-C-VIP-04] MAC VIP 表: 支持 MAC-only VIP 设备（eqos add $mac ... 64）
+	 * HNAT 建表时通过 entry.ipv4_hnapt.dmac_hi/lo 直接匹配目标 MAC
+	 * 与 IP VIP 表使用同一把 vip_lock 保护 */
+	u8			vip_macs[HNAT_VIP_MAX][ETH_ALEN];
+	int			vip_mac_num;
 };
 
 struct extdev_entry {

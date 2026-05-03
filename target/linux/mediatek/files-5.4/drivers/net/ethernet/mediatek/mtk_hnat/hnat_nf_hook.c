@@ -1516,6 +1516,39 @@ static bool is_vip_ip_hnat(__be32 ip_be)
 }
 
 /**
+ * [HNAT-C-VIP-04] 检查 HNAT 条目的目标 MAC 是否在 MAC VIP 表中
+ * entry 的 dmac_hi/lo 在 qid 分配前已由 eth->h_dest 写入 (1351 行)
+ * 格式: dmac_hi=swab32(h_dest[0..3]), dmac_lo=swab16(h_dest[4..5])
+ * 此函数只在 IS_IPV4_GRP 条目的下行方向内调用
+ */
+static bool is_vip_mac_hnat(const struct foe_entry *e)
+{
+	u8 dmac[ETH_ALEN];
+	__be32 hi;
+	__be16 lo;
+	int i, num;
+
+	if (!IS_IPV4_GRP(e))
+		return false;
+
+	/* 还原 HNAT 条目中存储的目标 MAC
+	 * 存储格式: swab32/swab16 之后存在 little-endian 内
+	 * 还原: 第 0 字节 = (swab32(dmac_hi) >> 24) = (dmac_hi & 0xFF) */
+	hi = cpu_to_be32(swab32(e->ipv4_hnapt.dmac_hi));
+	lo = cpu_to_be16(swab16(e->ipv4_hnapt.dmac_lo));
+	ether_addr_copy(dmac, (const u8 *)&hi);
+	dmac[4] = (lo >> 8) & 0xFF;
+	dmac[5] = lo & 0xFF;
+
+	num = smp_load_acquire(&hnat_priv->vip_mac_num);
+	for (i = 0; i < num; i++) {
+		if (ether_addr_equal(hnat_priv->vip_macs[i], dmac))
+			return true;
+	}
+	return false;
+}
+
+/**
  * 输出: 硬件队列ID (0-31, 连续)
  *
  * 队列布局 (队列号越小优先级越高):
@@ -2122,12 +2155,13 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
             } else if ((qos_mark & 0x40) && dir == HQOS_UPLOAD) {
                 qid = 31;  // [HNAT-C-FQOS01-05-②] 上行限速 → Q31
             } else if (dir == HQOS_DOWNLOAD &&
-                       (qos_mark == 46 || is_vip_ip_hnat(hash_ip))) {
-                // [HNAT-C-VIP-02] 根治 VIP 下行 qid 竞态:
-                // CONNMARK 在服务器主动推送/UDP无连接首包时可能未及时写入 ct_mark,
-                // 导致 mark=0 而走 hash → qid=46。
-                // 内核直接检测 hash_ip(=new_dip=真实 LAN IP) 是否在 VIP 范围,
-                // 无论 CONNMARK 状态如何，VIP 下行始终 qid=32。
+                       (qos_mark == 46 ||
+                        is_vip_ip_hnat(hash_ip) ||
+                        is_vip_mac_hnat(&entry))) {
+                // [HNAT-C-VIP-02/04] VIP 下行 qid=32 三重保障:
+                // ① qos_mark==46: CONNMARK 正常还原
+                // ② is_vip_ip_hnat: 静态范围 + 动态 IP 表
+                // ③ is_vip_mac_hnat: MAC-only VIP 设备，无需知道设备 IP
                 qid = 32;
                 // 同步修正 iblk2.dscp 为 EF(0xB8)，保持 dscp 一致性
                 if (skb->protocol == htons(ETH_P_IP) &&

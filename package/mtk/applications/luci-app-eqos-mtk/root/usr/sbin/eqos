@@ -186,9 +186,10 @@ iptables_stop() {
     ip6tables -t mangle -X dscp_clear 2>/dev/null
     echo "10 0" > /sys/kernel/debug/hnat/hnat_setting
     echo "11 1" >/sys/kernel/debug/hnat/hnat_setting
-    # [HNAT-C-VIP-03] 清空内核动态 VIP 表
+    # [HNAT-C-VIP-03/04] 清空内核动态 VIP 表（IP + MAC）
     echo flush > /sys/kernel/debug/hnat/vip_list 2>/dev/null
-    logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-04-01] flush kernel vip_list on stop"
+    echo flush > /sys/kernel/debug/hnat/mac_vip_list 2>/dev/null
+    logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-04-01] flush kernel vip_list + mac_vip_list on stop"
 
     # 清理 per-device WAN 子链（eqos add 写入的指定 WAN 路由规则）
     while iptables -t mangle -D PREROUTING -j eqos_dev 2>/dev/null; do :; done
@@ -356,10 +357,11 @@ case "$1" in
     echo 0 > /tmp/eqos_q31_rate
     echo 0 > /tmp/eqos_q63_rate
     rm -f /tmp/eqos_dev_up_* /tmp/eqos_dev_dl_*
-    # [HNAT-C-VIP-03] start 时先清空内核动态 VIP 表, 确保从干净状态重建
+    # [HNAT-C-VIP-03/04] start 时先清空内核动态 VIP 表, 确保从干净状态重建
     # start 只调用 stop_qos 不调用 iptables_stop, 必须在此单独 flush
     echo flush > /sys/kernel/debug/hnat/vip_list 2>/dev/null
-    logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-04-02] flush kernel vip_list on start"
+    echo flush > /sys/kernel/debug/hnat/mac_vip_list 2>/dev/null
+    logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-04-02] flush kernel vip_list + mac_vip_list on start"
     iptables_start_prepare
         start_qos "$global_dl" "$global_up"
     iptables_start_inital
@@ -493,10 +495,14 @@ case "$1" in
         [ -n "$ip" ] && iptables -t mangle -D eqos -s $ip -j CONNMARK --set-xmark 46/0xFF 2>/dev/null
         [ -n "$ip" ] && iptables -t mangle -D eqos -d $ip -j CONNMARK --set-xmark 46/0xFF 2>/dev/null
         [ "$ipv6_en" = "1" ] && [ -n "$macaddr" ] && ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF 2>/dev/null
-        # [HNAT-C-VIP-03] 同步从内核动态 VIP 表删除（静态范围 110-119.10-39 无需删除，内核硬编码）
+        # [HNAT-C-VIP-03/04] 同步从内核动态 VIP 表删除
         if [ -n "$ip" ]; then
             echo "del $ip" > /sys/kernel/debug/hnat/vip_list 2>/dev/null
-            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-06] remove VIP from kernel vip_list: ip=$ip"
+            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-06] remove VIP IP from kernel vip_list: ip=$ip"
+        fi
+        if [ -n "$macaddr" ]; then
+            echo "del $macaddr" > /sys/kernel/debug/hnat/mac_vip_list 2>/dev/null
+            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-06b] remove VIP MAC from kernel mac_vip_list: mac=$macaddr"
         fi
 
         # 仅写上行方向规则: CONNMARK 是连接级标记，上行首包写入后自动传播到 REPLY 方向
@@ -506,12 +512,15 @@ case "$1" in
         [ "$ipv6_en" = "1" ] && [ -n "$macaddr" ] && ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF
         logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-04] install VIP upstream marker only (CONNMARK bidirectional propagation): key=$dev_key, mac=$macaddr, ip=$ip, connmark=46"
 
-        # [HNAT-C-VIP-03] 将 IP 注册到内核动态 VIP 表
-        # 解决: 服务器主动推送/UDP无连接首包建表时 CONNMARK 竞态 → qid 错误
-        # 效果: is_vip_ip_hnat() 直接检测 LAN IP, 确保下行 HNAT 建表时 qid=32
+        # [HNAT-C-VIP-03/04] 将 IP 和 MAC 注册到内核 VIP 表
+        # 三重保障: CONNMARK(iptables) + IP 内核表 + MAC 内核表
         if [ -n "$ip" ]; then
             echo "add $ip" > /sys/kernel/debug/hnat/vip_list 2>/dev/null
-            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-05] register VIP to kernel vip_list: ip=$ip"
+            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-05] register VIP IP to kernel vip_list: ip=$ip"
+        fi
+        if [ -n "$macaddr" ]; then
+            echo "add $macaddr" > /sys/kernel/debug/hnat/mac_vip_list 2>/dev/null
+            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-05b] register VIP MAC to kernel mac_vip_list: mac=$macaddr"
         fi
 
     elif [ "$id" -lt 64 ]; then
