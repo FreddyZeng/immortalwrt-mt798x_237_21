@@ -1517,32 +1517,30 @@ static bool is_vip_ip_hnat(__be32 ip_be)
 
 /**
  * [HNAT-C-VIP-04] 检查 HNAT 条目的目标 MAC 是否在 MAC VIP 表中
- * entry 的 dmac_hi/lo 在 qid 分配前已由 eth->h_dest 写入 (1351 行)
- * 格式: dmac_hi=swab32(h_dest[0..3]), dmac_lo=swab16(h_dest[4..5])
- * 此函数只在 IS_IPV4_GRP 条目的下行方向内调用
+ * entry 的 dmac_hi/lo 在 qid 分配前已由 eth->h_dest 写入 (见 1351 行):
+ *   dmac_hi = swab32(*((u32 *)eth->h_dest))
+ *   dmac_lo = swab16(*((u16 *)&eth->h_dest[4]))
+ * 比较方式与 entry_mac_cmp() 完全一致（见 hnat.c:172）
  */
 static bool is_vip_mac_hnat(const struct foe_entry *e)
 {
-	u8 dmac[ETH_ALEN];
-	__be32 hi;
-	__be16 lo;
+	u32 dmac_hi_sw;
+	u16 dmac_lo_sw;
 	int i, num;
 
 	if (!IS_IPV4_GRP(e))
 		return false;
 
-	/* 还原 HNAT 条目中存储的目标 MAC
-	 * 存储格式: swab32/swab16 之后存在 little-endian 内
-	 * 还原: 第 0 字节 = (swab32(dmac_hi) >> 24) = (dmac_hi & 0xFF) */
-	hi = cpu_to_be32(swab32(e->ipv4_hnapt.dmac_hi));
-	lo = cpu_to_be16(swab16(e->ipv4_hnapt.dmac_lo));
-	ether_addr_copy(dmac, (const u8 *)&hi);
-	dmac[4] = (lo >> 8) & 0xFF;
-	dmac[5] = lo & 0xFF;
+	/* 还原: swab32(dmac_hi) = MAC[3]<<24|MAC[2]<<16|MAC[1]<<8|MAC[0]
+	 *       即 MAC[0..3] 在内存中的小端表示，可直接与 *(u32*)mac 比较 */
+	dmac_hi_sw = swab32(e->ipv4_hnapt.dmac_hi);
+	dmac_lo_sw = swab16(e->ipv4_hnapt.dmac_lo);
 
 	num = smp_load_acquire(&hnat_priv->vip_mac_num);
 	for (i = 0; i < num; i++) {
-		if (ether_addr_equal(hnat_priv->vip_macs[i], dmac))
+		const u8 *mac = hnat_priv->vip_macs[i];
+		if (*((const u32 *)mac)       == dmac_hi_sw &&
+		    *((const u16 *)&mac[4])   == dmac_lo_sw)
 			return true;
 	}
 	return false;
