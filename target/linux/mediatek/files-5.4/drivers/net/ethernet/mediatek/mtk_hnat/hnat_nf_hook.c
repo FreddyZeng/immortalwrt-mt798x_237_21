@@ -1433,47 +1433,42 @@ enum hqos_direction {
     HQOS_LOCAL    = 2,
 };
 
-/**
- * 判断流量方向, 完全不使用 IS_WAN/IS_LAN (它们定义相同, 无法区分)
- *
- * 判断优先级:
- *   1) 物理目标判定: 只要发往 WAN (GMAC2) 必定为上行
- *   2) 物理来源判定: 只要来自 WAN 必定为下行
- *   3) 内部互访: 局域网、Wi-Fi 间互访兜底为本地流量 (不限速)
- */
-
 
 static enum hqos_direction get_hqos_direction(const struct sk_buff *skb, u32 gmac,
-					      const struct net_device *dev) {
-    bool from_wan = FROM_GE_WAN(skb);
-    bool from_lan = FROM_GE_LAN(skb) || FROM_GE_VIRTUAL(skb);
+					      const struct net_device *dev,
+					      const struct nf_conn *ct,
+					      enum ip_conntrack_info ctinfo) {
     bool to_wan = (gmac == NR_GMAC2_PORT);
     bool to_wifi = get_wifi_hook_if_index_from_dev(dev) != 0;
     bool to_lan_switch = (gmac == NR_GMAC1_PORT);
 
-    /* 因素 1: 只要物理目的地是 WAN，必定是上行 (Upload) */
-    if (to_wan) {
+    /* 因素 1: 物理目的地是 WAN 端口，必定是上行 */
+    if (to_wan)
         return HQOS_UPLOAD;
-    }
 
-    /* 因素 2: 只要物理来源是 WAN，且目的地不是 WAN，必定是下行 (Download) */
-    if (from_wan) {
+    /* 因素 2: [BUGFIX] 用 conntrack REPLY 方向检测真实下行
+     * IS_LAN/IS_WAN 宏完全相同，导致 "wan.41" 被 hnat_set_iif 打为 GE_LAN。
+     * FROM_GE_WAN(skb) 对 PPPoE EXT 接口失效。
+     * 改用 ctinfo==IP_CT_ESTABLISHED_REPLY 作为下行 ground-truth。
+     */
+    if (ct && IS_LAN(dev) &&
+        (ctinfo == IP_CT_ESTABLISHED_REPLY || ctinfo == IP_CT_RELATED_REPLY))
         return HQOS_DOWNLOAD;
-    }
 
-    /* 因素 3: 物理来源是 LAN/Wi-Fi/CPU，目的地也是 LAN/Wi-Fi，属于内网互访 (Local) */
-    if (to_lan_switch || to_wifi) {
+    /* 因素 3: 尽管 IS_LAN/IS_WAN 相同，为了兼容非 PPPoE 场景保留 FROM_GE_WAN 检查 */
+    if (FROM_GE_WAN(skb))
+        return HQOS_DOWNLOAD;
+
+    /* 因素 4: 目标是 LAN 交换机或 Wi-Fi，且没有 REPLY 标识 → 内网互访 */
+    if (to_lan_switch || to_wifi)
         return HQOS_LOCAL;
-    }
 
-    /* 因素 4: 来源是 LAN，但目的地不是 LAN/Wi-Fi/WAN (例如发往 CPU 虚拟接口 MapE/VPN) */
-    if (from_lan) {
-        return HQOS_UPLOAD; // 视为上行处理
-    }
+    /* 因素 5: 来源是 LAN 但目的不是 LAN/Wi-Fi/WAN (MapE/VPN 等虚拟接口) */
+    if (FROM_GE_LAN(skb) || FROM_GE_VIRTUAL(skb))
+        return HQOS_UPLOAD;
 
-    return HQOS_LOCAL; // 默认内部流转兜底
+    return HQOS_LOCAL;
 }
-
 /**
  * 检查 IP 是否属于 192.168.109.[2-254] 网段
  * 与 sch_cake.c:is_ip_in_109_range_k() 语义相同，独立实现，无跨文件依赖
@@ -1987,7 +1982,8 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 	}
 
     // 首先判断物理方向，这对队列划分和内网 IP 提取至关重要
-    dir = get_hqos_direction(skb, gmac, dev);
+    // [BUGFIX] 传入 ct/ctinfo 用于 REPLY 方向检测，解决 IS_LAN/IS_WAN 宏相同导致的方向误判
+    dir = get_hqos_direction(skb, gmac, dev, ct, ctinfo);
 
 		if (IS_HQOS_MODE) {
 			qid = (dir == HQOS_UPLOAD) ? 1 : 33;
@@ -2067,6 +2063,10 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
             } else if ((dscp & 0xFC) == 0xB8) {
                 dscp = (dscp & 0x03) | 0xB0; // VA: TOS=0xB0, DSCP=44 → Q34
                 hnat_set_entry_dscp(&entry, dscp);
+            // 优先级④: 外来 CS6/CS7(48/56) 降级为 CS3(24), 防止外部服务器自打高 DSCP 占用 Q33 SP
+            } else if ((dscp & 0xE0) >= 0xC0 && qos_mark != 46) {
+                dscp = (dscp & 0x03) | (24 << 2); // CS3: DSCP=24 → dscp_to_queue → Q4 → +32 = Q36
+                hnat_set_entry_dscp(&entry, dscp);
             }
         } else if (skb->protocol == htons(ETH_P_IPV6)) {
             // IPv6 独立降级与分类策略
@@ -2077,6 +2077,10 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
             // 优先级②: 外来 EF(46) 降级为 VA(44), 保护 VIP 队列
             } else if ((dscp & 0xFC) == 0xB8) {
                 dscp = (dscp & 0x03) | 0xB0; // VA: TOS=0xB0, DSCP=44 → Q34
+                hnat_set_entry_dscp(&entry, dscp);
+            // 优先级③: IPv6 外来 CS6/CS7 降级为 CS3
+            } else if ((dscp & 0xE0) >= 0xC0 && qos_mark != 46) {
+                dscp = (dscp & 0x03) | (24 << 2); // CS3 → Q4 → +32 = Q36
                 hnat_set_entry_dscp(&entry, dscp);
             }
         }
@@ -2092,6 +2096,7 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
                 qid = 31;  // [HNAT-C-FQOS01-05-②] 上行限速 → Q31
             } else if (dir == HQOS_DOWNLOAD && qos_mark == 46) {
                 qid = 32;
+                pr_debug_ratelimited("[HNAT-VIP-DL] qid→32 via mark46 branch, hash_ip=%pI4\n", &hash_ip);
             } else {
                 qid = dscp_to_queue(dscp, hash_ip);
                 if (dir == HQOS_DOWNLOAD) {
@@ -2109,6 +2114,11 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 		if (qos_toggle) {
 			if (hnat_priv->data->version == MTK_HNAT_V4) {
 				// [P1-FIX] V4: qid 字段 7-bit, 直接写入即可(qid≤63<128无截断)
+				// [HNAT-DIAG] 下行 VIP qid 根因追踪: mark=46 且 qid 不是 0/32时输出
+				if ((skb->mark & 0xFF) == 46 && qid != 0 && qid != 32)
+					pr_warn_ratelimited("[HNAT-VIP-DL-BUG] qid=%u want=32 hqos=%d dscp_en=%d mark=0x%x dir=%d iface=0x%x\n",
+						qid, IS_HQOS_MODE, (int)hnat_priv->dscp_en,
+						skb->mark, (int)dir, (unsigned)skb_hnat_iface(skb));
 				entry.ipv4_hnapt.iblk2.qid = qid & 0x7f;
 			} else {
 				/* qid[5:0]= port_mg[1:0]+ qid[3:0] */

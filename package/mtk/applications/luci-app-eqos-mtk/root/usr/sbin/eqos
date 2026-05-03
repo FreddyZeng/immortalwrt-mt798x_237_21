@@ -462,22 +462,27 @@ case "$1" in
     esac
 
     if [ "$id" -eq 64 ]; then
-        # 清理旧规则
+        # 清理旧规则（包含历史遗留的 -d $ip 规则，防止 upgrade 后残留）
         [ -n "$macaddr" ] && iptables -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF 2>/dev/null
         [ -n "$ip" ] && iptables -t mangle -D eqos -s $ip -j CONNMARK --set-xmark 46/0xFF 2>/dev/null
         [ -n "$ip" ] && iptables -t mangle -D eqos -d $ip -j CONNMARK --set-xmark 46/0xFF 2>/dev/null
         [ "$ipv6_en" = "1" ] && [ -n "$macaddr" ] && ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF 2>/dev/null
 
-        # 重新应用新规则 (带掩码保护高位 mark)
+        # 仅写上行方向规则: CONNMARK 是连接级标记，上行首包写入后自动传播到 REPLY 方向
+        # 不需要 -d $ip 规则：下行 ESTABLISHED 包通过 --restore-mark 还原即可，重复写没有意义且增加开销
         [ -n "$macaddr" ] && iptables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF
         [ -n "$ip" ] && iptables -t mangle -A eqos -s $ip -j CONNMARK --set-xmark 46/0xFF
-        [ -n "$ip" ] && iptables -t mangle -A eqos -d $ip -j CONNMARK --set-xmark 46/0xFF
         [ "$ipv6_en" = "1" ] && [ -n "$macaddr" ] && ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF
-        logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-04] install unified VIP marker: key=$dev_key, mac=$macaddr, ip=$ip, connmark=46"
+        logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-04] install VIP upstream marker only (CONNMARK bidirectional propagation): key=$dev_key, mac=$macaddr, ip=$ip, connmark=46"
 
     elif [ "$id" -lt 64 ]; then
         # 限速设备: bit6(0x40)=上行限速→Q31, bit7(0x80)=下行限速→Q63
-        # 方案B: 穷举删除所有可能的旧限速规则（防止规则泄漏）
+        # 架构说明: CONNMARK 是连接级双向标记，只需在上行方向(-s $ip / mac-source)写入，
+        #           HNAT 内核通过 get_hqos_direction() 的方向感知逻辑正确处理各方向
+        #           - 下行包(dir=DOWNLOAD): qos_mark&0x80 → Q63; qos_mark&0x40 无效 → WRR
+        #           - 上行包(dir=UPLOAD):  qos_mark&0x40 → Q31; qos_mark&0x80 无效 → WRR
+        #
+        # 穷举删除所有可能的旧限速规则（同时清理历史遗留的 -d $ip 规则，防止 upgrade 后残留）
         for _xm in 0x40 0x80 0xC0; do
             [ -n "$macaddr" ] && iptables  -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${_xm}/0xC0 2>/dev/null
             [ -n "$ip" ] && iptables  -t mangle -D eqos -s $ip -j CONNMARK --set-xmark ${_xm}/0xC0 2>/dev/null
@@ -524,11 +529,13 @@ case "$1" in
         [ $up -ne 0 ] && xmark=$((xmark | 0x40))
         [ $dl -ne 0 ] && xmark=$((xmark | 0x80))
         if [ $xmark -ne 0 ]; then
+            # 只写上行方向规则（-s $ip / mac-source）:
+            # CONNMARK 会自动将 ct_mark 传播到 REPLY 方向的后续包
+            # HNAT 内核的方向感知逻辑已区分: 0x80+DOWNLOAD→Q63, 0x40+UPLOAD→Q31
             [ -n "$macaddr" ] && iptables  -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${xmark}/0xC0
             [ -n "$ip" ] && iptables  -t mangle -A eqos -s $ip -j CONNMARK --set-xmark ${xmark}/0xC0
-            [ -n "$ip" ] && iptables  -t mangle -A eqos -d $ip -j CONNMARK --set-xmark ${xmark}/0xC0
             [ "$ipv6_en" = "1" ] && [ -n "$macaddr" ] && ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${xmark}/0xC0
-            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-05-03] install directional limit marker: key=$dev_key, mac=$macaddr, ip=$ip, xmark=${xmark}/0xC0, up=${up}, dl=${dl}"
+            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-05-03] install upstream-only directional limit marker (CONNMARK bidirectional): key=$dev_key, mac=$macaddr, ip=$ip, xmark=${xmark}/0xC0, up=${up}, dl=${dl}"
         fi
 
         if [ $up -ne 0 ]; then
