@@ -224,18 +224,29 @@ iptables_start_prepare() {
     # 其他全部清零, eqos 链会重新标记: VIP=46, 限速=2, 109小包=46
     iptables -t mangle -N dscp_clear 2>/dev/null
     iptables -t mangle -F dscp_clear
+    # VA(44) 保留, 内部已降级的包不再重复处理
     iptables -t mangle -A dscp_clear -m dscp --dscp 44 -j RETURN
+    # EF(46) → VA(44): 外来高优先级 EF 降为 VA, 防止占用 VIP Q0/Q32 SP
     iptables -t mangle -A dscp_clear -m dscp --dscp 46 -j DSCP --set-dscp 44
+    # CS6(48) → CS3(24): 外来 CS6 降为 CS3 → dscp_to_queue→Q4→+32=Q36
+    # 防止外部服务器(P2P/游戏服务器)的 CS6 包占用内部 Q33 SP 队列
+    iptables -t mangle -A dscp_clear -m dscp --dscp 48 -j DSCP --set-dscp 24
+    # CS7(56) → CS3(24): 同理
+    iptables -t mangle -A dscp_clear -m dscp --dscp 56 -j DSCP --set-dscp 24
     iptables -t mangle -D FORWARD -j dscp_clear 2>/dev/null
     iptables -t mangle -I FORWARD 1 -j dscp_clear
+    logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-03-01] install dscp_clear: EF→VA, CS6→CS3, CS7→CS3"
 
     if [ "$ipv6_en" = "1" ]; then
         ip6tables -t mangle -N dscp_clear 2>/dev/null
         ip6tables -t mangle -F dscp_clear
         ip6tables -t mangle -A dscp_clear -m dscp --dscp 44 -j RETURN
         ip6tables -t mangle -A dscp_clear -m dscp --dscp 46 -j DSCP --set-dscp 44
+        ip6tables -t mangle -A dscp_clear -m dscp --dscp 48 -j DSCP --set-dscp 24
+        ip6tables -t mangle -A dscp_clear -m dscp --dscp 56 -j DSCP --set-dscp 24
         ip6tables -t mangle -D FORWARD -j dscp_clear 2>/dev/null
         ip6tables -t mangle -I FORWARD 1 -j dscp_clear
+        logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-03-02] install IPv6 dscp_clear: EF→VA, CS6→CS3, CS7→CS3"
     fi
 
     # 新架构: 统一连接跟踪标记还原 (仅还原低8位 0xFF，保护 mwan3 等多线高位 mark)
@@ -409,6 +420,14 @@ case "$1" in
     # 大于 300 的 UDP 和所有 TCP（视频/下载）不标记，走默认队列
     iptables -t mangle -I eqos -s 192.168.109.0/24 -p udp -m length --length 0:300 -j DSCP --set-dscp 46
     iptables -t mangle -I eqos -d 192.168.109.0/24 -p udp -m length --length 0:300 -j DSCP --set-dscp 46
+    logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-03-03] install 109 UDP small packet DSCP marker: udp<=300B, dscp=46(EF)"
+
+    # 所有 iptables 规则安装完毕后, 强制 flush HNAT 表
+    # 原因: 已 BIND 的旧 HNAT 条目使用旧 qid (在 dscp_clear/内核降级规则更新前建立)
+    #       hardware fast path 不经过 iptables, 旧条目的错误 qid 会一直持续到连接超时
+    #       flush 后, 新连接重新经过 CPU slow path 建表, 使用正确的降级规则和 qid
+    echo 1 > /sys/kernel/debug/hnat/hnat_entry
+    logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-03-04] flush HNAT table: force rebind with new dscp_clear rules"
 
     # Delete existing rules properly
     #iptables -t mangle -D eqos -m iprange --src-range 192.168.110.2-192.168.110.9 -j MARK --set-xmark 0x99/0xFF
