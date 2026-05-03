@@ -207,11 +207,22 @@ grep -Fq 'ip rule add fwmark ${mark}/0xff00 table "$table"' "$EQOS" ||
 grep -Fq 'eqos_default_route_for_iface()' "$EQOS" ||
     fail "device WAN binding must resolve actual default route dev and gateway"
 
-grep -Fq 'ip route add default via "$gateway" dev "$route_dev" table "$table"' "$EQOS" ||
-    fail "device WAN binding must create independent default route table with gateway when present"
+DEV_ROUTE_BLOCK=$(sed -n '/install_eqos_dev_route()/,/^}/p' "$EQOS")
 
-grep -Fq 'ip route add default dev "$route_dev" table "$table"' "$EQOS" ||
+if echo "$DEV_ROUTE_BLOCK" | grep -Fq 'ip route flush table "$table"'; then
+    fail "device WAN route install must not flush active table before replacement route succeeds"
+fi
+
+grep -Fq 'ip route replace default via "$gateway" dev "$route_dev" table "$table"' "$EQOS" ||
+    fail "device WAN binding must replace default route before installing policy rule when gateway is present"
+
+grep -Fq 'ip route replace default dev "$route_dev" table "$table"' "$EQOS" ||
     fail "device WAN binding must support point-to-point default routes without gateway"
+
+ROUTE_LINE=$(echo "$DEV_ROUTE_BLOCK" | grep -n 'ip route replace default via "$gateway" dev "$route_dev" table "$table"' | head -1 | cut -d: -f1)
+RULE_LINE=$(echo "$DEV_ROUTE_BLOCK" | grep -n 'ip rule add fwmark ${mark}/0xff00 table "$table"' | head -1 | cut -d: -f1)
+[ -n "$ROUTE_LINE" ] && [ -n "$RULE_LINE" ] && [ "$ROUTE_LINE" -lt "$RULE_LINE" ] ||
+    fail "device WAN route install must create/replace route before adding fwmark policy rule"
 
 grep -Fq 'CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00' "$EQOS" ||
     fail "eqos device WAN binding must save high-bit connmark independently from loadbalance"

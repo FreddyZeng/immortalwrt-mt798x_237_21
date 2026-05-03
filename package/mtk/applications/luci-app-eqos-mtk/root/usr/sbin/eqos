@@ -108,24 +108,23 @@ install_eqos_dev_route() {
     gateway=${route_info%%|*}
     route_dev=${route_info#*|}
 
-    while ip rule del fwmark ${mark}/0xff00 table "$table" 2>/dev/null; do :; done
-    while ip rule del fwmark "2${idx}" table "$table" 2>/dev/null; do :; done
-    ip route flush table "$table" 2>/dev/null
-    ip rule add fwmark ${mark}/0xff00 table "$table" || {
-        logger -p daemon.err -t eqos "[EQOS-C-FQOS02-03-10] install device WAN ip rule failed: ip=$ip, interface=$idx, ifname=$ifname, route_dev=$route_dev, mark=${mark}/0xff00, table=$table"
-        return 1
-    }
     if [ -n "$gateway" ]; then
-        ip route add default via "$gateway" dev "$route_dev" table "$table" || {
+        ip route replace default via "$gateway" dev "$route_dev" table "$table" || {
             logger -p daemon.err -t eqos "[EQOS-C-FQOS02-03-11] install device WAN route failed: ip=$ip, interface=$idx, ifname=$ifname, route_dev=$route_dev, gateway=$gateway, table=$table"
             return 1
         }
     else
-        ip route add default dev "$route_dev" table "$table" || {
+        ip route replace default dev "$route_dev" table "$table" || {
             logger -p daemon.err -t eqos "[EQOS-C-FQOS02-03-11] install device WAN route failed: ip=$ip, interface=$idx, ifname=$ifname, route_dev=$route_dev, gateway=none, table=$table"
             return 1
         }
     fi
+    while ip rule del fwmark ${mark}/0xff00 table "$table" 2>/dev/null; do :; done
+    while ip rule del fwmark "2${idx}" table "$table" 2>/dev/null; do :; done
+    ip rule add fwmark ${mark}/0xff00 table "$table" || {
+        logger -p daemon.err -t eqos "[EQOS-C-FQOS02-03-10] install device WAN ip rule failed: ip=$ip, interface=$idx, ifname=$ifname, route_dev=$route_dev, mark=${mark}/0xff00, table=$table"
+        return 1
+    }
     logger -p daemon.debug -t eqos "[EQOS-C-FQOS02-03-12] install device WAN route: ip=$ip, interface=$idx, ifname=$ifname, route_dev=$route_dev, gateway=${gateway:-none}, mark=${mark}/0xff00, table=$table"
     return 0
 }
