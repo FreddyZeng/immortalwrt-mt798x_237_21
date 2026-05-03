@@ -149,16 +149,16 @@ iptables_stop() {
     echo "11 1" >/sys/kernel/debug/hnat/hnat_setting
 
     # 清理 per-device WAN 子链（eqos add 写入的指定 WAN 路由规则）
-    iptables -t mangle -D PREROUTING -j eqos_dev 2>/dev/null
+    while iptables -t mangle -D PREROUTING -j eqos_dev 2>/dev/null; do :; done
     iptables -t mangle -F eqos_dev 2>/dev/null
     iptables -t mangle -X eqos_dev 2>/dev/null
-    iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \
+    while iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \
         -m comment --comment "eqos_dev" \
-        -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
-    iptables -t mangle -D PREROUTING -i br-lan \
+        -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null; do :; done
+    while iptables -t mangle -D PREROUTING -i br-lan \
         -m conntrack --ctstate ESTABLISHED,RELATED \
         -m comment --comment "eqos_dev" \
-        -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
+        -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null; do :; done
     logger -p daemon.debug -t eqos "[EQOS-C-FQOS02-03-06] stop cleanup device WAN save/restore rules"
     cleanup_eqos_route_tables "eqos_stop"
 
@@ -221,16 +221,16 @@ iptables_start_inital() {
     # per-device WAN 绑定专属子链（防止 eqos add 直写 PREROUTING 导致死机/stop 后残留）
     iptables -t mangle -N eqos_dev 2>/dev/null
     iptables -t mangle -F eqos_dev
-    iptables -t mangle -D PREROUTING -j eqos_dev 2>/dev/null
+    while iptables -t mangle -D PREROUTING -j eqos_dev 2>/dev/null; do :; done
     iptables -t mangle -A PREROUTING -j eqos_dev
     cleanup_eqos_route_tables "eqos_start"
-    iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \
+    while iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \
         -m comment --comment "eqos_dev" \
-        -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
-    iptables -t mangle -D PREROUTING -i br-lan \
+        -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null; do :; done
+    while iptables -t mangle -D PREROUTING -i br-lan \
         -m conntrack --ctstate ESTABLISHED,RELATED \
         -m comment --comment "eqos_dev" \
-        -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
+        -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null; do :; done
     logger -p daemon.debug -t eqos "[EQOS-C-FQOS02-03-01] cleanup stale broad device WAN save/restore rules: chain=eqos_dev, mask=0xFF00"
 
     ipv6_en=$(uci -q get eqos.config.ipv6enabled || echo 0)
@@ -510,33 +510,63 @@ case "$1" in
         if [ $dl -ne 0 ]; then
         iptables -t mangle -A eqos -d $ip -j MARK --set-xmark 0x99/0xFF
         fi
-    fi
+	    fi
 
-    if [ "$id" -gt 64 ]; then
-        tc class add dev $dev parent 1:1 classid 1:1$cnt htb rate ${dl}kbit ceil ${dl}kbit
-        tc filter add dev $dev parent 1:0 protocol ip u32 match ip dst $ip flowid 1:1$cnt
-        if [ -n "$macaddr" ]; then
-            tc filter add dev $dev parent 1:0 protocol ipv6 flower dst_mac $macaddr flowid 1:1$cnt || {
-                logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-04] install software tc IPv6 download filter failed: mac=$macaddr, flowid=1:1$cnt"
-                exit 1
-            }
-            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-06-05] install software tc IPv6 download filter: mac=$macaddr, flowid=1:1$cnt"
-        else
-            logger -p daemon.warn -t eqos "[EQOS-C-FQOS01-06-06] skip software tc IPv6 download filter: ip=$ip, mac empty"
-        fi
+	    if [ "$id" -gt 64 ]; then
+	        if [ "$dl" -ne 0 ]; then
+	            tc class add dev $dev parent 1:1 classid 1:1$cnt htb rate ${dl}kbit ceil ${dl}kbit || {
+	                logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-04] install software tc download class failed: ip=$ip, mac=$macaddr, dl=$dl, flowid=1:1$cnt"
+	                exit 1
+	            }
+	            if [ -n "$ip" ]; then
+	                tc filter add dev $dev parent 1:0 protocol ip u32 match ip dst $ip flowid 1:1$cnt || {
+	                    logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-05] install software tc IPv4 download filter failed: ip=$ip, flowid=1:1$cnt"
+	                    exit 1
+	                }
+	                logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-06-06] install software tc IPv4 download filter: ip=$ip, flowid=1:1$cnt"
+	            else
+	                logger -p daemon.warn -t eqos "[EQOS-C-FQOS01-06-07] skip software tc IPv4 download filter: mac=$macaddr, ip empty"
+	            fi
+	            if [ -n "$macaddr" ]; then
+	                tc filter add dev $dev parent 1:0 protocol ipv6 flower dst_mac $macaddr flowid 1:1$cnt || {
+	                    logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-08] install software tc IPv6 download filter failed: mac=$macaddr, flowid=1:1$cnt"
+	                    exit 1
+	                }
+	                logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-06-09] install software tc IPv6 download filter: mac=$macaddr, flowid=1:1$cnt"
+	            else
+	                logger -p daemon.warn -t eqos "[EQOS-C-FQOS01-06-10] skip software tc IPv6 download filter: ip=$ip, mac empty"
+	            fi
+	        else
+	            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-06-11] skip software tc download direction: key=$dev_key, dl=0"
+	        fi
 
-        tc class add dev ${dev}-ifb parent 1:1 classid 1:1$cnt htb rate ${up}kbit ceil ${up}kbit
-        tc filter add dev ${dev}-ifb parent 1:0 protocol ip u32 match ip src $ip flowid 1:1$cnt
-        if [ -n "$macaddr" ]; then
-            tc filter add dev ${dev}-ifb parent 1:0 protocol ipv6 flower src_mac $macaddr flowid 1:1$cnt || {
-                logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-07] install software tc IPv6 upload filter failed: mac=$macaddr, flowid=1:1$cnt"
-                exit 1
-            }
-            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-06-08] install software tc IPv6 upload filter: mac=$macaddr, flowid=1:1$cnt"
-        else
-            logger -p daemon.warn -t eqos "[EQOS-C-FQOS01-06-09] skip software tc IPv6 upload filter: ip=$ip, mac empty"
-        fi
-    fi
+	        if [ "$up" -ne 0 ]; then
+	            tc class add dev ${dev}-ifb parent 1:1 classid 1:1$cnt htb rate ${up}kbit ceil ${up}kbit || {
+	                logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-12] install software tc upload class failed: ip=$ip, mac=$macaddr, up=$up, flowid=1:1$cnt"
+	                exit 1
+	            }
+	            if [ -n "$ip" ]; then
+	                tc filter add dev ${dev}-ifb parent 1:0 protocol ip u32 match ip src $ip flowid 1:1$cnt || {
+	                    logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-13] install software tc IPv4 upload filter failed: ip=$ip, flowid=1:1$cnt"
+	                    exit 1
+	                }
+	                logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-06-14] install software tc IPv4 upload filter: ip=$ip, flowid=1:1$cnt"
+	            else
+	                logger -p daemon.warn -t eqos "[EQOS-C-FQOS01-06-15] skip software tc IPv4 upload filter: mac=$macaddr, ip empty"
+	            fi
+	            if [ -n "$macaddr" ]; then
+	                tc filter add dev ${dev}-ifb parent 1:0 protocol ipv6 flower src_mac $macaddr flowid 1:1$cnt || {
+	                    logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-16] install software tc IPv6 upload filter failed: mac=$macaddr, flowid=1:1$cnt"
+	                    exit 1
+	                }
+	                logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-06-17] install software tc IPv6 upload filter: mac=$macaddr, flowid=1:1$cnt"
+	            else
+	                logger -p daemon.warn -t eqos "[EQOS-C-FQOS01-06-18] skip software tc IPv6 upload filter: ip=$ip, mac empty"
+	            fi
+	        else
+	            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-06-19] skip software tc upload direction: key=$dev_key, up=0"
+	        fi
+	    fi
 
     # per-device WAN 路由选择: 指定接口序号则锁定到对应 WAN 出口
     if [ "$interface" ]; then
@@ -552,11 +582,11 @@ case "$1" in
                         rm_val=$(printf "0x%02x00" $((0x20 + interface)))
                         if install_eqos_dev_route "$interface" "$rm_val" "$ip"; then
                             # 路由标记写入 eqos_dev 专属子链（eqos start 时 flush，防止设备删除/stop 后残留）
-                            iptables -t mangle -D eqos_dev -s $ip -m conntrack --ctstate NEW -j MARK --set-xmark ${rm_val}/0xFF00 2>/dev/null
-                            iptables -t mangle -D eqos_dev -s $ip -m conntrack --ctstate NEW -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
+                            while iptables -t mangle -D eqos_dev -s $ip -m conntrack --ctstate NEW -j MARK --set-xmark ${rm_val}/0xFF00 2>/dev/null; do :; done
+                            while iptables -t mangle -D eqos_dev -s $ip -m conntrack --ctstate NEW -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null; do :; done
                             iptables -t mangle -A eqos_dev -s $ip -m conntrack --ctstate NEW -j MARK --set-xmark ${rm_val}/0xFF00
                             iptables -t mangle -A eqos_dev -s $ip -m conntrack --ctstate NEW -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00
-                            iptables -t mangle -D eqos_dev -i br-lan -s $ip -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
+                            while iptables -t mangle -D eqos_dev -i br-lan -s $ip -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null; do :; done
                             iptables -t mangle -A eqos_dev -i br-lan -s $ip -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00
                             logger -p daemon.debug -t eqos "[EQOS-C-FQOS02-03-03] install device WAN binding: ip=$ip, mac=$macaddr, interface=$interface, mark=${rm_val}/0xFF00"
                         else

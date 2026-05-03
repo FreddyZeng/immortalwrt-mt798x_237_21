@@ -143,6 +143,24 @@ grep -Fq 'protocol ipv6 flower dst_mac $macaddr' "$EQOS" ||
 grep -Fq 'protocol ipv6 flower src_mac $macaddr' "$EQOS" ||
     fail "software tc IPv6 upload filter must match src_mac"
 
+grep -Fq 'skip software tc IPv4 download filter: mac=$macaddr, ip empty' "$EQOS" ||
+    fail "software tc IPv6-only download mode must not install an empty IPv4 dst filter"
+
+grep -Fq 'skip software tc IPv4 upload filter: mac=$macaddr, ip empty' "$EQOS" ||
+    fail "software tc IPv6-only upload mode must not install an empty IPv4 src filter"
+
+grep -Fq 'skip software tc download direction: key=$dev_key, dl=0' "$EQOS" ||
+    fail "software tc must skip download class/filter installation when dl=0"
+
+grep -Fq 'skip software tc upload direction: key=$dev_key, up=0' "$EQOS" ||
+    fail "software tc must skip upload class/filter installation when up=0"
+
+grep -Fq 'install software tc IPv4 download filter failed' "$EQOS" ||
+    fail "software tc IPv4 download filter installation must fail loudly"
+
+grep -Fq 'install software tc IPv4 upload filter failed' "$EQOS" ||
+    fail "software tc IPv4 upload filter installation must fail loudly"
+
 if grep -Fq '2>/dev/null || true' "$EQOS"; then
     fail "software tc IPv6 rule installation must not silently ignore failures"
 fi
@@ -150,6 +168,12 @@ fi
 if grep -Fq 'iptables-save -t mangle' "$LOADBALANCE"; then
     fail "loadbalance migration cleanup must not scan and broadly delete PREROUTING rules"
 fi
+
+grep -Fq 'if ! iptables -t mangle -L eqos_lb >/dev/null 2>&1; then' "$LOADBALANCE" ||
+    fail "loadbalance legacy cleanup must only run during first migration before eqos_lb exists"
+
+grep -Fq 'skip exact legacy cleanup' "$LOADBALANCE" ||
+    fail "loadbalance must log when it skips first-migration legacy cleanup"
 
 if grep -Fq "awk '{print \$3}'" "$LOADBALANCE"; then
     fail "loadbalance must not parse default gateway with brittle awk field 3"
@@ -207,6 +231,12 @@ grep -Fq 'iptables -t mangle -D PREROUTING -j eqos_lb 2>/dev/null' "$LOADBALANCE
 
 grep -Fq 'while iptables -t mangle -D PREROUTING -j eqos_lb 2>/dev/null; do :; done' "$LOADBALANCE" ||
     fail "loadbalance cleanup must remove all duplicate eqos_lb PREROUTING jumps"
+
+grep -Fq 'while iptables -t mangle -D PREROUTING -i br-lan \' "$LOADBALANCE" ||
+    fail "loadbalance legacy migration cleanup must loop over duplicate direct PREROUTING rules"
+
+grep -Fq 'while iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \' "$LOADBALANCE" ||
+    fail "loadbalance legacy migration cleanup must loop over duplicate direct POSTROUTING save-mark rules"
 
 grep -Fq 'while iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \' "$LOADBALANCE" ||
     fail "loadbalance cleanup must remove all duplicate eqos_lb save-mark rules"
@@ -266,6 +296,9 @@ grep -Fq -- '-m comment --comment "eqos_lb"' "$INITD" ||
 grep -Fq 'iptables -t mangle -A PREROUTING -j eqos_dev' "$EQOS" ||
     fail "eqos_dev PREROUTING jump must append safely before loadbalance inserts eqos_lb at rule 1"
 
+grep -Fq 'while iptables -t mangle -D PREROUTING -j eqos_dev 2>/dev/null; do :; done' "$EQOS" ||
+    fail "eqos_dev cleanup must remove all duplicate PREROUTING jumps"
+
 if grep -Fq 'iptables -t mangle -I PREROUTING 2 -j eqos_dev' "$EQOS"; then
     fail "eqos_dev PREROUTING jump must not use fragile fixed insertion index 2"
 fi
@@ -304,6 +337,12 @@ grep -Fq 'CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00' "$EQOS" ||
 
 grep -Fq 'iptables -t mangle -A eqos_dev -s $ip -m conntrack --ctstate NEW -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00' "$EQOS" ||
     fail "eqos device WAN binding must scope CONNMARK save to the configured device IP"
+
+grep -Fq 'while iptables -t mangle -D eqos_dev -s $ip -m conntrack --ctstate NEW -j MARK --set-xmark ${rm_val}/0xFF00' "$EQOS" ||
+    fail "eqos device WAN binding must remove all duplicate per-device MARK rules before appending"
+
+grep -Fq 'while iptables -t mangle -D eqos_dev -s $ip -m conntrack --ctstate NEW -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00' "$EQOS" ||
+    fail "eqos device WAN binding must remove all duplicate per-device CONNMARK save rules before appending"
 
 if grep -Fq 'iptables -t mangle -A POSTROUTING -m conntrack --ctstate NEW \' "$EQOS"; then
     fail "eqos_dev must not install broad POSTROUTING save-mark rules"

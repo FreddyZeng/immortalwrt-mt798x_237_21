@@ -38,4 +38,4 @@
 <!-- CID: C-FQOS02-01 | BID: B-009 | commit: pending | 日期: 2026-05-02 -->
 - `loadbalance` 完全重写为 POSIX sh，移除 bash 专有数组语法 `array=()`、`${//}` 字符串替换和 `let` 算术，改用 `tr ','  ' '`、`$(())`，添加 `#!/bin/sh` shebang。
 - `init.d/eqos` 直接执行 `/usr/sbin/loadbalance`，不再通过 `bash` 调用。
-- 路由 mark 格式 `printf "0x%02x00" "2${i}"`，确保 bits[15:8] 非零且各 WAN 接口互不重叠，掩码 `/0xFF00` 全程携带。
+- 路由 mark 格式 `printf "0x%02x00" $((0x20 + i))`，确保 bits[15:8] 非零且各 WAN 接口互不重叠，掩码 `/0xFF00` 全程携带。

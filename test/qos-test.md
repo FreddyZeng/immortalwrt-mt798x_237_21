@@ -28,4 +28,4 @@
 <!-- CID: C-FQOS01-05 | BID: B-009 | commit: pending | 日期: 2026-05-02 -->
 - `sh -n /usr/sbin/loadbalance` 必须通过（POSIX sh 语法检查）。
 - 在 busybox ash 环境下执行 `sh /usr/sbin/loadbalance pppoe-wan,pppoe-wan2` 不得报错。
-- 验证 FW_MARK 格式：`printf "0x%02x00" "20"` → `0x2000`，`printf "0x%02x00" "21"` → `0x2100`，均在 0xFF00 掩码范围内且不与 QoS 低8位重叠。
+- 验证 FW_MARK 格式：`printf "0x%02x00" $((0x20 + idx))`；idx=0 → `0x2000`，idx=1 → `0x2100`，均在 0xFF00 掩码范围内且不与 QoS 低8位重叠。
