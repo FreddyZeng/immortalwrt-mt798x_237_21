@@ -16,6 +16,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/netdevice.h>
 #include <linux/iopoll.h>
+#include <linux/inet.h>
 
 #include "hnat.h"
 #include "nf_hnat_mtk.h"
@@ -2411,6 +2412,121 @@ static const struct debugfs_reg32 hnat_regs[] = {
 	dump_register(CAH_RDATA),
 };
 
+/* =========================================================
+ * [HNAT-C-VIP-03] 动态 VIP IP 表 debugfs 接口
+ * 路径: /sys/kernel/debug/hnat/vip_list
+ * 写入: echo "add 192.168.1.1" / echo "del 192.168.1.1" / echo "flush"
+ * 读取: cat 显示当前 VIP 表
+ * 目的: 解决单设备 VIP (eqos add $ip ... 64) 的下行 HNAT 建表竞态问题
+ * ========================================================= */
+
+static int hnat_vip_list_show(struct seq_file *m, void *private)
+{
+	struct mtk_hnat *h = hnat_priv;
+	unsigned long flags;
+	int i, num;
+
+	spin_lock_irqsave(&h->vip_lock, flags);
+	num = h->vip_ip_num;
+	seq_printf(m, "# 动态 VIP IP 表 (%d/%d)\n", num, HNAT_VIP_MAX);
+	for (i = 0; i < num; i++) {
+		__be32 ip = h->vip_ips[i];
+		seq_printf(m, "%pI4\n", &ip);
+	}
+	seq_printf(m, "# 静态 VIP 范围: 192.168.110-119.[10-39] (内核硬编码, 无需注册)\n");
+	spin_unlock_irqrestore(&h->vip_lock, flags);
+	return 0;
+}
+
+static ssize_t hnat_vip_list_write(struct file *file,
+				   const char __user *ubuf,
+				   size_t count, loff_t *ppos)
+{
+	struct mtk_hnat *h = hnat_priv;
+	char buf[64];
+	char ip_str[40];
+	__be32 ip;
+	unsigned long flags;
+	size_t len = min(count, sizeof(buf) - 1);
+	int i;
+
+	if (copy_from_user(buf, ubuf, len))
+		return -EFAULT;
+	buf[len] = '\0';
+
+	if (sscanf(buf, "add %39s", ip_str) == 1) {
+		/* 解析 IPv4 地址, in4_pton 将点分十进制转为网络字节序 __be32 */
+		if (in4_pton(ip_str, -1, (u8 *)&ip, -1, NULL) != 1) {
+			pr_err("[HNAT-C-VIP-03] invalid IPv4: %s\n", ip_str);
+			return -EINVAL;
+		}
+		spin_lock_irqsave(&h->vip_lock, flags);
+		/* 检查是否已存在 */
+		for (i = 0; i < h->vip_ip_num; i++) {
+			if (h->vip_ips[i] == ip) {
+				spin_unlock_irqrestore(&h->vip_lock, flags);
+				pr_debug("[HNAT-C-VIP-03] already in table: %pI4\n", &ip);
+				return count;
+			}
+		}
+		if (h->vip_ip_num >= HNAT_VIP_MAX) {
+			spin_unlock_irqrestore(&h->vip_lock, flags);
+			pr_err("[HNAT-C-VIP-03] vip table full (%d)\n", HNAT_VIP_MAX);
+			return -ENOMEM;
+		}
+		h->vip_ips[h->vip_ip_num] = ip;
+		/* smp_store_release 确保内存屏障: 先写 IP, 再递增计数器 */
+		smp_store_release(&h->vip_ip_num, h->vip_ip_num + 1);
+		spin_unlock_irqrestore(&h->vip_lock, flags);
+		pr_info("[HNAT-C-VIP-03] add VIP: %pI4 (total=%d)\n",
+			&ip, h->vip_ip_num);
+
+	} else if (sscanf(buf, "del %39s", ip_str) == 1) {
+		if (in4_pton(ip_str, -1, (u8 *)&ip, -1, NULL) != 1)
+			return -EINVAL;
+		spin_lock_irqsave(&h->vip_lock, flags);
+		for (i = 0; i < h->vip_ip_num; i++) {
+			if (h->vip_ips[i] == ip) {
+				/* 将最后一个元素移入删除位, 简单 O(1) 删除 */
+				h->vip_ips[i] = h->vip_ips[h->vip_ip_num - 1];
+				smp_store_release(&h->vip_ip_num, h->vip_ip_num - 1);
+				spin_unlock_irqrestore(&h->vip_lock, flags);
+				pr_info("[HNAT-C-VIP-03] del VIP: %pI4 (total=%d)\n",
+					&ip, h->vip_ip_num);
+				return count;
+			}
+		}
+		spin_unlock_irqrestore(&h->vip_lock, flags);
+		pr_warn("[HNAT-C-VIP-03] del: IP not found: %pI4\n", &ip);
+
+	} else if (strncmp(buf, "flush", 5) == 0) {
+		spin_lock_irqsave(&h->vip_lock, flags);
+		memset(h->vip_ips, 0, sizeof(h->vip_ips));
+		smp_store_release(&h->vip_ip_num, 0);
+		spin_unlock_irqrestore(&h->vip_lock, flags);
+		pr_info("[HNAT-C-VIP-03] flush: all dynamic VIP IPs cleared\n");
+
+	} else {
+		pr_err("[HNAT-C-VIP-03] usage: echo \"add IP\"|\"del IP\"|\"flush\" > vip_list\n");
+		return -EINVAL;
+	}
+
+	return count;
+}
+
+static int hnat_vip_list_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, hnat_vip_list_show, file->private_data);
+}
+
+static const struct file_operations hnat_vip_list_fops = {
+	.open    = hnat_vip_list_open,
+	.read    = seq_read,
+	.llseek  = seq_lseek,
+	.write   = hnat_vip_list_write,
+	.release = single_release,
+};
+
 int hnat_init_debugfs(struct mtk_hnat *h)
 {
 	int ret = 0;
@@ -2473,6 +2589,8 @@ int hnat_init_debugfs(struct mtk_hnat *h)
 			    &hnat_version_fops);
 	debugfs_create_file("hnat_ppd_if", S_IRUGO | S_IRUGO, root, h,
 			    &hnat_ppd_if_fops);
+	debugfs_create_file("vip_list", S_IRUGO | S_IWUSR, root, h,
+			    &hnat_vip_list_fops);
 
 	for (i = 0; i < hnat_priv->data->num_of_sch; i++) {
 		snprintf(name, sizeof(name), "qdma_sch%ld", i);

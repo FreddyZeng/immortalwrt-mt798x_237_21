@@ -1488,21 +1488,31 @@ static inline bool is_ip_in_109_range_hnat(__be32 ip_be)
 }
 
 /**
- * 检查 IP 是否属于 VIP 网段: 192.168.110-119.[10-39]
- * 与 eqos u32 规则范围完全对应，内核直接检测，无需依赖 CONNMARK
- * [HNAT-C-VIP-01] ip_be: 网络字节序的 IPv4 地址
+ * 检查 IP 是否属于 VIP 网段（静态范围或动态注册）
+ * [HNAT-C-VIP-01] 静态: 192.168.110-119.[10-39]
+ * [HNAT-C-VIP-03] 动态: eqos add $ip ... 64 注册到 /sys/kernel/debug/hnat/vip_list
+ * ip_be: 网络字节序 IPv4 地址
+ * 注意: 此函数只在 HNAT UNBIND→BIND 建表时调用（CPU 慢路径），循环开销可接受
  */
-static inline bool is_vip_ip_hnat(__be32 ip_be)
+static bool is_vip_ip_hnat(__be32 ip_be)
 {
 	const u8 *p = (const u8 *)&ip_be;
+	int i, num;
 
-	if (p[0] != 192 || p[1] != 168)
-		return false;
-	if (p[2] < 110 || p[2] > 119)
-		return false;
-	if (p[3] < 10 || p[3] > 39)
-		return false;
-	return true;
+	/* 静态 VIP 范围检测: 192.168.110-119.[10-39] */
+	if (p[0] == 192 && p[1] == 168 &&
+	    p[2] >= 110 && p[2] <= 119 &&
+	    p[3] >= 10  && p[3] <= 39)
+		return true;
+
+	/* 动态 VIP 表查询: 线性扫描, smp_load_acquire 保证计数器可见性
+	 * 写路径已通过 smp_store_release 保证 IP 在计数器之前对其他核可见 */
+	num = smp_load_acquire(&hnat_priv->vip_ip_num);
+	for (i = 0; i < num; i++) {
+		if (hnat_priv->vip_ips[i] == ip_be)
+			return true;
+	}
+	return false;
 }
 
 /**

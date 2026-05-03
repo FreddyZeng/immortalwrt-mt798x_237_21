@@ -757,6 +757,9 @@ static int hnat_probe(struct platform_device *pdev)
 	hnat_priv->guest_en = true; /* enable guest wifi by default */
 	hnat_priv->dscp_en = false;  /* 默认关闭, eqos start 时通过 hnat_setting "10 1" 开启 */
 	hnat_priv->macvlan_support = false;
+	spin_lock_init(&hnat_priv->vip_lock);  /* [HNAT-C-VIP-03] 动态 VIP 表保护锁 */
+	hnat_priv->vip_ip_num = 0;            /* 动态 VIP 表初始为空 */
+	memset(hnat_priv->vip_ips, 0, sizeof(hnat_priv->vip_ips));
 	err = hnat_init_debugfs(hnat_priv);
 	if (err)
 		return err;
