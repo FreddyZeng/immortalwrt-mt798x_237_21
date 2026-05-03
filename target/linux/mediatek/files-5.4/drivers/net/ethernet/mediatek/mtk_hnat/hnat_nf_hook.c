@@ -1488,7 +1488,24 @@ static inline bool is_ip_in_109_range_hnat(__be32 ip_be)
 }
 
 /**
- * 输入: TOS字节, 局域网侧IP地址 (网络字节序)
+ * 检查 IP 是否属于 VIP 网段: 192.168.110-119.[10-39]
+ * 与 eqos u32 规则范围完全对应，内核直接检测，无需依赖 CONNMARK
+ * [HNAT-C-VIP-01] ip_be: 网络字节序的 IPv4 地址
+ */
+static inline bool is_vip_ip_hnat(__be32 ip_be)
+{
+	const u8 *p = (const u8 *)&ip_be;
+
+	if (p[0] != 192 || p[1] != 168)
+		return false;
+	if (p[2] < 110 || p[2] > 119)
+		return false;
+	if (p[3] < 10 || p[3] > 39)
+		return false;
+	return true;
+}
+
+/**
  * 输出: 硬件队列ID (0-31, 连续)
  *
  * 队列布局 (队列号越小优先级越高):
@@ -2089,14 +2106,28 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
     if (IS_HQOS_MODE && hnat_priv->dscp_en) {
         if (dir != HQOS_LOCAL) {
             // bit7(0x80)=下行限速→Q63, bit6(0x40)=上行限速→Q31
-            // VIP mark=46=0x2E: bit7=0,bit6=0，精确匹配在下方，不冲突
+            // VIP mark=46=0x2E: bit7=0,bit6=0，不与限速 bit 冲突
             if ((qos_mark & 0x80) && dir == HQOS_DOWNLOAD) {
                 qid = 63;  // [HNAT-C-FQOS01-05-①] 下行限速 → Q63
             } else if ((qos_mark & 0x40) && dir == HQOS_UPLOAD) {
                 qid = 31;  // [HNAT-C-FQOS01-05-②] 上行限速 → Q31
-            } else if (dir == HQOS_DOWNLOAD && qos_mark == 46) {
+            } else if (dir == HQOS_DOWNLOAD &&
+                       (qos_mark == 46 || is_vip_ip_hnat(hash_ip))) {
+                // [HNAT-C-VIP-02] 根治 VIP 下行 qid 竞态:
+                // CONNMARK 在服务器主动推送/UDP无连接首包时可能未及时写入 ct_mark,
+                // 导致 mark=0 而走 hash → qid=46。
+                // 内核直接检测 hash_ip(=new_dip=真实 LAN IP) 是否在 VIP 范围,
+                // 无论 CONNMARK 状态如何，VIP 下行始终 qid=32。
                 qid = 32;
-                pr_debug_ratelimited("[HNAT-VIP-DL] qid→32 via mark46 branch, hash_ip=%pI4\n", &hash_ip);
+                // 同步修正 iblk2.dscp 为 EF(0xB8)，保持 dscp 一致性
+                if (skb->protocol == htons(ETH_P_IP) &&
+                    (dscp & 0xFC) != 0xB8) {
+                    dscp = (dscp & 0x03) | 0xB8;
+                    hnat_set_entry_dscp(&entry, dscp);
+                }
+                pr_debug_ratelimited(
+                    "[HNAT-C-VIP-02] qid=32 via kernel VIP detect: hash_ip=%pI4 mark=%u dir=%d\n",
+                    &hash_ip, qos_mark, dir);
             } else {
                 qid = dscp_to_queue(dscp, hash_ip);
                 if (dir == HQOS_DOWNLOAD) {
