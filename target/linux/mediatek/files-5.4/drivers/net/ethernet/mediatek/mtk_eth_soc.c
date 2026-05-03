@@ -1031,40 +1031,40 @@ static int mtk_tx_map(struct sk_buff *skb, struct net_device *dev,
 
 	nr_frags = skb_shinfo(skb)->nr_frags;
 
-        /* [QoS-CPU-TX-v2] 方向感知 QoS mark → qid 映射
-         * mac->id=1 = GMAC2(WAN 口出) = 上行(LAN→WAN)
-         * mac->id=0 = GMAC1(LAN 口出) = 下行(WAN→LAN)
-         * qos_dir=1: 已显式决定 qid（含 Q0），跳过兜底
-         * qos_dir=0: 未命中 QoS mark，走兜底 */
-        qid = skb->mark & (MTK_QDMA_TX_MASK);
-        {
-            int qos_dir = 0;
-            if (skb->mark & 0xFF) {
-                u8 qos_mark = skb->mark & 0xFF;
-                if (qos_mark == 46) {
-                    /* VIP: 上行(WAN出)→Q0(SP), 下行(LAN出)→Q32(SP) */
-                    qid = mac->id ? 0 : 32;
-                    qos_dir = 1;
-                } else if (qos_mark == 0xC0) {
-                    /* 双向限速: 上行→Q31(WRR), 下行→Q63(WRR) */
-                    qid = mac->id ? 31 : 63;
-                    qos_dir = 1;
-                } else if (qos_mark == 0x40) {
-                    /* 上行限速 bit: 仅 WAN出(上行)→Q31；LAN出不限，走兜底 */
-                    if (mac->id) { qid = 31; qos_dir = 1; }
-                } else if (qos_mark == 0x80) {
-                    /* 下行限速 bit: 仅 LAN出(下行)→Q63；WAN出不限，走兜底 */
-                    if (!mac->id) { qid = 63; qos_dir = 1; }
-                } else if (qos_mark > MTK_QDMA_TX_MASK) {
-                    /* 未知高值 mark，不影响 QoS，走兜底 */
-                    qid = 0;
-                }
-            }
-            /* 普通流量兜底（含未命中 QoS 的单向限速非限速方向）:
-             * WAN出(上行)→Q1(CS6-tier WRR), LAN出(下行)→Q33(CS6-tier WRR) */
-            if (!qos_dir && !qid)
-                qid = mac->id ? 1 : 33;
-        }
+	/* [QoS-CPU-TX-v3] 方向感知 QoS mark → qid 映射
+	 * mac->id=1 = GMAC2(WAN 口出) = 上行(LAN→WAN)
+	 * mac->id=0 = GMAC1(LAN 口出) = 下行(WAN→LAN)
+	 * qos_dir=1: 已显式决定 qid（含 Q0），跳过兜底
+	 * qos_dir=0: 未命中可信 QoS mark，走普通队列兜底 */
+	qid = 0;
+	{
+		int qos_dir = 0;
+		u8 qos_mark = skb->mark & 0xFF;
+
+		if (qos_mark == 46) {
+			/* VIP: 上行(WAN出)→Q0(SP), 下行(LAN出)→Q32(SP) */
+			qid = mac->id ? 0 : 32;
+			qos_dir = 1;
+		} else if (qos_mark == 0xC0) {
+			/* 双向限速: 上行→Q31(WRR), 下行→Q63(WRR) */
+			qid = mac->id ? 31 : 63;
+			qos_dir = 1;
+		} else if (qos_mark == 0x40) {
+			/* 上行限速 bit: 仅 WAN出(上行)→Q31；LAN出不限，走兜底 */
+			if (mac->id) { qid = 31; qos_dir = 1; }
+		} else if (qos_mark == 0x80) {
+			/* 下行限速 bit: 仅 LAN出(下行)→Q63；WAN出不限，走兜底 */
+			if (!mac->id) { qid = 63; qos_dir = 1; }
+		} else if (qos_mark) {
+			/* 未知 QoS mark 不可当真实 qid，统一回落普通队列 */
+			qid = 0;
+		}
+
+		/* 普通流量兜底（含未知 mark、非限速方向）:
+		 * WAN出(上行)→Q1(CS6-tier WRR), LAN出(下行)→Q33(CS6-tier WRR) */
+		if (!qos_dir && !qid)
+			qid = mac->id ? 1 : 33;
+	}
 
 	if (MTK_HAS_CAPS(eth->soc->caps, MTK_NETSYS_V2)) {
 		/* set the forward port */

@@ -61,63 +61,80 @@ lb_default_route_for_iface() {
     }'
 }
 
+lb_delete_legacy_rule() {
+    while iptables "$@" 2>/dev/null; do
+        legacy_found=1
+    done
+}
+
 # ── 1. 精确迁移清理：只在首次迁移时删除旧版 loadbalance 固定模板规则 ───────
 if ! iptables -t mangle -L eqos_lb >/dev/null 2>&1; then
-    while iptables -t mangle -D PREROUTING -i br-lan \
-        -m conntrack --ctstate ESTABLISHED,RELATED \
-        -j CONNMARK --restore-mark 2>/dev/null; do :; done
-    while iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \
-        -j CONNMARK --save-mark 2>/dev/null; do :; done
+    legacy_cleanup_needed=1
+    legacy_found=0
 
     for _every in 1 2 3 4 5 6 7 8; do
         for _packet in 0 1 2 3 4 5 6 7; do
             [ "$_packet" -lt "$_every" ] || continue
             for _mark_idx in 0 1 2 3 4 5 6 7; do
                 _om=$(printf "0x%02x00" $((0x20 + _mark_idx)))
-                while iptables -t mangle -D PREROUTING -i br-lan \
+                lb_delete_legacy_rule -t mangle -D PREROUTING -i br-lan \
                     -m conntrack --ctstate NEW \
                     -m statistic --mode nth --every "$_every" --packet "$_packet" \
-                    -j CONNMARK --set-mark "2${_mark_idx}" 2>/dev/null; do :; done
-                while iptables -t mangle -D PREROUTING -i br-lan \
+                    -j CONNMARK --set-mark "2${_mark_idx}"
+                lb_delete_legacy_rule -t mangle -D PREROUTING -i br-lan \
                     -m conntrack --ctstate NEW \
                     -m statistic --mode nth --every "$_every" --packet "$_packet" \
-                    -j CONNMARK --set-xmark "${_om}/0xFF00" 2>/dev/null; do :; done
-                while iptables -t mangle -D PREROUTING -i br-lan \
+                    -j CONNMARK --set-xmark "${_om}/0xFF00"
+                lb_delete_legacy_rule -t mangle -D PREROUTING -i br-lan \
                     -m conntrack --ctstate NEW \
                     -m statistic --mode nth --every "$_every" --packet "$_packet" \
-                    -j MARK --set-mark "2${_mark_idx}" 2>/dev/null; do :; done
-                while iptables -t mangle -D PREROUTING -i br-lan \
+                    -j MARK --set-mark "2${_mark_idx}"
+                lb_delete_legacy_rule -t mangle -D PREROUTING -i br-lan \
                     -m conntrack --ctstate NEW \
                     -m statistic --mode nth --every "$_every" --packet "$_packet" \
-                    -j MARK --set-xmark "${_om}/0xFF00" 2>/dev/null; do :; done
+                    -j MARK --set-xmark "${_om}/0xFF00"
             done
         done
     done
 
     for _ci in 0 1 2 3 4 5 6 7; do
         _om=$(printf "0x%02x00" $((0x20 + _ci)))
-        while iptables -t mangle -D PREROUTING -i br-lan \
+        lb_delete_legacy_rule -t mangle -D PREROUTING -i br-lan \
             -m connmark --mark "2${_ci}" \
-            -j MARK --set-mark "2${_ci}" 2>/dev/null; do :; done
-        while iptables -t mangle -D PREROUTING -i br-lan \
+            -j MARK --set-mark "2${_ci}"
+        lb_delete_legacy_rule -t mangle -D PREROUTING -i br-lan \
             -m connmark --mark "${_om}/0xFF00" \
-            -j MARK --set-xmark "${_om}/0xFF00" 2>/dev/null; do :; done
-        while iptables -t mangle -D PREROUTING -p tcp --dport 443 \
+            -j MARK --set-xmark "${_om}/0xFF00"
+        lb_delete_legacy_rule -t mangle -D PREROUTING -p tcp --dport 443 \
             -m conntrack --ctstate NEW \
-            -j MARK --set-mark "2${_ci}" 2>/dev/null; do :; done
-        while iptables -t mangle -D PREROUTING -p udp --dport 443 \
+            -j MARK --set-mark "2${_ci}"
+        lb_delete_legacy_rule -t mangle -D PREROUTING -p udp --dport 443 \
             -m conntrack --ctstate NEW \
-            -j MARK --set-mark "2${_ci}" 2>/dev/null; do :; done
-        while iptables -t mangle -D PREROUTING -p tcp --dport 443 \
+            -j MARK --set-mark "2${_ci}"
+        lb_delete_legacy_rule -t mangle -D PREROUTING -p tcp --dport 443 \
             -m conntrack --ctstate NEW \
-            -j MARK --set-xmark "${_om}/0xFF00" 2>/dev/null; do :; done
-        while iptables -t mangle -D PREROUTING -p udp --dport 443 \
+            -j MARK --set-xmark "${_om}/0xFF00"
+        lb_delete_legacy_rule -t mangle -D PREROUTING -p udp --dport 443 \
             -m conntrack --ctstate NEW \
-            -j MARK --set-xmark "${_om}/0xFF00" 2>/dev/null; do :; done
+            -j MARK --set-xmark "${_om}/0xFF00"
     done
+
+    if [ "$legacy_found" -eq 1 ]; then
+        while iptables -t mangle -D PREROUTING -i br-lan \
+            -m conntrack --ctstate ESTABLISHED,RELATED \
+            -j CONNMARK --restore-mark 2>/dev/null; do :; done
+        while iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \
+            -j CONNMARK --save-mark 2>/dev/null; do :; done
+        logger -p daemon.debug -t loadbalance \
+            "[LB-C-FQOS02-02-03] cleanup untagged legacy CONNMARK rules after exact legacy match: iface=$interface"
+    else
+        logger -p daemon.debug -t loadbalance \
+            "[LB-C-FQOS02-02-04] skip unscoped legacy CONNMARK cleanup: iface=$interface, reason=no_exact_legacy_match"
+    fi
     logger -p daemon.debug -t loadbalance \
-        "[LB-C-FQOS02-02-01] exact legacy cleanup complete: iface=$interface, every_range=1-8, packet_range=0-7, mark_idx_range=0-7"
+        "[LB-C-FQOS02-02-01] exact legacy cleanup complete: iface=$interface, matched=$legacy_found, every_range=1-8, packet_range=0-7, mark_idx_range=0-7"
 else
+    legacy_cleanup_needed=0
     logger -p daemon.debug -t loadbalance \
         "[LB-C-FQOS02-02-02] skip exact legacy cleanup: iface=$interface, reason=eqos_lb_chain_exists"
 fi
@@ -131,7 +148,14 @@ lb_cleanup_global_marks "loadbalance_start"
 lb_cleanup_route_tables "loadbalance_start"
 
 # ── 4. 构建可用 WAN 列表，cfg_idx 保留原始位置 ───────────────────────────
-_tmp=$(mktemp /tmp/eqos_lb_avail.XXXXXX)
+_tmp=$(mktemp /tmp/eqos_lb_avail.XXXXXX) || {
+    logger -p daemon.err -t loadbalance \
+        "[LB-C-FQOS02-03-22] create temporary WAN list failed: pattern=/tmp/eqos_lb_avail.XXXXXX"
+    iptables -t mangle -F eqos_lb 2>/dev/null
+    lb_cleanup_global_marks "mktemp_failed"
+    lb_cleanup_route_tables "mktemp_failed"
+    exit 1
+}
 cfg_idx=0
 PPP_NUM=0
 first_cfg_idx=-1
@@ -152,12 +176,16 @@ for var in $iface_list; do
         [ "$first_cfg_idx" -lt 0 ] && first_cfg_idx=$cfg_idx
         _om=$(printf "0x%02x00" $((0x20 + cfg_idx)))
         if [ -n "$gateway" ]; then
-            while iptables -t mangle -D PREROUTING \
-                -m conntrack --ctstate NEW \
-                -d "$gateway/24" -j MARK --set-mark "2${cfg_idx}" 2>/dev/null; do :; done
-            while iptables -t mangle -D PREROUTING \
-                -m conntrack --ctstate NEW \
-                -d "$gateway/24" -j MARK --set-xmark "${_om}/0xFF00" 2>/dev/null; do :; done
+            if [ "$legacy_cleanup_needed" -eq 1 ]; then
+                while iptables -t mangle -D PREROUTING \
+                    -m conntrack --ctstate NEW \
+                    -d "$gateway/24" -j MARK --set-mark "2${cfg_idx}" 2>/dev/null; do :; done
+                while iptables -t mangle -D PREROUTING \
+                    -m conntrack --ctstate NEW \
+                    -d "$gateway/24" -j MARK --set-xmark "${_om}/0xFF00" 2>/dev/null; do :; done
+                logger -p daemon.debug -t loadbalance \
+                    "[LB-C-FQOS02-02-05] cleanup legacy gateway subnet marker during first migration: cfg=$cfg_idx, ifname=$var, gateway=$gateway, mark=${_om}/0xFF00"
+            fi
             logger -p daemon.debug -t loadbalance \
                 "[LB-C-FQOS02-03-03] WAN${cfg_idx}($var): route selected, route_dev=$route_dev, gateway=$gateway"
         else

@@ -13,13 +13,17 @@ parse_device() {
 	
 
 	local ip download upload comment mac interfacename
-	config_get ip "$cfg" ip
-	config_get download "$cfg" "download"
-	config_get upload "$cfg" "upload"
-	config_get comment "$cfg" "comment"
-	config_get mac "$cfg" "mac"
-	config_get interfacename "$cfg" "interfacename"
-	eqos add "$ip" "$download" "$upload" "$comment" "$mac" "$interfacename"
+	config_get ip "$cfg" "ip" ""
+	config_get download "$cfg" "download" "0"
+	config_get upload "$cfg" "upload" "0"
+	config_get comment "$cfg" "comment" "0"
+	config_get mac "$cfg" "mac" ""
+	config_get interfacename "$cfg" "interfacename" ""
+	eqos add "$ip" "$download" "$upload" "$comment" "$mac" "$interfacename" || {
+		logger -p daemon.err -t eqos "[EQOS-C-FQOS01-07-02] device apply failed: cfg=$cfg, ip=$ip, mac=$mac, download=$download, upload=$upload, mode=$comment, interface=$interfacename"
+		EQOS_DEVICE_ERROR=1
+		return 1
+	}
 }
 
 start_service() {
@@ -30,46 +34,47 @@ start_service() {
 	[ "$enabled" -eq "1" ] || return 1
 	
 	local download upload comment
-	config_get download "config" "download"
-	config_get upload "config" "upload"
-	config_get comment "config" "comment"
-	config_get smarthqos "config" "smarthqos"
-	config_get interface "config" "interface"
-	eqos start "$download" "$upload" "$comment" 
+	config_get download "config" "download" "0"
+	config_get upload "config" "upload" "0"
+	config_get comment "config" "comment" "0"
+	config_get_bool smarthqos "config" "smarthqos" "0"
+	config_get interface "config" "interface" ""
+	eqos start "$download" "$upload" "$comment" || return 1
 	
 	local ipv6enabled
-        config_get_bool ipv6enabled "config" "ipv6enabled" "0"
-        if [ "$ipv6enabled" -eq "1" ]; then
-            ip6tables -t mangle -N eqos 2>/dev/null
-            ip6tables -t mangle -F eqos
-            ip6tables -t mangle -D FORWARD  -j eqos
-            ip6tables -t mangle -A FORWARD  -j eqos
-        fi
+	config_get_bool ipv6enabled "config" "ipv6enabled" "0"
+	if [ "$ipv6enabled" -eq "1" ]; then
+		ip6tables -t mangle -N eqos 2>/dev/null
+		ip6tables -t mangle -F eqos
+		ip6tables -t mangle -D FORWARD  -j eqos
+		ip6tables -t mangle -A FORWARD  -j eqos
+	fi
 
-
-        if [ "$smarthqos" -eq "1" ]; then  
-        # 上行 per-user 队列: Q5-Q29 (跳过 Q0-Q4 优先队列, Q30 背景, Q31 限速)
-        for i in $(seq 5 29); do
-        	if [ "$upload" -ne "0" ]; then
-		echo 2 1 $(($upload*225)) 1 $(($upload*1000)) 4 1 > /sys/kernel/debug/hnat/qdma_txq$i
-		fi
+	if [ "$smarthqos" -eq "1" ]; then
+		# 上行 per-user 队列: Q5-Q29 (跳过 Q0-Q4 优先队列, Q30 背景, Q31 限速)
+		for i in $(seq 5 29); do
+			if [ "$upload" -ne "0" ]; then
+				echo 2 1 $(($upload*225)) 1 $(($upload*1000)) 4 1 > /sys/kernel/debug/hnat/qdma_txq$i
+			fi
 		done
 		# 下行 per-user 队列: Q37-Q61 (跳过 Q32-Q36 优先队列, Q62 背景, Q63 限速)
 		for i in $(seq 37 61); do
-		if [ "$download" -ne "0" ]; then
-		echo 3 1 $(($download*200)) 1 $(($download*1000)) 4 1 > /sys/kernel/debug/hnat/qdma_txq$i
-		fi
-	done 
-	fi 
-        # loadbalance 内部对每条规则经过 -D 再 -A 异幂更新，无需全局 flush
-        # （全局 -F PREROUTING 会连带清除 mwan3 等其他组件的路由规则）
-        if [ "$interface" ]; then
-	/usr/sbin/loadbalance "$interface"
-        fi
-        config_foreach parse_device "device"
-        # smarthqos DHCP DSCP 分配已禁用:
-        # dhcp_mark.sh 会给每个设备随机分配 DSCP 1-31, 与我们的 DSCP→队列映射冲突
-        # per-user 隔离现在由内核 IP hash (last_octet % 25) 实现, 不需要 DHCP 分配
+			if [ "$download" -ne "0" ]; then
+				echo 3 1 $(($download*200)) 1 $(($download*1000)) 4 1 > /sys/kernel/debug/hnat/qdma_txq$i
+			fi
+		done
+	fi
+	# loadbalance 内部对每条规则经过 -D 再 -A 异幂更新，无需全局 flush
+	# （全局 -F PREROUTING 会连带清除 mwan3 等其他组件的路由规则）
+	if [ "$interface" ]; then
+		/usr/sbin/loadbalance "$interface" || return 1
+	fi
+	EQOS_DEVICE_ERROR=0
+	config_foreach parse_device "device"
+	[ "$EQOS_DEVICE_ERROR" -eq 0 ] || return 1
+	# smarthqos DHCP DSCP 分配已禁用:
+	# dhcp_mark.sh 会给每个设备随机分配 DSCP 1-31, 与我们的 DSCP→队列映射冲突
+	# per-user 隔离现在由内核 IP hash (last_octet % 25) 实现, 不需要 DHCP 分配
 }
 
 stop_service() {

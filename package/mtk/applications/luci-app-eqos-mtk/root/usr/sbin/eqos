@@ -13,18 +13,42 @@ start_qos() {
     local dl=$1
     local up=$2
 
-    tc qdisc add dev $dev root handle 1: htb
-    tc class add dev $dev parent 1: classid 1:1 htb rate ${dl}mbit
+    tc qdisc add dev $dev root handle 1: htb || {
+        logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-20] install software tc root qdisc failed: dev=$dev, dl=$dl, up=$up"
+        exit 1
+    }
+    tc class add dev $dev parent 1: classid 1:1 htb rate ${dl}mbit || {
+        logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-21] install software tc root class failed: dev=$dev, dl=$dl"
+        exit 1
+    }
 
-    ip link add dev ${dev}-ifb name ${dev}-ifb type ifb
-    ip link set dev ${dev}-ifb up
+    ip link add dev ${dev}-ifb name ${dev}-ifb type ifb || {
+        logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-22] create software tc IFB failed: dev=$dev, ifb=${dev}-ifb"
+        exit 1
+    }
+    ip link set dev ${dev}-ifb up || {
+        logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-23] enable software tc IFB failed: dev=$dev, ifb=${dev}-ifb"
+        exit 1
+    }
 
-    tc qdisc add dev ${dev}-ifb root handle 1: htb
-    tc class add dev ${dev}-ifb parent 1: classid 1:1 htb rate ${up}mbit
+    tc qdisc add dev ${dev}-ifb root handle 1: htb || {
+        logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-24] install software tc IFB qdisc failed: ifb=${dev}-ifb, up=$up"
+        exit 1
+    }
+    tc class add dev ${dev}-ifb parent 1: classid 1:1 htb rate ${up}mbit || {
+        logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-25] install software tc IFB class failed: ifb=${dev}-ifb, up=$up"
+        exit 1
+    }
 
-    tc qdisc add dev $dev ingress
+    tc qdisc add dev $dev ingress || {
+        logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-26] install software tc ingress qdisc failed: dev=$dev"
+        exit 1
+    }
     tc filter add dev $dev parent ffff: protocol ip u32 match u32 0 0 \
-        flowid 1:1 action mirred egress redirect dev ${dev}-ifb
+        flowid 1:1 action mirred egress redirect dev ${dev}-ifb || {
+        logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-27] install software tc IPv4 ingress redirect failed: dev=$dev, ifb=${dev}-ifb"
+        exit 1
+    }
     logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-06-01] install software tc IPv4 ingress redirect: dev=$dev, ifb=${dev}-ifb"
     # IPv6 下行流量同样重定向到 IFB
     tc filter add dev $dev parent ffff: protocol ipv6 u32 match u32 0 0 \
@@ -33,6 +57,21 @@ start_qos() {
         exit 1
     }
     logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-06-03] install software tc IPv6 ingress redirect: dev=$dev, ifb=${dev}-ifb"
+}
+
+validate_global_rate() {
+    local name="$1"
+    local value="$2"
+
+    case "$value" in
+        ''|*[!0-9]*|0)
+            logger -p daemon.err -t eqos "[EQOS-C-FQOS01-01-01] invalid global ${name} speed: value=${value:-empty}, expected=positive_mbit"
+            exit 1
+            ;;
+        *)
+            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-01-02] accept global ${name} speed: value=$value, unit=mbit"
+            ;;
+    esac
 }
 
 cleanup_eqos_route_tables() {
@@ -291,18 +330,22 @@ case "$1" in
     iptables_stop
     ;;
     "start")
+    global_dl="$2"
+    global_up="$3"
+    validate_global_rate "download" "$global_dl"
+    validate_global_rate "upload" "$global_up"
     stop_qos
     # 清零限速累加器和per-device速率记录
     echo 0 > /tmp/eqos_q31_rate
     echo 0 > /tmp/eqos_q63_rate
     rm -f /tmp/eqos_dev_up_* /tmp/eqos_dev_dl_*
     iptables_start_prepare
-        start_qos $2 $3
+        start_qos "$global_dl" "$global_up"
     iptables_start_inital
     echo 1 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch0
     echo 1 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch1
-    echo 1 wrr $(($3*1000*10/10)) > /sys/kernel/debug/hnat/qdma_sch2
-    echo 1 wrr $(($2*1000*10/10)) > /sys/kernel/debug/hnat/qdma_sch3
+    echo 1 wrr $((global_up*1000*10/10)) > /sys/kernel/debug/hnat/qdma_sch2
+    echo 1 wrr $((global_dl*1000*10/10)) > /sys/kernel/debug/hnat/qdma_sch3
 
     # qdma_txq 格式: scheduler min_en min_rate max_en max_rate weight resv
     # === 上行 Q0-Q31 ===

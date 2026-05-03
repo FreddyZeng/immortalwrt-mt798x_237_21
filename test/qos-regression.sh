@@ -7,6 +7,7 @@ INITD="$ROOT/package/mtk/applications/luci-app-eqos-mtk/root/etc/init.d/eqos"
 LOADBALANCE="$ROOT/package/mtk/applications/luci-app-eqos-mtk/root/usr/sbin/loadbalance"
 MAKEFILE="$ROOT/package/mtk/applications/luci-app-eqos-mtk/Makefile"
 HNAT_HOOK="$ROOT/target/linux/mediatek/files-5.4/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c"
+MTK_ETH="$ROOT/target/linux/mediatek/files-5.4/drivers/net/ethernet/mediatek/mtk_eth_soc.c"
 CAKE_PATCH="$ROOT/target/linux/mediatek/patches-5.4/9999995-fix-cake-highest-tin-guard.patch"
 VERIFY_QOS="$ROOT/docs/verify-vip-qos.sh"
 
@@ -95,6 +96,31 @@ grep -Fq 'qid = 63;  // [HNAT-C-FQOS01-05-①] 下行限速 → Q63' "$HNAT_HOOK
 grep -Fq 'qid = dscp_to_queue(dscp, hash_ip);' "$HNAT_HOOK" ||
     fail "HNAT mark 0/default path must fall back to DSCP mapping"
 
+grep -Fq 'if (IS_HQOS_MODE) {' "$HNAT_HOOK" ||
+    fail "HNAT HQOS preset path must be separated from raw mark PPPQ handling"
+
+grep -Fq 'qid = (dir == HQOS_UPLOAD) ? 1 : 33;' "$HNAT_HOOK" ||
+    fail "HNAT HQOS preset path must default by direction before DSCP mapping"
+
+if grep -Fq 'IS_HQOS_MODE || skb->mark >= MAX_PPPQ_PORT_NUM' "$HNAT_HOOK"; then
+    fail "HNAT HQOS mode must not treat semantic skb mark as raw QDMA qid"
+fi
+
+CPU_TX_BLOCK=$(sed -n '/QoS-CPU-TX-v3/,/if (MTK_HAS_CAPS/p' "$MTK_ETH")
+
+echo "$CPU_TX_BLOCK" | grep -Fq 'qid = 0;' ||
+    fail "CPU TX QoS mapping must start from fallback qid 0"
+
+if echo "$CPU_TX_BLOCK" | grep -Fq 'qid = skb->mark &'; then
+    fail "CPU TX must not treat semantic skb mark as raw QDMA qid"
+fi
+
+echo "$CPU_TX_BLOCK" | grep -Fq '未知 QoS mark 不可当真实 qid' ||
+    fail "CPU TX unknown low QoS marks must explicitly fall back to normal queues"
+
+echo "$CPU_TX_BLOCK" | grep -Fq 'qid = mac->id ? 1 : 33;' ||
+    fail "CPU TX ordinary fallback must map upload to Q1 and download to Q33"
+
 grep -Fq '+	u8 highest_priority_tin = 0;' "$CAKE_PATCH" ||
     fail "CAKE highest_priority_tin must be initialized"
 
@@ -124,8 +150,11 @@ grep -Fq '46/MARK46 EF 可信VIP下行 SP' "$VERIFY_QOS" ||
 grep -Fq '32/40/44 CS4/5/VA 实时 SP' "$VERIFY_QOS" ||
     fail "verification script Q2/Q34 label must match HNAT DSCP mapping"
 
-grep -Fq 'MARK0xC0 LIMIT 限速设备 WRR' "$VERIFY_QOS" ||
-    fail "verification script Q63 label must show DSCP2/MARK0xC0 limit queue"
+grep -Fq '2/MARK0x40/0xC0 LIMIT 上行限速 WRR' "$VERIFY_QOS" ||
+    fail "verification script Q31 label must show DSCP2/MARK0x40/0xC0 upload limit queue"
+
+grep -Fq '2/MARK0x80/0xC0 LIMIT 下行限速 WRR' "$VERIFY_QOS" ||
+    fail "verification script Q63 label must show DSCP2/MARK0x80/0xC0 download limit queue"
 
 if grep -Eq 'echo "4[1-5][[:space:]]+SP' "$VERIFY_QOS"; then
     fail "verification script still uses obsolete DSCP 41-45 SP labels"
@@ -136,6 +165,21 @@ grep -Fq 'kmod-sched-flower' "$MAKEFILE" ||
 
 grep -Fq 'protocol ipv6 u32' "$EQOS" ||
     fail "software tc must redirect IPv6 ingress to IFB"
+
+grep -Fq 'validate_global_rate "download" "$global_dl"' "$EQOS" ||
+    fail "eqos start must validate global download speed before tc/qdisc setup"
+
+grep -Fq 'validate_global_rate "upload" "$global_up"' "$EQOS" ||
+    fail "eqos start must validate global upload speed before tc/qdisc setup"
+
+grep -Fq 'invalid global ${name} speed' "$EQOS" ||
+    fail "eqos start must log invalid global speed with the checked direction name"
+
+grep -Fq 'tc qdisc add dev $dev root handle 1: htb || {' "$EQOS" ||
+    fail "software tc root qdisc installation must fail loudly"
+
+grep -Fq 'install software tc IPv4 ingress redirect failed' "$EQOS" ||
+    fail "software tc IPv4 ingress redirect must fail loudly"
 
 grep -Fq 'protocol ipv6 flower dst_mac $macaddr' "$EQOS" ||
     fail "software tc IPv6 download filter must match dst_mac"
@@ -174,6 +218,21 @@ grep -Fq 'if ! iptables -t mangle -L eqos_lb >/dev/null 2>&1; then' "$LOADBALANC
 
 grep -Fq 'skip exact legacy cleanup' "$LOADBALANCE" ||
     fail "loadbalance must log when it skips first-migration legacy cleanup"
+
+grep -Fq 'lb_delete_legacy_rule()' "$LOADBALANCE" ||
+    fail "loadbalance first migration must delete old templates through a legacy-match helper"
+
+grep -Fq 'legacy_found=0' "$LOADBALANCE" ||
+    fail "loadbalance first migration must track whether exact old templates were found"
+
+grep -Fq 'if [ "$legacy_found" -eq 1 ]; then' "$LOADBALANCE" ||
+    fail "loadbalance must only delete untagged global CONNMARK rules after an exact legacy match"
+
+grep -Fq 'skip unscoped legacy CONNMARK cleanup' "$LOADBALANCE" ||
+    fail "loadbalance must preserve untagged global CONNMARK rules when no exact legacy template is found"
+
+grep -Fq 'if [ "$legacy_cleanup_needed" -eq 1 ]; then' "$LOADBALANCE" ||
+    fail "loadbalance gateway-subnet legacy cleanup must be limited to first migration"
 
 if grep -Fq "awk '{print \$3}'" "$LOADBALANCE"; then
     fail "loadbalance must not parse default gateway with brittle awk field 3"
@@ -225,6 +284,12 @@ grep -Fq 'lb_cleanup_global_marks "loadbalance_start"' "$LOADBALANCE" ||
 
 grep -Fq 'lb_abort "no_available_wan"' "$LOADBALANCE" ||
     fail "loadbalance no-WAN path must use abort cleanup instead of raw exit"
+
+grep -Fq 'mktemp /tmp/eqos_lb_avail.XXXXXX) || {' "$LOADBALANCE" ||
+    fail "loadbalance must fail loudly and cleanup when temporary WAN list creation fails"
+
+grep -Fq 'lb_cleanup_global_marks "mktemp_failed"' "$LOADBALANCE" ||
+    fail "loadbalance mktemp failure must cleanup global eqos_lb mark rules"
 
 grep -Fq 'iptables -t mangle -D PREROUTING -j eqos_lb 2>/dev/null' "$LOADBALANCE" ||
     fail "loadbalance cleanup must detach eqos_lb PREROUTING jump"
@@ -286,6 +351,21 @@ grep -Fq 'cleanup_eqos_route_tables "eqos_start"' "$EQOS" ||
 
 grep -Fq 'cleanup_eqos_route_tables "eqos_stop"' "$EQOS" ||
     fail "eqos stop must cleanup device WAN route tables when called directly"
+
+grep -Fq 'config_get_bool smarthqos "config" "smarthqos" "0"' "$INITD" ||
+    fail "init.d must default smarthqos through config_get_bool before numeric comparison"
+
+grep -Fq 'eqos start "$download" "$upload" "$comment" || return 1' "$INITD" ||
+    fail "init.d must stop configuration when eqos start rejects invalid global speeds"
+
+grep -Fq '/usr/sbin/loadbalance "$interface" || return 1' "$INITD" ||
+    fail "init.d must fail service start when loadbalance setup fails"
+
+grep -Fq 'EQOS_DEVICE_ERROR=0' "$INITD" ||
+    fail "init.d must track per-device apply failures"
+
+grep -Fq 'device apply failed' "$INITD" ||
+    fail "init.d must log failed per-device eqos add operations"
 
 grep -Fq -- '-m comment --comment "eqos_lb"' "$LOADBALANCE" ||
     fail "loadbalance route mark rules must be tagged with eqos_lb comment"
