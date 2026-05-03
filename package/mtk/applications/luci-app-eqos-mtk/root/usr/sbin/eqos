@@ -35,6 +35,101 @@ start_qos() {
     logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-06-03] install software tc IPv6 ingress redirect: dev=$dev, ifb=${dev}-ifb"
 }
 
+cleanup_eqos_route_tables() {
+    local reason="$1"
+    local _ci _om
+
+    for _ci in 0 1 2 3 4 5 6 7; do
+        _om=$(printf "0x%02x00" $((0x20 + _ci)))
+        while ip rule del fwmark ${_om}/0xff00 table "2${_ci}0" 2>/dev/null; do :; done
+        while ip rule del fwmark "2${_ci}" table "2${_ci}0" 2>/dev/null; do :; done
+        ip route flush table "2${_ci}0" 2>/dev/null
+    done
+    logger -p daemon.debug -t eqos "[EQOS-C-FQOS02-03-07] cleanup route tables: reason=$reason, high_fwmark=0x20-0x27, legacy_fwmark=20-27"
+}
+
+eqos_iface_by_index() {
+    local target="$1"
+    local iface_list ifname cur
+
+    iface_list=$(uci -q get eqos.config.interface | tr ',' ' ')
+    [ -n "$iface_list" ] || iface_list="wan wan2 wan3 wan4 wan5 wan6 wan7 wan8"
+
+    cur=0
+    for ifname in $iface_list; do
+        if [ "$cur" -eq "$target" ]; then
+            echo "$ifname"
+            return 0
+        fi
+        cur=$((cur + 1))
+    done
+    return 1
+}
+
+eqos_default_route_for_iface() {
+    local ifname="$1"
+
+    ip route show default | awk -v ifname="$ifname" '
+    {
+        gateway = "";
+        route_dev = "";
+        for (i = 1; i <= NF; i++) {
+            if ($i == "via") {
+                gateway = $(i + 1);
+            }
+            if ($i == "dev") {
+                route_dev = $(i + 1);
+            }
+        }
+        if (route_dev == ifname || route_dev ~ ("(^|[-_.])" ifname "$")) {
+            print gateway "|" route_dev;
+            exit;
+        }
+    }'
+}
+
+install_eqos_dev_route() {
+    local idx="$1"
+    local mark="$2"
+    local ip="$3"
+    local ifname route_info gateway route_dev table
+
+    table="2${idx}0"
+    ifname=$(eqos_iface_by_index "$idx") || {
+        logger -p daemon.err -t eqos "[EQOS-C-FQOS02-03-08] skip device WAN route: ip=$ip, interface=$idx, reason=no_interface_mapping"
+        return 1
+    }
+
+    route_info=$(eqos_default_route_for_iface "$ifname")
+    if [ -z "$route_info" ]; then
+        logger -p daemon.err -t eqos "[EQOS-C-FQOS02-03-09] skip device WAN route: ip=$ip, interface=$idx, ifname=$ifname, reason=no_default_route"
+        return 1
+    fi
+    gateway=${route_info%%|*}
+    route_dev=${route_info#*|}
+
+    while ip rule del fwmark ${mark}/0xff00 table "$table" 2>/dev/null; do :; done
+    while ip rule del fwmark "2${idx}" table "$table" 2>/dev/null; do :; done
+    ip route flush table "$table" 2>/dev/null
+    ip rule add fwmark ${mark}/0xff00 table "$table" || {
+        logger -p daemon.err -t eqos "[EQOS-C-FQOS02-03-10] install device WAN ip rule failed: ip=$ip, interface=$idx, ifname=$ifname, route_dev=$route_dev, mark=${mark}/0xff00, table=$table"
+        return 1
+    }
+    if [ -n "$gateway" ]; then
+        ip route add default via "$gateway" dev "$route_dev" table "$table" || {
+            logger -p daemon.err -t eqos "[EQOS-C-FQOS02-03-11] install device WAN route failed: ip=$ip, interface=$idx, ifname=$ifname, route_dev=$route_dev, gateway=$gateway, table=$table"
+            return 1
+        }
+    else
+        ip route add default dev "$route_dev" table "$table" || {
+            logger -p daemon.err -t eqos "[EQOS-C-FQOS02-03-11] install device WAN route failed: ip=$ip, interface=$idx, ifname=$ifname, route_dev=$route_dev, gateway=none, table=$table"
+            return 1
+        }
+    fi
+    logger -p daemon.debug -t eqos "[EQOS-C-FQOS02-03-12] install device WAN route: ip=$ip, interface=$idx, ifname=$ifname, route_dev=$route_dev, gateway=${gateway:-none}, mark=${mark}/0xff00, table=$table"
+    return 0
+}
+
 iptables_stop() {
     iptables -t mangle -D FORWARD  -j eqos
     ip6tables -t mangle -D FORWARD  -j eqos
@@ -66,6 +161,7 @@ iptables_stop() {
         -m comment --comment "eqos_dev" \
         -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
     logger -p daemon.debug -t eqos "[EQOS-C-FQOS02-03-06] stop cleanup device WAN save/restore rules"
+    cleanup_eqos_route_tables "eqos_stop"
 
     for i in $(seq 0 31); do
     echo 0 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq$i
@@ -127,22 +223,16 @@ iptables_start_inital() {
     iptables -t mangle -N eqos_dev 2>/dev/null
     iptables -t mangle -F eqos_dev
     iptables -t mangle -D PREROUTING -j eqos_dev 2>/dev/null
-    iptables -t mangle -I PREROUTING 2 -j eqos_dev
+    iptables -t mangle -A PREROUTING -j eqos_dev
+    cleanup_eqos_route_tables "eqos_start"
     iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \
         -m comment --comment "eqos_dev" \
         -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
-    iptables -t mangle -A POSTROUTING -m conntrack --ctstate NEW \
-        -m comment --comment "eqos_dev" \
-        -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00
     iptables -t mangle -D PREROUTING -i br-lan \
         -m conntrack --ctstate ESTABLISHED,RELATED \
         -m comment --comment "eqos_dev" \
         -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
-    iptables -t mangle -A PREROUTING -i br-lan \
-        -m conntrack --ctstate ESTABLISHED,RELATED \
-        -m comment --comment "eqos_dev" \
-        -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00
-    logger -p daemon.debug -t eqos "[EQOS-C-FQOS02-03-01] install device WAN save/restore rules: chain=eqos_dev, mask=0xFF00"
+    logger -p daemon.debug -t eqos "[EQOS-C-FQOS02-03-01] cleanup stale broad device WAN save/restore rules: chain=eqos_dev, mask=0xFF00"
 
     ipv6_en=$(uci -q get eqos.config.ipv6enabled || echo 0)
 
@@ -457,13 +547,23 @@ case "$1" in
                 ;;
             *)
                 if [ -n "$ip" ]; then
-                    rm_val=$(printf "0x%02x00" $((0x20 + interface)))
-                    # 路由标记写入 eqos_dev 专属子链（eqos start 时 flush，防止设备删除/stop 后残留）
-                    iptables -t mangle -D eqos_dev -s $ip -m conntrack --ctstate NEW -j MARK --set-xmark ${rm_val}/0xFF00 2>/dev/null
-                    iptables -t mangle -A eqos_dev -s $ip -m conntrack --ctstate NEW -j MARK --set-xmark ${rm_val}/0xFF00
-                    iptables -t mangle -D eqos_dev -i br-lan -s $ip -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
-                    iptables -t mangle -A eqos_dev -i br-lan -s $ip -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00
-                    logger -p daemon.debug -t eqos "[EQOS-C-FQOS02-03-03] install device WAN binding: ip=$ip, mac=$macaddr, interface=$interface, mark=${rm_val}/0xFF00"
+                    if [ "$interface" -gt 7 ]; then
+                        logger -p daemon.err -t eqos "[EQOS-C-FQOS02-03-13] skip device WAN binding with out-of-range interface: ip=$ip, mac=$macaddr, interface=$interface, valid_range=0-7"
+                    else
+                        rm_val=$(printf "0x%02x00" $((0x20 + interface)))
+                        if install_eqos_dev_route "$interface" "$rm_val" "$ip"; then
+                            # 路由标记写入 eqos_dev 专属子链（eqos start 时 flush，防止设备删除/stop 后残留）
+                            iptables -t mangle -D eqos_dev -s $ip -m conntrack --ctstate NEW -j MARK --set-xmark ${rm_val}/0xFF00 2>/dev/null
+                            iptables -t mangle -D eqos_dev -s $ip -m conntrack --ctstate NEW -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
+                            iptables -t mangle -A eqos_dev -s $ip -m conntrack --ctstate NEW -j MARK --set-xmark ${rm_val}/0xFF00
+                            iptables -t mangle -A eqos_dev -s $ip -m conntrack --ctstate NEW -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00
+                            iptables -t mangle -D eqos_dev -i br-lan -s $ip -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
+                            iptables -t mangle -A eqos_dev -i br-lan -s $ip -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00
+                            logger -p daemon.debug -t eqos "[EQOS-C-FQOS02-03-03] install device WAN binding: ip=$ip, mac=$macaddr, interface=$interface, mark=${rm_val}/0xFF00"
+                        else
+                            logger -p daemon.err -t eqos "[EQOS-C-FQOS02-03-14] skip device WAN binding after route install failure: ip=$ip, mac=$macaddr, interface=$interface, mark=${rm_val}/0xFF00"
+                        fi
+                    fi
                 else
                     logger -p daemon.err -t eqos "[EQOS-C-FQOS02-03-04] skip device WAN binding without IPv4 source: mac=$macaddr, interface=$interface"
                 fi

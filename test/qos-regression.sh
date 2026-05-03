@@ -176,22 +176,60 @@ grep -Fq 'while ip rule del fwmark ${_om}/0xff00 table "2${_ci}0"' "$LOADBALANCE
 grep -Fq 'while ip rule del fwmark "2${_ci}" table "2${_ci}0"' "$INITD" ||
     fail "init.d stop must cleanup legacy low-bit fwmark rules"
 
+grep -Fq 'cleanup_eqos_route_tables "eqos_start"' "$EQOS" ||
+    fail "eqos start must cleanup stale device WAN route tables before rebuilding rules"
+
+grep -Fq 'cleanup_eqos_route_tables "eqos_stop"' "$EQOS" ||
+    fail "eqos stop must cleanup device WAN route tables when called directly"
+
 grep -Fq -- '-m comment --comment "eqos_lb"' "$LOADBALANCE" ||
     fail "loadbalance route mark rules must be tagged with eqos_lb comment"
 
 grep -Fq -- '-m comment --comment "eqos_lb"' "$INITD" ||
     fail "init.d stop must delete the same comment-tagged eqos_lb rules it installs"
 
-grep -Fq -- '-m comment --comment "eqos_dev"' "$EQOS" ||
-    fail "eqos device WAN binding must install comment-tagged save/restore rules"
+grep -Fq 'iptables -t mangle -A PREROUTING -j eqos_dev' "$EQOS" ||
+    fail "eqos_dev PREROUTING jump must append safely before loadbalance inserts eqos_lb at rule 1"
+
+if grep -Fq 'iptables -t mangle -I PREROUTING 2 -j eqos_dev' "$EQOS"; then
+    fail "eqos_dev PREROUTING jump must not use fragile fixed insertion index 2"
+fi
+
+grep -Fq 'iface_list=$(uci -q get eqos.config.interface | tr' "$EQOS" ||
+    fail "device WAN route install must resolve interface mapping from eqos config"
+
+grep -Fq 'iface_list="wan wan2 wan3 wan4 wan5 wan6 wan7 wan8"' "$EQOS" ||
+    fail "device WAN route install must provide wan/wan2 fallback mapping"
+
+grep -Fq 'ip rule add fwmark ${mark}/0xff00 table "$table"' "$EQOS" ||
+    fail "device WAN binding must create independent high-bit ip rule"
+
+grep -Fq 'eqos_default_route_for_iface()' "$EQOS" ||
+    fail "device WAN binding must resolve actual default route dev and gateway"
+
+grep -Fq 'ip route add default via "$gateway" dev "$route_dev" table "$table"' "$EQOS" ||
+    fail "device WAN binding must create independent default route table with gateway when present"
+
+grep -Fq 'ip route add default dev "$route_dev" table "$table"' "$EQOS" ||
+    fail "device WAN binding must support point-to-point default routes without gateway"
 
 grep -Fq 'CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00' "$EQOS" ||
     fail "eqos device WAN binding must save high-bit connmark independently from loadbalance"
+
+grep -Fq 'iptables -t mangle -A eqos_dev -s $ip -m conntrack --ctstate NEW -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00' "$EQOS" ||
+    fail "eqos device WAN binding must scope CONNMARK save to the configured device IP"
+
+if grep -Fq 'iptables -t mangle -A POSTROUTING -m conntrack --ctstate NEW \' "$EQOS"; then
+    fail "eqos_dev must not install broad POSTROUTING save-mark rules"
+fi
 
 grep -Fq 'skip device WAN binding with legacy nonnumeric interface' "$EQOS" ||
     fail "eqos device WAN binding must reject legacy textual interface values"
 
 grep -Fq 'skip device WAN binding without IPv4 source' "$EQOS" ||
     fail "eqos device WAN binding must reject MAC-only or IPv6-only route binding"
+
+grep -Fq 'skip device WAN binding with out-of-range interface' "$EQOS" ||
+    fail "eqos device WAN binding must reject interface indexes outside 0-7"
 
 echo "qos regression checks passed"
