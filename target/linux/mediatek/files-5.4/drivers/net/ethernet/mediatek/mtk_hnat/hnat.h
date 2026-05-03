@@ -653,6 +653,9 @@ struct mtk_hnat_data {
 	enum mtk_hnat_version version;
 };
 
+/* 动态 VIP IP/MAC 表最大容量: 支持最多 64 个单设备 VIP */
+#define HNAT_VIP_MAX		64
+
 struct mtk_hnat {
 	struct device *dev;
 	void __iomem *fe_base;
@@ -908,8 +911,6 @@ enum FoeIpAct {
 #define IS_HQOS_MODE (qos_toggle == 1)
 #define IS_PPPQ_MODE (qos_toggle == 2)		/* Per Port Per Queue */
 #define MAX_PPPQ_PORT_NUM	6
-/* 动态 VIP IP 表最大容量: 支持最多 64 个任意 IP 的单设备 VIP */
-#define HNAT_VIP_MAX		64
 
 #define es(entry) (entry_state[entry->bfib1.state])
 #define ei(entry, end) (hnat_priv->foe_etry_num - (int)(end - entry))
