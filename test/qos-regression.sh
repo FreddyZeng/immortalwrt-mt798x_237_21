@@ -27,11 +27,14 @@ grep -Fq 'case "$dl" in' "$EQOS" ||
 grep -Fq 'case "$up" in' "$EQOS" ||
     fail "upload speed must be normalized before numeric comparisons"
 
-grep -Fq 'iptables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF' "$EQOS" ||
-    fail "configured VIP must install unified CONNMARK 46"
+grep -Fq '[ -n "$macaddr" ] && iptables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF' "$EQOS" ||
+    fail "configured VIP must guard MAC before installing CONNMARK 46"
 
-grep -Fq 'ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF' "$EQOS" ||
-    fail "configured VIP must install unified IPv6 CONNMARK 46"
+grep -Fq '[ -n "$ip" ] && iptables -t mangle -A eqos -s $ip -j CONNMARK --set-xmark 46/0xFF' "$EQOS" ||
+    fail "configured IPv4-only VIP upload must install source-IP CONNMARK 46"
+
+grep -Fq '[ "$ipv6_en" = "1" ] && [ -n "$macaddr" ] && ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF' "$EQOS" ||
+    fail "configured VIP must guard IPv6 MAC CONNMARK 46 by ipv6enabled and non-empty mac"
 
 grep -Fq 'iptables -t mangle -I eqos -s 192.168.0.0/16 -m u32 --u32 "0xc&0x0000FF00=0x00006E00:0x00007700" -m u32 --u32 "0xc&0x000000FF=0x0000000A:0x00000027" -j CONNMARK --set-xmark 46/0xFF' "$EQOS" ||
     fail "static VIP source range must install unified CONNMARK 46"
@@ -39,12 +42,30 @@ grep -Fq 'iptables -t mangle -I eqos -s 192.168.0.0/16 -m u32 --u32 "0xc&0x0000F
 grep -Fq 'iptables  -t mangle -A eqos_apply -m mark --mark 46/0xFF -j DSCP --set-dscp 46' "$EQOS" ||
     fail "global mark 46 to DSCP 46 translation is missing in eqos_apply"
 
-grep -Fq 'ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${xmark}/0xC0' "$EQOS" ||
-    fail "IPv6 hardware limit rule must set directional CONNMARK"
+grep -Fq '[ "$ipv6_en" = "1" ] && [ -n "$macaddr" ] && ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${xmark}/0xC0' "$EQOS" ||
+    fail "IPv6 hardware limit rule must set directional CONNMARK only with ipv6enabled and non-empty mac"
 
 UP_LIMIT_BLOCK=$(sed -n '/if \[ \$xmark -ne 0 \]; then/,/fi/p' "$EQOS")
-echo "$UP_LIMIT_BLOCK" | grep -Fq 'iptables  -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${xmark}/0xC0' ||
-    fail "unified limit CONNMARK 0xC0 rule must be installed"
+echo "$UP_LIMIT_BLOCK" | grep -Fq '[ -n "$macaddr" ] && iptables  -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${xmark}/0xC0' ||
+    fail "unified limit CONNMARK 0xC0 MAC rule must guard non-empty mac"
+
+echo "$UP_LIMIT_BLOCK" | grep -Fq '[ -n "$ip" ] && iptables  -t mangle -A eqos -s $ip -j CONNMARK --set-xmark ${xmark}/0xC0' ||
+    fail "IPv4-only hardware upload limit must install source-IP CONNMARK 0xC0 rule"
+
+grep -Fq 'dev_key="mac_${macaddr}"' "$EQOS" ||
+    fail "hardware limit state key must prefer non-empty mac address"
+
+grep -Fq 'dev_key="ip_${ip}"' "$EQOS" ||
+    fail "hardware limit state key must fall back to IPv4 address"
+
+grep -Fq 'old_up_file="/tmp/eqos_dev_up_${dev_key}"' "$EQOS" ||
+    fail "hardware upload limit state file must use normalized device key"
+
+grep -Fq 'old_dl_file="/tmp/eqos_dev_dl_${dev_key}"' "$EQOS" ||
+    fail "hardware download limit state file must use normalized device key"
+
+grep -Fq 'skip device without ip/mac' "$EQOS" ||
+    fail "device add must reject empty ip and empty mac before rule generation"
 
 if grep -Eq 'ebtables -t nat .* eqos' "$EQOS"; then
     fail "ebtables rules must be completely removed from eqos script"
@@ -146,10 +167,31 @@ if grep -Fq -- '--packet "$_ci"' "$LOADBALANCE"; then
     fail "loadbalance cleanup must not bind nth packet index to cfg index"
 fi
 
+grep -Fq 'while ip rule del fwmark "2${_ci}" table "2${_ci}0"' "$LOADBALANCE" ||
+    fail "loadbalance must cleanup legacy low-bit fwmark rules"
+
+grep -Fq 'while ip rule del fwmark ${_om}/0xff00 table "2${_ci}0"' "$LOADBALANCE" ||
+    fail "loadbalance must cleanup all masked high-bit fwmark rules with table match"
+
+grep -Fq 'while ip rule del fwmark "2${_ci}" table "2${_ci}0"' "$INITD" ||
+    fail "init.d stop must cleanup legacy low-bit fwmark rules"
+
 grep -Fq -- '-m comment --comment "eqos_lb"' "$LOADBALANCE" ||
     fail "loadbalance route mark rules must be tagged with eqos_lb comment"
 
 grep -Fq -- '-m comment --comment "eqos_lb"' "$INITD" ||
     fail "init.d stop must delete the same comment-tagged eqos_lb rules it installs"
+
+grep -Fq -- '-m comment --comment "eqos_dev"' "$EQOS" ||
+    fail "eqos device WAN binding must install comment-tagged save/restore rules"
+
+grep -Fq 'CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00' "$EQOS" ||
+    fail "eqos device WAN binding must save high-bit connmark independently from loadbalance"
+
+grep -Fq 'skip device WAN binding with legacy nonnumeric interface' "$EQOS" ||
+    fail "eqos device WAN binding must reject legacy textual interface values"
+
+grep -Fq 'skip device WAN binding without IPv4 source' "$EQOS" ||
+    fail "eqos device WAN binding must reject MAC-only or IPv6-only route binding"
 
 echo "qos regression checks passed"

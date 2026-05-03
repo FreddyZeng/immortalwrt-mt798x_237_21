@@ -58,6 +58,14 @@ iptables_stop() {
     iptables -t mangle -D PREROUTING -j eqos_dev 2>/dev/null
     iptables -t mangle -F eqos_dev 2>/dev/null
     iptables -t mangle -X eqos_dev 2>/dev/null
+    iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \
+        -m comment --comment "eqos_dev" \
+        -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
+    iptables -t mangle -D PREROUTING -i br-lan \
+        -m conntrack --ctstate ESTABLISHED,RELATED \
+        -m comment --comment "eqos_dev" \
+        -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
+    logger -p daemon.debug -t eqos "[EQOS-C-FQOS02-03-06] stop cleanup device WAN save/restore rules"
 
     for i in $(seq 0 31); do
     echo 0 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq$i
@@ -120,6 +128,21 @@ iptables_start_inital() {
     iptables -t mangle -F eqos_dev
     iptables -t mangle -D PREROUTING -j eqos_dev 2>/dev/null
     iptables -t mangle -I PREROUTING 2 -j eqos_dev
+    iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \
+        -m comment --comment "eqos_dev" \
+        -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
+    iptables -t mangle -A POSTROUTING -m conntrack --ctstate NEW \
+        -m comment --comment "eqos_dev" \
+        -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00
+    iptables -t mangle -D PREROUTING -i br-lan \
+        -m conntrack --ctstate ESTABLISHED,RELATED \
+        -m comment --comment "eqos_dev" \
+        -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
+    iptables -t mangle -A PREROUTING -i br-lan \
+        -m conntrack --ctstate ESTABLISHED,RELATED \
+        -m comment --comment "eqos_dev" \
+        -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00
+    logger -p daemon.debug -t eqos "[EQOS-C-FQOS02-03-01] install device WAN save/restore rules: chain=eqos_dev, mask=0xFF00"
 
     ipv6_en=$(uci -q get eqos.config.ipv6enabled || echo 0)
 
@@ -285,6 +308,14 @@ case "$1" in
 
     raw_id="$id"
     ipv6_en=$(uci -q get eqos.config.ipv6enabled || echo 0)
+    if [ -n "$macaddr" ]; then
+        dev_key="mac_${macaddr}"
+    elif [ -n "$ip" ]; then
+        dev_key="ip_${ip}"
+    else
+        logger -p daemon.err -t eqos "[EQOS-C-FQOS01-07-01] skip device without ip/mac: raw_mode=$raw_id, dl=$dl, up=$up"
+        exit 0
+    fi
     case "$id" in
         ''|*[!0-9]*)
             logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-01] legacy qos mode fallback: ip=$ip, raw_mode=$raw_id, normalized_mode=0"
@@ -297,29 +328,31 @@ case "$1" in
 
     if [ "$id" -eq 64 ]; then
         # 清理旧规则
-        iptables -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF 2>/dev/null
+        [ -n "$macaddr" ] && iptables -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF 2>/dev/null
+        [ -n "$ip" ] && iptables -t mangle -D eqos -s $ip -j CONNMARK --set-xmark 46/0xFF 2>/dev/null
         [ -n "$ip" ] && iptables -t mangle -D eqos -d $ip -j CONNMARK --set-xmark 46/0xFF 2>/dev/null
-        ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF 2>/dev/null
+        [ "$ipv6_en" = "1" ] && [ -n "$macaddr" ] && ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF 2>/dev/null
 
         # 重新应用新规则 (带掩码保护高位 mark)
-        iptables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF
+        [ -n "$macaddr" ] && iptables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF
+        [ -n "$ip" ] && iptables -t mangle -A eqos -s $ip -j CONNMARK --set-xmark 46/0xFF
         [ -n "$ip" ] && iptables -t mangle -A eqos -d $ip -j CONNMARK --set-xmark 46/0xFF
-        [ "$ipv6_en" = "1" ] && ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF
-        logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-04] install unified VIP marker: mac=$macaddr, ip=$ip, connmark=46"
+        [ "$ipv6_en" = "1" ] && [ -n "$macaddr" ] && ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF
+        logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-04] install unified VIP marker: key=$dev_key, mac=$macaddr, ip=$ip, connmark=46"
 
     elif [ "$id" -lt 64 ]; then
         # 限速设备: bit6(0x40)=上行限速→Q31, bit7(0x80)=下行限速→Q63
         # 方案B: 穷举删除所有可能的旧限速规则（防止规则泄漏）
         for _xm in 0x40 0x80 0xC0; do
-            iptables  -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${_xm}/0xC0 2>/dev/null
+            [ -n "$macaddr" ] && iptables  -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${_xm}/0xC0 2>/dev/null
+            [ -n "$ip" ] && iptables  -t mangle -D eqos -s $ip -j CONNMARK --set-xmark ${_xm}/0xC0 2>/dev/null
             [ -n "$ip" ] && iptables  -t mangle -D eqos -d $ip -j CONNMARK --set-xmark ${_xm}/0xC0 2>/dev/null
-            ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${_xm}/0xC0 2>/dev/null
+            [ "$ipv6_en" = "1" ] && [ -n "$macaddr" ] && ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${_xm}/0xC0 2>/dev/null
         done
 
         # 检查该设备是否已有记录, 如有则减去其旧速率后再加新速率
-        # [P1-Fix] 使用唯一的 macaddr 作为缓存文件名，防止 IPv6-only (IP为空) 时不同设备发生文件碰撞
-        old_up_file="/tmp/eqos_dev_up_${macaddr}"
-        old_dl_file="/tmp/eqos_dev_dl_${macaddr}"
+        old_up_file="/tmp/eqos_dev_up_${dev_key}"
+        old_dl_file="/tmp/eqos_dev_dl_${dev_key}"
         old_up=$(cat "$old_up_file" 2>/dev/null || echo 0)
         old_dl=$(cat "$old_dl_file" 2>/dev/null || echo 0)
 
@@ -356,10 +389,11 @@ case "$1" in
         [ $up -ne 0 ] && xmark=$((xmark | 0x40))
         [ $dl -ne 0 ] && xmark=$((xmark | 0x80))
         if [ $xmark -ne 0 ]; then
-            iptables  -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${xmark}/0xC0
+            [ -n "$macaddr" ] && iptables  -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${xmark}/0xC0
+            [ -n "$ip" ] && iptables  -t mangle -A eqos -s $ip -j CONNMARK --set-xmark ${xmark}/0xC0
             [ -n "$ip" ] && iptables  -t mangle -A eqos -d $ip -j CONNMARK --set-xmark ${xmark}/0xC0
-            [ "$ipv6_en" = "1" ] && ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${xmark}/0xC0
-            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-05-③] install directional limit marker: mac=$macaddr, ip=$ip, xmark=${xmark}/0xC0, up=${up}, dl=${dl}"
+            [ "$ipv6_en" = "1" ] && [ -n "$macaddr" ] && ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${xmark}/0xC0
+            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-05-03] install directional limit marker: key=$dev_key, mac=$macaddr, ip=$ip, xmark=${xmark}/0xC0, up=${up}, dl=${dl}"
         fi
 
         if [ $up -ne 0 ]; then
@@ -417,12 +451,24 @@ case "$1" in
 
     # per-device WAN 路由选择: 指定接口序号则锁定到对应 WAN 出口
     if [ "$interface" ]; then
-        rm_val=$(printf "0x%02x00" $((0x20 + interface)))
-        # 路由标记写入 eqos_dev 专属子链（eqos start 时 flush，防止设备删除/stop 后残留）
-        iptables -t mangle -D eqos_dev -s $ip -m conntrack --ctstate NEW -j MARK --set-xmark ${rm_val}/0xFF00 2>/dev/null
-        iptables -t mangle -A eqos_dev -s $ip -m conntrack --ctstate NEW -j MARK --set-xmark ${rm_val}/0xFF00
-        iptables -t mangle -D eqos_dev -i br-lan -s $ip -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
-        iptables -t mangle -A eqos_dev -i br-lan -s $ip -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00
+        case "$interface" in
+            *[!0-9]*)
+                logger -p daemon.warn -t eqos "[EQOS-C-FQOS02-03-02] skip device WAN binding with legacy nonnumeric interface: ip=$ip, mac=$macaddr, interface=$interface"
+                ;;
+            *)
+                if [ -n "$ip" ]; then
+                    rm_val=$(printf "0x%02x00" $((0x20 + interface)))
+                    # 路由标记写入 eqos_dev 专属子链（eqos start 时 flush，防止设备删除/stop 后残留）
+                    iptables -t mangle -D eqos_dev -s $ip -m conntrack --ctstate NEW -j MARK --set-xmark ${rm_val}/0xFF00 2>/dev/null
+                    iptables -t mangle -A eqos_dev -s $ip -m conntrack --ctstate NEW -j MARK --set-xmark ${rm_val}/0xFF00
+                    iptables -t mangle -D eqos_dev -i br-lan -s $ip -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
+                    iptables -t mangle -A eqos_dev -i br-lan -s $ip -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00
+                    logger -p daemon.debug -t eqos "[EQOS-C-FQOS02-03-03] install device WAN binding: ip=$ip, mac=$macaddr, interface=$interface, mark=${rm_val}/0xFF00"
+                else
+                    logger -p daemon.err -t eqos "[EQOS-C-FQOS02-03-04] skip device WAN binding without IPv4 source: mac=$macaddr, interface=$interface"
+                fi
+                ;;
+        esac
     fi
     ;;
     *)

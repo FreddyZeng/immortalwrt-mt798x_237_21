@@ -69,9 +69,12 @@ iptables -t mangle -D PREROUTING -j eqos_lb 2>/dev/null
 # ── 3. 清理旧 ip rule / ip route（覆盖 WAN 数量减少场景）────────────────
 for _ci in 0 1 2 3 4 5 6 7; do
     _om=$(printf "0x%02x00" $((0x20 + _ci)))
-    ip rule del fwmark ${_om}/0xff00 2>/dev/null
+    while ip rule del fwmark ${_om}/0xff00 table "2${_ci}0" 2>/dev/null; do :; done
+    while ip rule del fwmark "2${_ci}" table "2${_ci}0" 2>/dev/null; do :; done
     ip route flush table "2${_ci}0" 2>/dev/null
 done
+logger -p daemon.debug -t loadbalance \
+    "[LB-C-FQOS02-03-01] cleanup route rules: high_fwmark=0x20-0x27, legacy_fwmark=20-27, tables=200-270"
 
 # ── 4. 构建可用 WAN 列表，cfg_idx 保留原始位置 ───────────────────────────
 _tmp=$(mktemp /tmp/eqos_lb_avail.XXXXXX)

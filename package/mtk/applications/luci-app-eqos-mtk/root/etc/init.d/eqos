@@ -90,9 +90,11 @@ stop_service() {
 	# 清理所有 WAN 的 ip rule 和 ip route（最多 8 个 WAN，覆盖配置减少场景）
 	for _ci in 0 1 2 3 4 5 6 7; do
 		_om=$(printf "0x%02x00" $((0x20 + _ci)))
-		ip rule del fwmark ${_om}/0xff00 2>/dev/null
+		while ip rule del fwmark ${_om}/0xff00 table "2${_ci}0" 2>/dev/null; do :; done
+		while ip rule del fwmark "2${_ci}" table "2${_ci}0" 2>/dev/null; do :; done
 		ip route flush table "2${_ci}0" 2>/dev/null
 	done
+	logger -p daemon.debug -t eqos "[EQOS-C-FQOS02-03-05] stop cleanup route rules: high_fwmark=0x20-0x27, legacy_fwmark=20-27"
 	ip route flush cache
 	rm -f /etc/hotplug.d/dhcp/99-eqos
 }
