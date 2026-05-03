@@ -356,6 +356,10 @@ case "$1" in
     echo 0 > /tmp/eqos_q31_rate
     echo 0 > /tmp/eqos_q63_rate
     rm -f /tmp/eqos_dev_up_* /tmp/eqos_dev_dl_*
+    # [HNAT-C-VIP-03] start 时先清空内核动态 VIP 表, 确保从干净状态重建
+    # start 只调用 stop_qos 不调用 iptables_stop, 必须在此单独 flush
+    echo flush > /sys/kernel/debug/hnat/vip_list 2>/dev/null
+    logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-04-02] flush kernel vip_list on start"
     iptables_start_prepare
         start_qos "$global_dl" "$global_up"
     iptables_start_inital
