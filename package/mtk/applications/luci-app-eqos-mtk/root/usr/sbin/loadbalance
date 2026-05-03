@@ -17,10 +17,25 @@ lb_cleanup_route_tables() {
         "[LB-C-FQOS02-03-01] cleanup route rules: reason=$reason, high_fwmark=0x20-0x27, legacy_fwmark=20-27, tables=200-270"
 }
 
+lb_cleanup_global_marks() {
+    reason="$1"
+    iptables -t mangle -D PREROUTING -j eqos_lb 2>/dev/null
+    iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \
+        -m comment --comment "eqos_lb" \
+        -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
+    iptables -t mangle -D PREROUTING -i br-lan \
+        -m conntrack --ctstate ESTABLISHED,RELATED \
+        -m comment --comment "eqos_lb" \
+        -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
+    logger -p daemon.debug -t loadbalance \
+        "[LB-C-FQOS02-03-21] cleanup global mark rules: reason=$reason, chain=eqos_lb, mask=0xFF00"
+}
+
 lb_abort() {
     reason="$1"
     rm -f "$_tmp"
     iptables -t mangle -F eqos_lb 2>/dev/null
+    lb_cleanup_global_marks "$reason"
     lb_cleanup_route_tables "$reason"
     exit 1
 }
@@ -105,7 +120,7 @@ logger -p daemon.debug -t loadbalance \
 # ── 2. 创建/清空专属子链 ──────────────────────────────────────────────────
 iptables -t mangle -N eqos_lb 2>/dev/null
 iptables -t mangle -F eqos_lb
-iptables -t mangle -D PREROUTING -j eqos_lb 2>/dev/null
+lb_cleanup_global_marks "loadbalance_start"
 
 # ── 3. 清理旧 ip rule / ip route（覆盖 WAN 数量减少场景）────────────────
 lb_cleanup_route_tables "loadbalance_start"
@@ -153,7 +168,7 @@ done
 
 if [ "$PPP_NUM" -eq 0 ]; then
     logger -p daemon.err -t loadbalance "[LB-C-FQOS02-03-06] no available WAN, abort"
-    rm -f "$_tmp"; exit 1
+    lb_abort "no_available_wan"
 fi
 
 # HTTPS 固定出口：首个可用 WAN 的 cfg_idx（非硬编码 0x2000）

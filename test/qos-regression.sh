@@ -190,6 +190,21 @@ grep -Fq 'lb_abort "route_failed"' "$LOADBALANCE" ||
 grep -Fq 'lb_abort "jump_failed"' "$LOADBALANCE" ||
     fail "loadbalance PREROUTING jump failure must cleanup partial route/rule state"
 
+grep -Fq 'lb_cleanup_global_marks()' "$LOADBALANCE" ||
+    fail "loadbalance must provide a shared cleanup for global eqos_lb mark rules"
+
+grep -Fq 'lb_cleanup_global_marks "$reason"' "$LOADBALANCE" ||
+    fail "loadbalance abort path must cleanup global eqos_lb save/restore rules"
+
+grep -Fq 'lb_cleanup_global_marks "loadbalance_start"' "$LOADBALANCE" ||
+    fail "loadbalance start must cleanup stale global eqos_lb save/restore rules before rebuilding"
+
+grep -Fq 'lb_abort "no_available_wan"' "$LOADBALANCE" ||
+    fail "loadbalance no-WAN path must use abort cleanup instead of raw exit"
+
+grep -Fq 'iptables -t mangle -D PREROUTING -j eqos_lb 2>/dev/null' "$LOADBALANCE" ||
+    fail "loadbalance cleanup must detach eqos_lb PREROUTING jump"
+
 grep -Fq 'gateway=none' "$LOADBALANCE" ||
     fail "loadbalance diagnostics must distinguish point-to-point routes without gateway"
 
