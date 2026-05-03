@@ -20,3 +20,19 @@
 - `loadbalance` 脚本必须为 POSIX sh 兼容（不得使用 bash 专有数组语法 `array=()`），避免在无 bash 固件上运行失败。
 - 路由标记使用 `bits[15:8]` (掩码 `0xFF00`)，与 QoS 语义标记 `bits[7:0]` 完全隔离；`iptables --set-xmark` 和 `ip rule fwmark` 均需携带 `/0xFF00` 掩码，防止覆盖 QoS 低位。
 - `init.d/eqos` 调用 loadbalance 不得硬依赖 `bash`，直接执行 POSIX 脚本。
+
+## 4. 宽基线回归需求
+<!-- CID: C-FQOS01-07 | BID: B-010 | commit: pending | 日期: 2026-05-03 -->
+- IPv6 `eqos` 和 `eqos_apply` 链必须只有一个所有者：`/usr/sbin/eqos`。init.d 不得二次 flush 或追加 IPv6 FORWARD jump，避免 NEW 首包路径被重排为 `eqos_apply -> eqos`。
+- Software tc 模式不得写入旧 `MARK 0x99` 规则；旧 MARK 只能被清理，不能作为新规则安装，避免 HNAT 把 bit7 误识别为硬件下行限速。
+- LuCI 包安装树不得携带旧版 `eqos_origin` 运行脚本，避免旧 MARK/DSCP 架构被安装到固件。
+
+## 5. 构建与预安装稳定性需求
+<!-- CID: C-FQOS01-08 | BID: B-011 | commit: pending | 日期: 2026-05-03 -->
+- MT7986 内核配置与 N60 PRO 构建配置新增项必须保持 `CONFIG_SYMBOL=value` 纯值格式，说明文字只能写在独立注释行，避免 Kconfig/OpenWrt `.config` 解析 QoS/Netfilter 依赖时失效。
+- 预安装脚本必须区分目录不存在、目录为空、存在 ipk、安装失败四种状态；仅在存在 ipk 且 `opkg install` 成功后清理 `/etc/pre_install`。
+
+## 6. 多 WAN 生命周期触发需求
+<!-- CID: C-FQOS01-09 | BID: B-012 | commit: pending | 日期: 2026-05-03 -->
+- 接口 up trigger 必须覆盖 `eqos.config.interface` 中配置的全部 WAN 接口；未配置时必须覆盖 `wan..wan8`，与路由 mark/table 的 8 路索引范围一致。
+- `sqm` 联动 trigger 必须在 `/etc/init.d/sqm` 存在且可执行时注册，避免无 sqm 镜像出现无效 trigger 动作。

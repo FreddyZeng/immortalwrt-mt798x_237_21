@@ -412,9 +412,12 @@ CONFIG_PACKAGE_ip-full=y
 
 CONFIG_PACKAGE_conntrack=y
 CONFIG_PACKAGE_kmod-nf-conntrack=y
-CONFIG_PACKAGE_kmod-nf-conntrack6=y      # 如果需要 IPv6 支持
-CONFIG_PACKAGE_kmod-ipt-conntrack=y       # 仅当你需要 iptables 层面的连接跟踪模块
-CONFIG_PACKAGE_kmod-ipt-conntrack-extra=y # （可选）启用 conntrack 的扩展支持
+# IPv6 conntrack support
+CONFIG_PACKAGE_kmod-nf-conntrack6=y
+# iptables conntrack match support
+CONFIG_PACKAGE_kmod-ipt-conntrack=y
+# extended iptables conntrack match support
+CONFIG_PACKAGE_kmod-ipt-conntrack-extra=y
 
 CONFIG_PACKAGE_unzip=y
 

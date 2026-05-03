@@ -1,6 +1,23 @@
 #!/bin/sh
 
-[ -n "$(ls /etc/pre_install)" ] && opkg install /etc/pre_install/*.ipk --force-depends
-rm -rf /etc/pre_install
+pre_install_dir="/etc/pre_install"
+
+if [ -d "$pre_install_dir" ]; then
+    set -- "$pre_install_dir"/*.ipk
+    if [ -e "$1" ]; then
+        logger -p daemon.debug -t install_all_files "[INSTALL-B011-01] pre-install ipk install start: dir=$pre_install_dir, first_pkg=$1"
+        opkg install "$@" --force-depends || {
+            logger -p daemon.err -t install_all_files "[INSTALL-B011-02] pre-install ipk install failed: dir=$pre_install_dir, first_pkg=$1"
+            exit 1
+        }
+        logger -p daemon.debug -t install_all_files "[INSTALL-B011-03] pre-install ipk install complete: dir=$pre_install_dir"
+    else
+        logger -p daemon.debug -t install_all_files "[INSTALL-B011-04] pre-install directory has no ipk files: dir=$pre_install_dir"
+    fi
+    rm -rf "$pre_install_dir"
+    logger -p daemon.debug -t install_all_files "[INSTALL-B011-05] pre-install directory cleaned: dir=$pre_install_dir"
+else
+    logger -p daemon.debug -t install_all_files "[INSTALL-B011-06] pre-install directory missing: dir=$pre_install_dir"
+fi
 
 exit 0

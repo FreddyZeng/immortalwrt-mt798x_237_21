@@ -29,11 +29,11 @@ end
 if luci.http.formvalue("status") == "1" then
 	local rv = {
 		onlines   = online_data()
-	}	
+	}
 	luci.http.prepare_content("application/json")
 	luci.http.write_json(rv)
 	return
-end	
+end
 -%>
 
 <%+header%>

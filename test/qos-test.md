@@ -18,6 +18,22 @@
 - CAKE 最高 tin 修复必须由 `9999995-fix-cake-highest-tin-guard.patch` 承载，并在 VIP、109 小 UDP、priority、mark、DSCP 路径同时检查 `q->tin_cnt > 1`。
 - `docs/verify-vip-qos.sh` 的队列展示必须与 HNAT `dscp_to_queue()` 和可信 mark 例外一致：Q0 为上行 VIP DSCP46，Q32 为可信 DSCP46/MARK46 VIP 下行，Q1/Q33 为 CS6/CS7，Q2/Q34 为 CS4/CS5/VA，Q31/Q63 为 MARK0x40/MARK0x80 方向限速队列。
 
+## 5. 宽基线链顺序与遗留脚本回归测试
+<!-- CID: C-FQOS01-07 | BID: B-010 | commit: pending | 日期: 2026-05-03 -->
+- `init.d/eqos` 不得在 `/usr/sbin/eqos start` 后再次 flush 或追加 IPv6 `eqos` FORWARD jump；IPv6 链顺序必须由 `/usr/sbin/eqos` 单点安装为 `eqos -> eqos_apply`。
+- Software tc 模式不得追加旧 `MARK --set-xmark 0x99/0xFF` 规则，只允许清理历史残留；否则低 8 位 bit7 会被 HNAT 误判为下行限速。
+- `root/usr/sbin` 不得安装 `eqos_origin` 旧脚本。
+
+## 6. 构建配置与预安装脚本回归测试
+<!-- CID: C-FQOS01-08 | BID: B-011 | commit: pending | 日期: 2026-05-03 -->
+- `target/linux/mediatek/mt7986/config-5.4` 与 `n60_pro_config_full_new` 不得出现 `CONFIG_*=y/m` 后跟行内注释的配置行。
+- `install_all_files` 必须通过 `sh -n`，必须先检查 `/etc/pre_install` 目录和 `*.ipk` 是否存在，且 `opkg install` 失败时必须返回非零并保留目录。
+
+## 7. 多 WAN 接口触发器回归测试
+<!-- CID: C-FQOS01-09 | BID: B-012 | commit: pending | 日期: 2026-05-03 -->
+- `init.d/eqos` 的 `service_triggers()` 必须读取 `eqos.config.interface` 并循环注册 trigger，不能只硬编码 `wan/wan2/wan3`。
+- 未配置接口列表时必须有 `wan..wan8` 兜底；sqm trigger 必须有 `/etc/init.d/sqm` 可执行检查。
+
 ## 3. CONNMARK 首包还原测试
 <!-- CID: C-FQOS01-05 | BID: B-008 | commit: pending | 日期: 2026-05-02 -->
 - `eqos_apply` 的 `CONNMARK --restore-mark` 必须覆盖 `NEW,ESTABLISHED,RELATED` 三态。

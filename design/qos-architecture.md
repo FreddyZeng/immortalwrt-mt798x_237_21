@@ -39,3 +39,20 @@
 - `loadbalance` 完全重写为 POSIX sh，移除 bash 专有数组语法 `array=()`、`${//}` 字符串替换和 `let` 算术，改用 `tr ','  ' '`、`$(())`，添加 `#!/bin/sh` shebang。
 - `init.d/eqos` 直接执行 `/usr/sbin/loadbalance`，不再通过 `bash` 调用。
 - 路由 mark 格式 `printf "0x%02x00" $((0x20 + i))`，确保 bits[15:8] 非零且各 WAN 接口互不重叠，掩码 `/0xFF00` 全程携带。
+
+## 6. 链生命周期单一所有者
+<!-- CID: C-FQOS01-07 | BID: B-010 | commit: pending | 日期: 2026-05-03 -->
+- IPv6 `eqos`/`eqos_apply` 链只由 `/usr/sbin/eqos` 管理，init.d 不再二次 flush 或追加 IPv6 FORWARD jump，保证首包路径固定为 `eqos -> eqos_apply`。
+- Software tc 与 HNAT 语义 mark 隔离：软件限速只安装 tc class/filter，不再追加旧 `MARK 0x99`；历史 MARK 残留只做循环清理。
+- LuCI 包安装树只保留当前运行脚本，旧 `eqos_origin` 不进入 `root/usr/sbin`。
+
+## 7. 构建配置与预安装脚本边界
+<!-- CID: C-FQOS01-08 | BID: B-011 | commit: pending | 日期: 2026-05-03 -->
+- `config-5.4` 与 `n60_pro_config_full_new` 的新增 QoS/Netfilter 依赖使用独立注释行解释用途，配置行本身不携带行内注释，确保 Kconfig/OpenWrt `.config` 输入可被稳定解析。
+- `install_all_files` 以目录存在性和 glob 结果作为状态机入口：目录不存在直接成功退出，目录为空只清理空目录，存在 ipk 时执行 `opkg install "$@" --force-depends`，安装失败立即保留现场并返回非零。
+
+## 8. 多 WAN 生命周期触发器
+<!-- CID: C-FQOS01-09 | BID: B-012 | commit: pending | 日期: 2026-05-03 -->
+- `service_triggers()` 从 `eqos.config.interface` 派生接口列表，和 `loadbalance` 使用的配置来源保持一致。
+- 未配置接口列表时使用 `wan wan2 wan3 wan4 wan5 wan6 wan7 wan8` 兜底，覆盖全部 `0x20..0x27` route mark/table。
+- 每个接口注册 eqos restart trigger；sqm restart trigger 仅在 `/etc/init.d/sqm` 可执行时注册。

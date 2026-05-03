@@ -41,15 +41,6 @@ start_service() {
 	config_get interface "config" "interface" ""
 	eqos start "$download" "$upload" "$comment" || return 1
 	
-	local ipv6enabled
-	config_get_bool ipv6enabled "config" "ipv6enabled" "0"
-	if [ "$ipv6enabled" -eq "1" ]; then
-		ip6tables -t mangle -N eqos 2>/dev/null
-		ip6tables -t mangle -F eqos
-		ip6tables -t mangle -D FORWARD  -j eqos
-		ip6tables -t mangle -A FORWARD  -j eqos
-	fi
-
 	if [ "$smarthqos" -eq "1" ]; then
 		# 上行 per-user 队列: Q5-Q29 (跳过 Q0-Q4 优先队列, Q30 背景, Q31 限速)
 		for i in $(seq 5 29); do
@@ -111,10 +102,14 @@ reload_service() {
 
 service_triggers() {
 	procd_add_reload_trigger "eqos"
-    procd_add_interface_trigger 'interface.*.up' wan /etc/init.d/eqos restart
-    procd_add_interface_trigger 'interface.*.up' wan2 /etc/init.d/eqos restart
-    procd_add_interface_trigger 'interface.*.up' wan3 /etc/init.d/eqos restart
-    procd_add_interface_trigger 'interface.*.up' wan /etc/init.d/sqm restart
-    procd_add_interface_trigger 'interface.*.up' wan2 /etc/init.d/sqm restart
-    procd_add_interface_trigger 'interface.*.up' wan3 /etc/init.d/sqm restart
+	local interface ifname
+
+	config_load eqos
+	config_get interface "config" "interface" ""
+	interface=$(echo "${interface:-wan wan2 wan3 wan4 wan5 wan6 wan7 wan8}" | tr ',' ' ')
+	logger -p daemon.debug -t eqos "[EQOS-C-FQOS02-03-16] install interface triggers: interfaces=$interface"
+	for ifname in $interface; do
+		procd_add_interface_trigger 'interface.*.up' "$ifname" /etc/init.d/eqos restart
+		[ -x /etc/init.d/sqm ] && procd_add_interface_trigger 'interface.*.up' "$ifname" /etc/init.d/sqm restart
+	done
 }

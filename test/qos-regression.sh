@@ -10,6 +10,9 @@ HNAT_HOOK="$ROOT/target/linux/mediatek/files-5.4/drivers/net/ethernet/mediatek/m
 MTK_ETH="$ROOT/target/linux/mediatek/files-5.4/drivers/net/ethernet/mediatek/mtk_eth_soc.c"
 CAKE_PATCH="$ROOT/target/linux/mediatek/patches-5.4/9999995-fix-cake-highest-tin-guard.patch"
 VERIFY_QOS="$ROOT/docs/verify-vip-qos.sh"
+MT7986_CONFIG="$ROOT/target/linux/mediatek/mt7986/config-5.4"
+N60_PRO_CONFIG="$ROOT/n60_pro_config_full_new"
+INSTALL_ALL="$ROOT/install_all_files"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -209,6 +212,29 @@ if grep -Fq '2>/dev/null || true' "$EQOS"; then
     fail "software tc IPv6 rule installation must not silently ignore failures"
 fi
 
+if grep -Fq 'iptables -t mangle -A eqos -s $ip -j MARK --set-xmark 0x99/0xFF' "$EQOS" ||
+   grep -Fq 'iptables -t mangle -A eqos -d $ip -j MARK --set-xmark 0x99/0xFF' "$EQOS"; then
+    fail "software tc mode must not install legacy MARK 0x99 rules because HNAT treats low-bit 0x80 as hardware download limit"
+fi
+
+grep -Fq 'cleanup legacy software tc MARK rules' "$EQOS" ||
+    fail "software tc mode must cleanup stale legacy MARK 0x99 rules before installing tc filters"
+
+if [ -e "$ROOT/package/mtk/applications/luci-app-eqos-mtk/root/usr/sbin/eqos_origin" ]; then
+    fail "luci-app-eqos-mtk must not ship stale eqos_origin script under root/usr/sbin"
+fi
+
+if grep -Fq 'ip6tables -t mangle -A FORWARD  -j eqos' "$INITD" ||
+   grep -Fq 'ip6tables -t mangle -F eqos' "$INITD"; then
+    fail "init.d must not reorder IPv6 eqos/eqos_apply chains after /usr/sbin/eqos start"
+fi
+
+grep -Fq 'while ip6tables -t mangle -D FORWARD -j eqos 2>/dev/null; do :; done' "$EQOS" ||
+    fail "eqos start must remove duplicate IPv6 eqos jumps before appending chain order"
+
+grep -Fq 'install IPv6 eqos chain order: eqos before eqos_apply' "$EQOS" ||
+    fail "eqos must log IPv6 eqos/eqos_apply chain order installation"
+
 if grep -Fq 'iptables-save -t mangle' "$LOADBALANCE"; then
     fail "loadbalance migration cleanup must not scan and broadly delete PREROUTING rules"
 fi
@@ -355,6 +381,18 @@ grep -Fq 'cleanup_eqos_route_tables "eqos_stop"' "$EQOS" ||
 grep -Fq 'config_get_bool smarthqos "config" "smarthqos" "0"' "$INITD" ||
     fail "init.d must default smarthqos through config_get_bool before numeric comparison"
 
+grep -Fq 'interface=$(echo "${interface:-wan wan2 wan3 wan4 wan5 wan6 wan7 wan8}" | tr' "$INITD" ||
+    fail "init.d interface triggers must cover configured interfaces and wan..wan8 fallback"
+
+grep -Fq 'install interface triggers: interfaces=$interface' "$INITD" ||
+    fail "init.d must log generated interface trigger set"
+
+grep -Fq 'for ifname in $interface; do' "$INITD" ||
+    fail "init.d must generate interface triggers in a loop instead of hard-coding wan1-3"
+
+grep -Fq '[ -x /etc/init.d/sqm ] && procd_add_interface_trigger' "$INITD" ||
+    fail "init.d must guard sqm interface trigger registration by script existence"
+
 grep -Fq 'eqos start "$download" "$upload" "$comment" || return 1' "$INITD" ||
     fail "init.d must stop configuration when eqos start rejects invalid global speeds"
 
@@ -436,5 +474,34 @@ grep -Fq 'skip device WAN binding without IPv4 source' "$EQOS" ||
 
 grep -Fq 'skip device WAN binding with out-of-range interface' "$EQOS" ||
     fail "eqos device WAN binding must reject interface indexes outside 0-7"
+
+if grep -Eq '^CONFIG_[A-Z0-9_]+=[ymn] .+' "$MT7986_CONFIG"; then
+    fail "mt7986 kernel config must not use inline comments after CONFIG values"
+fi
+
+if grep -Eq '^CONFIG_[A-Z0-9_]+=.*#' "$N60_PRO_CONFIG"; then
+    fail "n60_pro_config_full_new must not use inline comments after CONFIG values"
+fi
+
+grep -Fq 'if [ -d "$pre_install_dir" ]; then' "$INSTALL_ALL" ||
+    fail "pre-install script must check /etc/pre_install exists before globbing ipk files"
+
+grep -Fq 'if [ -e "$1" ]; then' "$INSTALL_ALL" ||
+    fail "pre-install script must check at least one ipk exists before opkg install"
+
+grep -Fq 'opkg install "$@" --force-depends || {' "$INSTALL_ALL" ||
+    fail "pre-install script must guard opkg install failure"
+
+grep -Fq 'exit 1' "$INSTALL_ALL" ||
+    fail "pre-install script must stop before deleting ipk files when opkg install fails"
+
+grep -Fq '[INSTALL-B011-01] pre-install ipk install start' "$INSTALL_ALL" ||
+    fail "pre-install script must log install start with BID trace"
+
+grep -Fq '[INSTALL-B011-02] pre-install ipk install failed' "$INSTALL_ALL" ||
+    fail "pre-install script must log opkg failure before exiting"
+
+grep -Fq '[INSTALL-B011-06] pre-install directory missing' "$INSTALL_ALL" ||
+    fail "pre-install script must log the missing-directory branch"
 
 echo "qos regression checks passed"

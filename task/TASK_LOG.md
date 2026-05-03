@@ -82,3 +82,42 @@
 | 2026-05-02T12:58:34Z | Fixed B-005 | CAKE vs HNAT Priority Asymmetry for 109 Subnet | F-QOS-AUDIT |
 | 2026-05-02T13:08:00Z | Fixed B-006 | HNAT QoS 7 Logic Flaws (NEW Packet, Limit MAC, local scope, TC root) | F-QOS-AUDIT |
 | 2026-05-02T13:12:00Z | Fixed B-007 | mtk_eth_soc.c semantic mark leak & eqos state file collision | F-QOS-AUDIT |
+
+## [2026-05-03] C-FQOS01-07 | commit: pending
+
+- **FID**: F-QOS01
+- **BID**: B-010
+- **CID**: C-FQOS01-07
+- **类型**: fix, test
+- **范围**: luci-app-eqos-mtk, tests, docs
+- **描述**: Fix wide-baseline QoS audit regressions by making `/usr/sbin/eqos` the only IPv6 eqos chain owner, preventing Software tc from writing legacy MARK 0x99 into HNAT semantic mark bits, and deleting the shipped stale `eqos_origin` script.
+- **改动文件**: root/usr/sbin/eqos, root/etc/init.d/eqos, test/qos-regression.sh, bugs/B-010.md, design/qos-architecture.md, test/qos-test.md, task/CHANGE_INDEX.md, task/TASK_LOG.md
+- **PRD 同步**: ✅ PRD/qos-hardening.md
+- **方案同步**: ✅ design/qos-architecture.md
+- **测试同步**: ✅ test/qos-regression.sh, test/qos-test.md
+
+## [2026-05-03] C-FQOS01-08 | commit: pending
+
+- **FID**: F-QOS01
+- **BID**: B-011
+- **CID**: C-FQOS01-08
+- **类型**: fix, test
+- **范围**: mt7986 kernel config, pre-install script, tests, docs
+- **描述**: Fix build hygiene regressions by moving inline Kconfig/OpenWrt config comments to standalone comments and making `install_all_files` check directory/ipk existence before installation while preserving ipk files on opkg failure.
+- **改动文件**: target/linux/mediatek/mt7986/config-5.4, n60_pro_config_full_new, install_all_files, test/qos-regression.sh, bugs/B-011.md, PRD/qos-hardening.md, design/qos-architecture.md, test/qos-test.md, task/CHANGE_INDEX.md, task/TASK_LOG.md
+- **PRD 同步**: ✅ PRD/qos-hardening.md
+- **方案同步**: ✅ design/qos-architecture.md
+- **测试同步**: ✅ test/qos-regression.sh, test/qos-test.md
+
+## [2026-05-03] C-FQOS01-09 | commit: pending
+
+- **FID**: F-QOS01
+- **BID**: B-012
+- **CID**: C-FQOS01-09
+- **类型**: fix, test
+- **范围**: luci-app-eqos-mtk init lifecycle, tests, docs
+- **描述**: Fix multi-WAN lifecycle trigger coverage by deriving interface up triggers from `eqos.config.interface`, falling back to `wan..wan8`, and guarding sqm trigger registration by script existence.
+- **改动文件**: root/etc/init.d/eqos, test/qos-regression.sh, bugs/B-012.md, PRD/qos-hardening.md, design/qos-architecture.md, test/qos-test.md, task/CHANGE_INDEX.md, task/TASK_LOG.md
+- **PRD 同步**: ✅ PRD/qos-hardening.md
+- **方案同步**: ✅ design/qos-architecture.md
+- **测试同步**: ✅ test/qos-regression.sh, test/qos-test.md

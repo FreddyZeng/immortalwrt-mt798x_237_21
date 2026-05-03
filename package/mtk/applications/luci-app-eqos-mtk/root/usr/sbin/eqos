@@ -279,8 +279,11 @@ iptables_start_inital() {
         ip6tables -t mangle -N eqos_apply 2>/dev/null
         ip6tables -t mangle -F eqos 2>/dev/null
         ip6tables -t mangle -F eqos_apply 2>/dev/null
-        ip6tables -t mangle -A FORWARD  -j eqos 2>/dev/null
-        ip6tables -t mangle -A FORWARD  -j eqos_apply 2>/dev/null
+        while ip6tables -t mangle -D FORWARD -j eqos 2>/dev/null; do :; done
+        while ip6tables -t mangle -D FORWARD -j eqos_apply 2>/dev/null; do :; done
+        ip6tables -t mangle -A FORWARD -j eqos 2>/dev/null
+        ip6tables -t mangle -A FORWARD -j eqos_apply 2>/dev/null
+        logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-08-01] install IPv6 eqos chain order: eqos before eqos_apply, ipv6enabled=$ipv6_en"
     fi
 
     # 全局还原链 (eqos_apply): 将 ct_mark 复制回 skb->mark
@@ -388,7 +391,7 @@ case "$1" in
 
     #iptables -t mangle -I eqos -m iprange  --src-range 192.168.110.10-192.168.110.39 -j DSCP --set-dscp 46
     #iptables -t mangle -I eqos -m iprange  --dst-range 192.168.110.10-192.168.110.39 -j DSCP --set-dscp 46
-    
+
     # 插入使用 u32 模块实现更精确"并且"判断的规则
     # u32 模块读取 4 字节为 32 位整数，必须使用位掩码隔离单个字节
     #
@@ -545,15 +548,12 @@ case "$1" in
         # 刷新 HNAT 表, 强制已有流重新绑定到新队列
         echo 1 > /sys/kernel/debug/hnat/hnat_entry
     else
-        iptables -t mangle -D eqos -s $ip -j MARK --set-xmark 0x99/0xFF
-        iptables -t mangle -D eqos -d $ip -j MARK --set-xmark 0x99/0xFF
-        if [ $up -ne 0 ]; then
-        iptables -t mangle -A eqos -s $ip -j MARK --set-xmark 0x99/0xFF
+        if [ -n "$ip" ]; then
+            while iptables -t mangle -D eqos -s $ip -j MARK --set-xmark 0x99/0xFF 2>/dev/null; do :; done
+            while iptables -t mangle -D eqos -d $ip -j MARK --set-xmark 0x99/0xFF 2>/dev/null; do :; done
         fi
-        if [ $dl -ne 0 ]; then
-        iptables -t mangle -A eqos -d $ip -j MARK --set-xmark 0x99/0xFF
-        fi
-	    fi
+        logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-06-28] cleanup legacy software tc MARK rules: key=$dev_key, ip=$ip, mode=$id"
+    fi
 
 	    if [ "$id" -gt 64 ]; then
 	        if [ "$dl" -ne 0 ]; then
