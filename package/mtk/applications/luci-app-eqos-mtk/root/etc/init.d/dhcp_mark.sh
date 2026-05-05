@@ -68,38 +68,51 @@ delete_mapping() {
 }
 
 # 处理现有的DHCP记录，确保已有设备保留其MARK
+# $1: 以换行分隔的"已在eqos中显式配置的IP"列表（VIP/限速设备，必须跳过）
 process_existing_leases() {
+    local eqos_ips="$1"
     while read -r line; do
         IP=$(echo "$line" | awk '{print $3}')
         MAC=$(echo "$line" | awk '{print $2}')
+
+        # 跳过已在 eqos UCI 中显式配置的设备（VIP/限速）。
+        # 这些设备由 'eqos add' 管理自己的 iptables 规则，
+        # dhcp_mark 不得覆盖它们。
+        if echo "$eqos_ips" | grep -qF "$IP"; then
+            continue
+        fi
+
         EXISTING_MARK=$(grep "^$MAC " "$MARK_FILE" | awk '{print $2}')
         if [ -z "$EXISTING_MARK" ]; then
-            # 如果没有记录，分配新的MARK
             MARK_VALUE=$(allocate_mark $MAC)
             save_mapping $MAC $MARK_VALUE
         else
-            # 使用现有的MARK
             MARK_VALUE=$EXISTING_MARK
         fi
-	    idpair=$((MARK_VALUE+32))
-        # 添加iptables规则，基于MAC和IP地址给这个设备打上MARK
-	iptables -t mangle -D eqos -s $IP -j DSCP --set-dscp ${MARK_VALUE}
-	iptables -t mangle -D eqos -d $IP -j DSCP --set-dscp ${idpair}
-	ip6tables -t mangle -D eqos -m mac --mac-source $MAC -j MARK --set-mark ${MARK_VALUE}
-	ebtables -t nat -D eqos -p ipv6 -d $MAC -j mark --mark-set ${idpair}
-	iptables -t mangle -A eqos -s $IP -j DSCP --set-dscp ${MARK_VALUE}
-	iptables -t mangle -A eqos -d $IP -j DSCP --set-dscp ${idpair}
-	ip6tables -t mangle -A eqos -m mac --mac-source $MAC -j MARK --set-mark ${MARK_VALUE}
-	ebtables -t nat -A eqos -A ipv6 -d $MAC -j mark --mark-set ${idpair}
+
+        idpair=$((MARK_VALUE+32))
+        # 幂等更新：先删除旧规则再追加（不影响其他设备的规则）
+        iptables  -t mangle -D eqos -s $IP -j DSCP --set-dscp ${MARK_VALUE} 2>/dev/null
+        iptables  -t mangle -D eqos -d $IP -j DSCP --set-dscp ${idpair}     2>/dev/null
+        ip6tables -t mangle -D eqos -m mac --mac-source $MAC -j MARK --set-mark ${MARK_VALUE} 2>/dev/null
+        ebtables  -t nat    -D eqos -p ipv6 -d $MAC -j mark --mark-set ${idpair} 2>/dev/null
+        iptables  -t mangle -A eqos -s $IP -j DSCP --set-dscp ${MARK_VALUE}
+        iptables  -t mangle -A eqos -d $IP -j DSCP --set-dscp ${idpair}
+        ip6tables -t mangle -A eqos -m mac --mac-source $MAC -j MARK --set-mark ${MARK_VALUE}
+        ebtables  -t nat    -A eqos -p ipv6 -d $MAC -j mark --mark-set ${idpair}
     done < "$LEASE_FILE"
 }
 
 if [ "$ACTION" = "init" ]; then
-    rm /tmp/dhcp_mac_mark_mapping
+    rm -f /tmp/dhcp_mac_mark_mapping
     load_mapping
-    iptables -t mangle -F eqos
-    ip6tables -t mangle -F eqos
-    ebtables -t nat  -F eqos
-    process_existing_leases
-fi
 
+    # 从 eqos UCI 获取已显式配置的设备 IP 列表（VIP/限速）。
+    # dhcp_mark 不得为这些 IP 分配 WRR slot，以免覆盖其已有的 SP/限速规则。
+    eqos_ips=$(uci -q show eqos | grep "\.ip='" | sed "s/.*ip='//;s/'.*//")
+
+    # 注意：不再执行 iptables -F eqos。
+    # VIP/限速设备的规则由 'eqos add' 管理，全局 flush 会销毁这些规则。
+    # dhcp_mark 只通过上面的幂等 delete+add 管理自己负责的 WRR per-lease 规则。
+    process_existing_leases "$eqos_ips"
+fi
