@@ -1878,6 +1878,27 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 		} else {
 			entry.ipv4_hnapt.iblk2.fqos = 0;
 		}
+
+		/* [VIP-EGRESS-MARK] WAN egress DSCP re-marking for upload.
+		 * fqos==1 guards LAN→WAN direction only (FROM_EXT packets
+		 * already set fqos=0, so WAN→LAN downloads are never touched).
+		 *
+		 * qid  0-1  : VIP / game UDP≤300B → EF  (DSCP 46, 0xB8)
+		 * qid  2-30 : per-user hash       → AF41 (DSCP 34, 0x88)
+		 * qid  31   : rate-limited        → BE   (DSCP  0, 0x00)
+		 *
+		 * iblk2.qid  = hardware scheduling queue (unchanged)
+		 * iblk2.dscp = TOS byte written by HW into the outgoing packet
+		 */
+		if (IS_HQOS_MODE && hnat_priv->dscp_en &&
+		    entry.ipv4_hnapt.iblk2.fqos) {
+			if (qid == 0 || qid == 1)
+				entry.ipv4_hnapt.iblk2.dscp = 0xB8; /* EF   = 46<<2 */
+			else if (qid >= 2 && qid <= 30)
+				entry.ipv4_hnapt.iblk2.dscp = 0x88; /* AF41 = 34<<2 */
+			else if (qid == 31)
+				entry.ipv4_hnapt.iblk2.dscp = 0x00; /* BE   = 0     */
+		}
 	} else {
 		entry.ipv6_5t_route.iblk2.dp = gmac;
 		entry.ipv6_5t_route.iblk2.port_mg =
