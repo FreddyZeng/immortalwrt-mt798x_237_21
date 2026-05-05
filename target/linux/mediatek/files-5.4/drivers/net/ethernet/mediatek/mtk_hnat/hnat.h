@@ -653,9 +653,6 @@ struct mtk_hnat_data {
 	enum mtk_hnat_version version;
 };
 
-/* 动态 VIP IP/MAC 表最大容量: 支持最多 64 个单设备 VIP */
-#define HNAT_VIP_MAX		64
-
 struct mtk_hnat {
 	struct device *dev;
 	void __iomem *fe_base;
@@ -702,17 +699,6 @@ struct mtk_hnat {
 	bool dscp_en;
 	bool macvlan_support;
 	spinlock_t		entry_lock;
-	/* [HNAT-C-VIP-03] 动态 VIP IP 表: 通过 /sys/kernel/debug/hnat/vip_list 管理
-	 * 解决单设备 VIP (eqos add $ip ... 64) 的下行 HNAT 建表 CONNMARK 竞态问题
-	 * 读热路径用 smp_load_acquire(vip_ip_num), 写用 vip_lock 保护 */
-	spinlock_t		vip_lock;
-	__be32			vip_ips[HNAT_VIP_MAX];
-	int			vip_ip_num;
-	/* [HNAT-C-VIP-04] MAC VIP 表: 支持 MAC-only VIP 设备（eqos add $mac ... 64）
-	 * HNAT 建表时通过 entry.ipv4_hnapt.dmac_hi/lo 直接匹配目标 MAC
-	 * 与 IP VIP 表使用同一把 vip_lock 保护 */
-	u8			vip_macs[HNAT_VIP_MAX][ETH_ALEN];
-	int			vip_mac_num;
 };
 
 struct extdev_entry {

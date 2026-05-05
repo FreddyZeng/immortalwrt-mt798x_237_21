@@ -1,7 +1,7 @@
 #!/bin/sh /etc/rc.common
 # Copyright (C) 2006 OpenWrt.org
 
-START=99
+START=50
 USE_PROCD=1
 
 parse_device() {
@@ -13,17 +13,13 @@ parse_device() {
 	
 
 	local ip download upload comment mac interfacename
-	config_get ip "$cfg" "ip" ""
-	config_get download "$cfg" "download" "0"
-	config_get upload "$cfg" "upload" "0"
-	config_get comment "$cfg" "comment" "0"
-	config_get mac "$cfg" "mac" ""
-	config_get interfacename "$cfg" "interfacename" ""
-	eqos add "$ip" "$download" "$upload" "$comment" "$mac" "$interfacename" || {
-		logger -p daemon.err -t eqos "[EQOS-C-FQOS01-07-02] device apply failed: cfg=$cfg, ip=$ip, mac=$mac, download=$download, upload=$upload, mode=$comment, interface=$interfacename"
-		EQOS_DEVICE_ERROR=1
-		return 1
-	}
+	config_get ip "$cfg" ip
+	config_get download "$cfg" "download"
+	config_get upload "$cfg" "upload"
+	config_get comment "$cfg" "comment"
+	config_get mac "$cfg" "mac"
+	config_get interfacename "$cfg" "interfacename"
+	eqos add "$ip" "$download" "$upload" "$comment" "$mac" "$interfacename"
 }
 
 start_service() {
@@ -34,65 +30,66 @@ start_service() {
 	[ "$enabled" -eq "1" ] || return 1
 	
 	local download upload comment
-	config_get download "config" "download" "0"
-	config_get upload "config" "upload" "0"
-	config_get comment "config" "comment" "0"
-	config_get_bool smarthqos "config" "smarthqos" "0"
-	config_get interface "config" "interface" ""
-	eqos start "$download" "$upload" "$comment" || return 1
+	config_get download "config" "download"
+	config_get upload "config" "upload"
+	config_get comment "config" "comment"
+	config_get smarthqos "config" "smarthqos"
+	config_get interface "config" "interface"
+	eqos start "$download" "$upload" "$comment" 
 	
-	if [ "$smarthqos" -eq "1" ]; then
-		# 上行 per-user 队列: Q5-Q29 (跳过 Q0-Q4 优先队列, Q30 背景, Q31 限速)
-		for i in $(seq 5 29); do
-			if [ "$upload" -ne "0" ]; then
-				echo 2 1 $(($upload*225)) 1 $(($upload*1000)) 4 1 > /sys/kernel/debug/hnat/qdma_txq$i
-			fi
+	local ipv6enabled                              
+        config_get_bool ipv6enabled "config" "ipv6enabled" "0"    
+        ip6tables -t mangle -N eqos
+        ip6tables -t mangle -F eqos
+        ebtables -t nat  -N eqos
+        ebtables -t nat  -F eqos
+        if [ "$ipv6enabled" -eq "1" ]; then                                
+        ebtables -t nat -D POSTROUTING  -j eqos -p ipv6              
+        ebtables -t nat -A POSTROUTING  -j eqos -p ipv6
+        ip6tables -t mangle -D FORWARD  -j eqos
+        ip6tables -t mangle -A FORWARD  -j eqos             
+        fi  
+        
+        if [ "$smarthqos" -eq "1" ]; then  
+        for i in $(seq 1 31); do
+        	if [ "$upload" -ne "0" ]; then
+		echo 2 1 $(($upload*225)) 1 $(($upload*1000)) 4 1 > /sys/kernel/debug/hnat/qdma_txq$i
+		fi
 		done
-		# 下行 per-user 队列: Q37-Q61 (跳过 Q32-Q36 优先队列, Q62 背景, Q63 限速)
-		for i in $(seq 37 61); do
-			if [ "$download" -ne "0" ]; then
-				echo 3 1 $(($download*200)) 1 $(($download*1000)) 4 1 > /sys/kernel/debug/hnat/qdma_txq$i
-			fi
-		done
-	fi
-	# loadbalance 内部对每条规则经过 -D 再 -A 异幂更新，无需全局 flush
-	# （全局 -F PREROUTING 会连带清除 mwan3 等其他组件的路由规则）
-	if [ "$interface" ]; then
-		/usr/sbin/loadbalance "$interface" || return 1
-	fi
-	EQOS_DEVICE_ERROR=0
-	config_foreach parse_device "device"
-	[ "$EQOS_DEVICE_ERROR" -eq 0 ] || return 1
-	# smarthqos DHCP DSCP 分配已禁用:
-	# dhcp_mark.sh 会给每个设备随机分配 DSCP 1-31, 与我们的 DSCP→队列映射冲突
-	# per-user 隔离现在由内核 IP hash (last_octet % 25) 实现, 不需要 DHCP 分配
+		for i in $(seq 33 63); do
+		if [ "$download" -ne "0" ]; then
+		echo 3 1 $(($download*200)) 1 $(($download*1000)) 4 1 > /sys/kernel/debug/hnat/qdma_txq$i
+		fi
+	done 
+	fi 
+        iptables -t mangle -F PREROUTING
+        if [ $interface ]; then
+	bash /usr/sbin/loadbalance "$interface"
+        fi
+        config_foreach parse_device "device"
+        if [ "$smarthqos" -eq "1" ]; then
+        rm /etc/hotplug.d/dhcp/99-eqos
+	cat << 'EOF' > /etc/hotplug.d/dhcp/99-eqos
+#!/bin/sh
+
+# 只有在新增 DHCP 租约时才执行操作
+if [ "$ACTION" = "add" ]; then
+
+    # 执行指定的命令
+    /etc/init.d/dhcp_mark.sh eqos init
+fi
+EOF
+
+        chmod +x /etc/hotplug.d/dhcp/99-eqos
+        /etc/init.d/dnsmasq restart
+        /etc/init.d/dhcp_mark.sh eqos init
+        fi   
 }
 
 stop_service() {
 	eqos stop
-	# 清理 loadbalance 专属子链
-	while iptables -t mangle -D PREROUTING -j eqos_lb 2>/dev/null; do :; done
-	iptables -t mangle -F eqos_lb 2>/dev/null
-	iptables -t mangle -X eqos_lb 2>/dev/null
-	# 清理全局 CONNMARK save/restore 规则
-	while iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \
-		-m comment --comment "eqos_lb" \
-		-j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null; do :; done
-	while iptables -t mangle -D PREROUTING -i br-lan \
-		-m conntrack --ctstate ESTABLISHED,RELATED \
-		-m comment --comment "eqos_lb" \
-		-j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null; do :; done
-	logger -p daemon.debug -t eqos "[EQOS-C-FQOS02-02-02] stop cleanup eqos_lb route mark rules"
-	# 清理所有 WAN 的 ip rule 和 ip route（最多 8 个 WAN，覆盖配置减少场景）
-	for _ci in 0 1 2 3 4 5 6 7; do
-		_om=$(printf "0x%02x00" $((0x20 + _ci)))
-		while ip rule del fwmark ${_om}/0xff00 table "2${_ci}0" 2>/dev/null; do :; done
-		while ip rule del fwmark "2${_ci}" table "2${_ci}0" 2>/dev/null; do :; done
-		ip route flush table "2${_ci}0" 2>/dev/null
-	done
-	logger -p daemon.debug -t eqos "[EQOS-C-FQOS02-03-05] stop cleanup route rules: high_fwmark=0x20-0x27, legacy_fwmark=20-27"
-	ip route flush cache
-	rm -f /etc/hotplug.d/dhcp/99-eqos
+	iptables -t mangle -F PREROUTING
+	rm /etc/hotplug.d/dhcp/99-eqos
 }
 
 reload_service() {
@@ -102,14 +99,4 @@ reload_service() {
 
 service_triggers() {
 	procd_add_reload_trigger "eqos"
-	local interface ifname
-
-	config_load eqos
-	config_get interface "config" "interface" ""
-	interface=$(echo "${interface:-wan wan2 wan3 wan4 wan5 wan6 wan7 wan8}" | tr ',' ' ')
-	logger -p daemon.debug -t eqos "[EQOS-C-FQOS02-03-16] install interface triggers: interfaces=$interface"
-	for ifname in $interface; do
-		procd_add_interface_trigger 'interface.*.up' "$ifname" /etc/init.d/eqos restart
-		[ -x /etc/init.d/sqm ] && procd_add_interface_trigger 'interface.*.up' "$ifname" /etc/init.d/sqm restart
-	done
 }

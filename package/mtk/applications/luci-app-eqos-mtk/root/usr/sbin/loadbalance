@@ -1,328 +1,45 @@
-#!/bin/sh
-# loadbalance - 多 WAN 负载均衡 (POSIX sh)
-# cfg_idx=原始配置位置(决定mark/table) | nth_idx=可用顺序(决定nth分流)
-
 interface=$1
-iface_list=$(echo "$interface" | tr ',' ' ')
+array=(${interface//,/ })
+        PPP_NUM=0
 
-lb_cleanup_route_tables() {
-    reason="$1"
-    for _ci in 0 1 2 3 4 5 6 7; do
-        _om=$(printf "0x%02x00" $((0x20 + _ci)))
-        while ip rule del fwmark ${_om}/0xff00 table "2${_ci}0" 2>/dev/null; do :; done
-        while ip rule del fwmark "2${_ci}" table "2${_ci}0" 2>/dev/null; do :; done
-        ip route flush table "2${_ci}0" 2>/dev/null
-    done
-    logger -p daemon.debug -t loadbalance \
-        "[LB-C-FQOS02-03-01] cleanup route rules: reason=$reason, high_fwmark=0x20-0x27, legacy_fwmark=20-27, tables=200-270"
-}
-
-lb_cleanup_global_marks() {
-    reason="$1"
-    while iptables -t mangle -D PREROUTING -j eqos_lb 2>/dev/null; do :; done
-    while iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \
-        -m comment --comment "eqos_lb" \
-        -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null; do :; done
-    while iptables -t mangle -D PREROUTING -i br-lan \
-        -m conntrack --ctstate ESTABLISHED,RELATED \
-        -m comment --comment "eqos_lb" \
-        -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null; do :; done
-    logger -p daemon.debug -t loadbalance \
-        "[LB-C-FQOS02-03-21] cleanup global mark rules: reason=$reason, chain=eqos_lb, mask=0xFF00"
-}
-
-lb_abort() {
-    reason="$1"
-    rm -f "$_tmp"
-    iptables -t mangle -F eqos_lb 2>/dev/null
-    lb_cleanup_global_marks "$reason"
-    lb_cleanup_route_tables "$reason"
-    exit 1
-}
-
-lb_default_route_for_iface() {
-    ifname="$1"
-    ip route show default | awk -v ifname="$ifname" '
-    {
-        gateway = "";
-        route_dev = "";
-        for (i = 1; i <= NF; i++) {
-            if ($i == "via") {
-                gateway = $(i + 1);
-            }
-            if ($i == "dev") {
-                route_dev = $(i + 1);
-            }
-        }
-        if (route_dev == ifname || route_dev ~ ("(^|[-_.])" ifname "$")) {
-            print gateway "|" route_dev;
-            exit;
-        }
-    }'
-}
-
-lb_delete_legacy_rule() {
-    while iptables "$@" 2>/dev/null; do
-        legacy_found=1
-    done
-}
-
-# ── 1. 精确迁移清理：只在首次迁移时删除旧版 loadbalance 固定模板规则 ───────
-if ! iptables -t mangle -L eqos_lb >/dev/null 2>&1; then
-    legacy_cleanup_needed=1
-    legacy_found=0
-
-    for _every in 1 2 3 4 5 6 7 8; do
-        for _packet in 0 1 2 3 4 5 6 7; do
-            [ "$_packet" -lt "$_every" ] || continue
-            for _mark_idx in 0 1 2 3 4 5 6 7; do
-                _om=$(printf "0x%02x00" $((0x20 + _mark_idx)))
-                lb_delete_legacy_rule -t mangle -D PREROUTING -i br-lan \
-                    -m conntrack --ctstate NEW \
-                    -m statistic --mode nth --every "$_every" --packet "$_packet" \
-                    -j CONNMARK --set-mark "2${_mark_idx}"
-                lb_delete_legacy_rule -t mangle -D PREROUTING -i br-lan \
-                    -m conntrack --ctstate NEW \
-                    -m statistic --mode nth --every "$_every" --packet "$_packet" \
-                    -j CONNMARK --set-xmark "${_om}/0xFF00"
-                lb_delete_legacy_rule -t mangle -D PREROUTING -i br-lan \
-                    -m conntrack --ctstate NEW \
-                    -m statistic --mode nth --every "$_every" --packet "$_packet" \
-                    -j MARK --set-mark "2${_mark_idx}"
-                lb_delete_legacy_rule -t mangle -D PREROUTING -i br-lan \
-                    -m conntrack --ctstate NEW \
-                    -m statistic --mode nth --every "$_every" --packet "$_packet" \
-                    -j MARK --set-xmark "${_om}/0xFF00"
-            done
+        for var in ${array[@]}
+        do
+        let PPP_NUM=PPP_NUM+1
         done
-    done
-
-    for _ci in 0 1 2 3 4 5 6 7; do
-        _om=$(printf "0x%02x00" $((0x20 + _ci)))
-        lb_delete_legacy_rule -t mangle -D PREROUTING -i br-lan \
-            -m connmark --mark "2${_ci}" \
-            -j MARK --set-mark "2${_ci}"
-        lb_delete_legacy_rule -t mangle -D PREROUTING -i br-lan \
-            -m connmark --mark "${_om}/0xFF00" \
-            -j MARK --set-xmark "${_om}/0xFF00"
-        lb_delete_legacy_rule -t mangle -D PREROUTING -p tcp --dport 443 \
-            -m conntrack --ctstate NEW \
-            -j MARK --set-mark "2${_ci}"
-        lb_delete_legacy_rule -t mangle -D PREROUTING -p udp --dport 443 \
-            -m conntrack --ctstate NEW \
-            -j MARK --set-mark "2${_ci}"
-        lb_delete_legacy_rule -t mangle -D PREROUTING -p tcp --dport 443 \
-            -m conntrack --ctstate NEW \
-            -j MARK --set-xmark "${_om}/0xFF00"
-        lb_delete_legacy_rule -t mangle -D PREROUTING -p udp --dport 443 \
-            -m conntrack --ctstate NEW \
-            -j MARK --set-xmark "${_om}/0xFF00"
-    done
-
-    if [ "$legacy_found" -eq 1 ]; then
-        while iptables -t mangle -D PREROUTING -i br-lan \
-            -m conntrack --ctstate ESTABLISHED,RELATED \
-            -j CONNMARK --restore-mark 2>/dev/null; do :; done
-        while iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \
-            -j CONNMARK --save-mark 2>/dev/null; do :; done
-        logger -p daemon.debug -t loadbalance \
-            "[LB-C-FQOS02-02-03] cleanup untagged legacy CONNMARK rules after exact legacy match: iface=$interface"
-    else
-        logger -p daemon.debug -t loadbalance \
-            "[LB-C-FQOS02-02-04] skip unscoped legacy CONNMARK cleanup: iface=$interface, reason=no_exact_legacy_match"
-    fi
-    logger -p daemon.debug -t loadbalance \
-        "[LB-C-FQOS02-02-01] exact legacy cleanup complete: iface=$interface, matched=$legacy_found, every_range=1-8, packet_range=0-7, mark_idx_range=0-7"
-else
-    legacy_cleanup_needed=0
-    logger -p daemon.debug -t loadbalance \
-        "[LB-C-FQOS02-02-02] skip exact legacy cleanup: iface=$interface, reason=eqos_lb_chain_exists"
-fi
-
-# ── 2. 创建/清空专属子链 ──────────────────────────────────────────────────
-iptables -t mangle -N eqos_lb 2>/dev/null
-iptables -t mangle -F eqos_lb
-lb_cleanup_global_marks "loadbalance_start"
-
-# ── 3. 清理旧 ip rule / ip route（覆盖 WAN 数量减少场景）────────────────
-lb_cleanup_route_tables "loadbalance_start"
-
-# ── 4. 构建可用 WAN 列表，cfg_idx 保留原始位置 ───────────────────────────
-_tmp=$(mktemp /tmp/eqos_lb_avail.XXXXXX) || {
-    logger -p daemon.err -t loadbalance \
-        "[LB-C-FQOS02-03-22] create temporary WAN list failed: pattern=/tmp/eqos_lb_avail.XXXXXX"
-    iptables -t mangle -F eqos_lb 2>/dev/null
-    lb_cleanup_global_marks "mktemp_failed"
-    lb_cleanup_route_tables "mktemp_failed"
-    exit 1
-}
-cfg_idx=0
-PPP_NUM=0
-first_cfg_idx=-1
-for var in $iface_list; do
-    route_info=$(lb_default_route_for_iface "$var")
-    if [ -n "$route_info" ]; then
-        gateway=${route_info%%|*}
-        route_dev=${route_info#*|}
-        if [ -z "$route_dev" ]; then
-            logger -p daemon.warn -t loadbalance \
-                "[LB-C-FQOS02-03-02] WAN${cfg_idx}($var): default route has empty route_dev, excluded"
-            cfg_idx=$((cfg_idx + 1))
-            continue
-        fi
-        gateway_field=${gateway:-none}
-        printf '%d %s %s %s\n' "$cfg_idx" "$var" "$gateway_field" "$route_dev" >> "$_tmp"
-        PPP_NUM=$((PPP_NUM + 1))
-        [ "$first_cfg_idx" -lt 0 ] && first_cfg_idx=$cfg_idx
-        _om=$(printf "0x%02x00" $((0x20 + cfg_idx)))
-        if [ -n "$gateway" ]; then
-            if [ "$legacy_cleanup_needed" -eq 1 ]; then
-                while iptables -t mangle -D PREROUTING \
-                    -m conntrack --ctstate NEW \
-                    -d "$gateway/24" -j MARK --set-mark "2${cfg_idx}" 2>/dev/null; do :; done
-                while iptables -t mangle -D PREROUTING \
-                    -m conntrack --ctstate NEW \
-                    -d "$gateway/24" -j MARK --set-xmark "${_om}/0xFF00" 2>/dev/null; do :; done
-                logger -p daemon.debug -t loadbalance \
-                    "[LB-C-FQOS02-02-05] cleanup legacy gateway subnet marker during first migration: cfg=$cfg_idx, ifname=$var, gateway=$gateway, mark=${_om}/0xFF00"
-            fi
-            logger -p daemon.debug -t loadbalance \
-                "[LB-C-FQOS02-03-03] WAN${cfg_idx}($var): route selected, route_dev=$route_dev, gateway=$gateway"
-        else
-            logger -p daemon.debug -t loadbalance \
-                "[LB-C-FQOS02-03-04] WAN${cfg_idx}($var): point-to-point route selected, route_dev=$route_dev, gateway=none"
-        fi
-    else
-        logger -p daemon.warn -t loadbalance \
-            "[LB-C-FQOS02-03-05] WAN${cfg_idx}($var): no default route, excluded"
-    fi
-    cfg_idx=$((cfg_idx + 1))
-done
-
-if [ "$PPP_NUM" -eq 0 ]; then
-    logger -p daemon.err -t loadbalance "[LB-C-FQOS02-03-06] no available WAN, abort"
-    lb_abort "no_available_wan"
-fi
-
-# HTTPS 固定出口：首个可用 WAN 的 cfg_idx（非硬编码 0x2000）
-first_mark=$(printf "0x%02x00" $((0x20 + first_cfg_idx)))
-
-# ── 5. 第一轮：route + ip rule + nth CONNMARK ────────────────────────────
-nth_idx=0
-while IFS=' ' read -r cfg_idx var gateway route_dev; do
-    FW_MARK=$(printf "0x%02x00" $((0x20 + cfg_idx)))
-    TABLE="2${cfg_idx}0"
-    if [ "$gateway" = "none" ]; then
-        gateway=""
-    fi
-    if [ -n "$gateway" ]; then
-        ip route replace default via "$gateway" dev "$route_dev" table "$TABLE" || {
-            logger -p daemon.err -t loadbalance \
-                "[LB-C-FQOS02-03-07] install route failed: cfg=$cfg_idx, ifname=$var, route_dev=$route_dev, gateway=$gateway, table=$TABLE"
-            lb_abort "route_failed"
-        }
-    else
-        ip route replace default dev "$route_dev" table "$TABLE" || {
-            logger -p daemon.err -t loadbalance \
-                "[LB-C-FQOS02-03-07] install route failed: cfg=$cfg_idx, ifname=$var, route_dev=$route_dev, gateway=none, table=$TABLE"
-            lb_abort "route_failed"
-        }
-    fi
-    ip rule add fwmark ${FW_MARK}/0xff00 table "$TABLE" || {
-        logger -p daemon.err -t loadbalance \
-            "[LB-C-FQOS02-03-08] install ip rule failed: cfg=$cfg_idx, ifname=$var, route_dev=$route_dev, mark=${FW_MARK}/0xff00, table=$TABLE"
-        lb_abort "ip_rule_failed"
-    }
-    # nth 用 nth_idx (可用顺序)；mark/table 用 cfg_idx (原始位置)
-    iptables -t mangle -A eqos_lb \
-        -i br-lan -m conntrack --ctstate NEW \
-        -m statistic --mode nth --every $PPP_NUM --packet $nth_idx \
-        -j CONNMARK --set-xmark ${FW_MARK}/0xFF00 || {
-        logger -p daemon.err -t loadbalance \
-            "[LB-C-FQOS02-03-13] install nth connmark failed: cfg=$cfg_idx, nth=$nth_idx, ifname=$var, mark=$FW_MARK"
-        lb_abort "nth_connmark_failed"
-    }
-    iptables -t mangle -A eqos_lb \
-        -i br-lan -m connmark --mark ${FW_MARK}/0xFF00 \
-        -j MARK --set-xmark ${FW_MARK}/0xFF00 || {
-        logger -p daemon.err -t loadbalance \
-            "[LB-C-FQOS02-03-14] install skb mark restore failed: cfg=$cfg_idx, nth=$nth_idx, ifname=$var, mark=$FW_MARK"
-        lb_abort "mark_restore_failed"
-    }
-    logger -p daemon.debug -t loadbalance \
-        "[LB-C-FQOS02-03-09] install WAN route and nth marker: cfg=$cfg_idx, nth=$nth_idx, ifname=$var, route_dev=$route_dev, gateway=${gateway:-none}, mark=$FW_MARK, table=$TABLE"
-    nth_idx=$((nth_idx + 1))
-done < "$_tmp"
-
-# ── 6. 第二轮：回程路由标记 ──────────────────────────────────────────────
-while IFS=' ' read -r cfg_idx var gateway route_dev; do
-    FW_MARK=$(printf "0x%02x00" $((0x20 + cfg_idx)))
-    if [ "$gateway" != "none" ]; then
-        iptables -t mangle -A eqos_lb \
-            -m conntrack --ctstate NEW \
-            -d "$gateway/24" -j MARK --set-xmark ${FW_MARK}/0xFF00 || {
-            logger -p daemon.err -t loadbalance \
-                "[LB-C-FQOS02-03-15] install gateway subnet marker failed: cfg=$cfg_idx, ifname=$var, route_dev=$route_dev, gateway=$gateway, mark=$FW_MARK"
-            lb_abort "gateway_marker_failed"
-        }
-        logger -p daemon.debug -t loadbalance \
-            "[LB-C-FQOS02-03-10] install gateway subnet return marker: cfg=$cfg_idx, ifname=$var, route_dev=$route_dev, gateway=$gateway, mark=$FW_MARK"
-    else
-        logger -p daemon.debug -t loadbalance \
-            "[LB-C-FQOS02-03-11] skip gateway subnet return marker for point-to-point route: cfg=$cfg_idx, ifname=$var, route_dev=$route_dev, gateway=none, mark=$FW_MARK"
-    fi
-done < "$_tmp"
-
-rm -f "$_tmp"
-
-# ── 7. HTTPS 443 固定走首个可用 WAN ──────────────────────────────────────
-iptables -t mangle -A eqos_lb \
-    -p tcp --dport 443 -m conntrack --ctstate NEW \
-    -j MARK --set-xmark ${first_mark}/0xFF00 || {
-    logger -p daemon.err -t loadbalance \
-        "[LB-C-FQOS02-03-16] install HTTPS tcp marker failed: first_mark=$first_mark"
-    lb_abort "https_tcp_marker_failed"
-}
-iptables -t mangle -A eqos_lb \
-    -p udp --dport 443 -m conntrack --ctstate NEW \
-    -j MARK --set-xmark ${first_mark}/0xFF00 || {
-    logger -p daemon.err -t loadbalance \
-        "[LB-C-FQOS02-03-17] install HTTPS udp marker failed: first_mark=$first_mark"
-    lb_abort "https_udp_marker_failed"
-}
-
-# ── 8. 全局 CONNMARK save/restore（路由域 bits[15:8]）────────────────────
-# 使用 -m comment eqos_lb 标签，使精确 -D 只删本脚本安装的规则
-iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \
-    -m comment --comment "eqos_lb" \
-    -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
-iptables -t mangle -A POSTROUTING -m conntrack --ctstate NEW \
-    -m comment --comment "eqos_lb" \
-    -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00 || {
-    logger -p daemon.err -t loadbalance \
-        "[LB-C-FQOS02-03-18] install global connmark save failed"
-    lb_abort "connmark_save_failed"
-}
-iptables -t mangle -D PREROUTING -i br-lan \
-    -m conntrack --ctstate ESTABLISHED,RELATED \
-    -m comment --comment "eqos_lb" \
-    -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null
-iptables -t mangle -A PREROUTING -i br-lan \
-    -m conntrack --ctstate ESTABLISHED,RELATED \
-    -m comment --comment "eqos_lb" \
-    -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 || {
-    logger -p daemon.err -t loadbalance \
-        "[LB-C-FQOS02-03-19] install global connmark restore failed"
-    lb_abort "connmark_restore_failed"
-}
-
-# ── 9. 所有子链/rule/table 安装成功后再挂入 PREROUTING ───────────────────
-iptables -t mangle -I PREROUTING 1 -j eqos_lb || {
-    logger -p daemon.err -t loadbalance \
-        "[LB-C-FQOS02-03-20] attach eqos_lb jump failed: wan_count=$PPP_NUM, first_mark=$first_mark"
-    lb_abort "jump_failed"
-}
-logger -p daemon.debug -t loadbalance \
-    "[LB-C-FQOS02-03-12] attach eqos_lb jump after successful route/rule setup: wan_count=$PPP_NUM, first_mark=$first_mark"
-
-ip route flush cache
+        
+        i=0
+        for var in ${array[@]}
+        do
+        ipaddr=$(ip route show |grep default | grep $var | awk '{print $3 }')
+        iptables -t mangle -D PREROUTING -i br-lan -m conntrack --ctstate NEW -m statistic --mode nth --every $PPP_NUM --packet $i -j CONNMARK --set-mark 2"$i"
+        iptables -t mangle -D PREROUTING -i br-lan -m connmark --mark 2"$i" -j MARK --set-mark 2"$i"
+        iptables -t mangle -A PREROUTING -i br-lan -m conntrack --ctstate NEW -m statistic --mode nth --every $PPP_NUM --packet $i -j CONNMARK --set-mark 2"$i"
+        iptables -t mangle -A PREROUTING -i br-lan -m connmark --mark 2"$i" -j MARK --set-mark 2"$i"
+        ip rule del table 2"$i"0
+        ip rule add fwmark 2"$i" table 2"$i"0
+        ip route del default table 2"$i"0
+        ip route add default via $ipaddr dev $var table 2"$i"0
+        let i=i+1
+        done
+        
+        
+        i=0
+        for var in ${array[@]}
+        do
+        ipaddr=$(ip route show |grep default | grep $var | awk '{print $3 }')
+        iptables -t mangle -D PREROUTING  -m conntrack --ctstate NEW -d $ipaddr/24 -j MARK --set-mark 2"$i"
+        iptables -t mangle -A PREROUTING  -m conntrack --ctstate NEW -d $ipaddr/24 -j MARK --set-mark 2"$i"
+        let i=i+1
+        done
+        
+        iptables -t mangle -D PREROUTING -p tcp --dport 443 -m conntrack --ctstate NEW -j MARK --set-mark 20
+        iptables -t mangle -A PREROUTING -p tcp --dport 443 -m conntrack --ctstate NEW -j MARK --set-mark 20
+        
+        iptables -t mangle -D PREROUTING -p udp --dport 443 -m conntrack --ctstate NEW -j MARK --set-mark 20
+        iptables -t mangle -A PREROUTING -p udp --dport 443 -m conntrack --ctstate NEW -j MARK --set-mark 20
+        
+        iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW -j CONNMARK --save-mark
+        iptables -t mangle -A POSTROUTING -m conntrack --ctstate NEW -j CONNMARK --save-mark
+        iptables -t mangle -D PREROUTING -i br-lan -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark
+        iptables -t mangle -A PREROUTING -i br-lan -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark
+        ip route flush cache

@@ -27,21 +27,6 @@
 #include <net/netfilter/nf_conntrack.h>
 #include <net/netfilter/nf_conntrack_acct.h>
 
-#include <linux/types.h>      // 用于 uint32_t, uint8_t 等类型
-#include <linux/if.h>         // 用于网络接口定义
-#include <linux/in.h>         // 用于网络接口定义
-#include <linux/in6.h>         // 用于网络接口定义
-#include <linux/seq_file.h>   // 用于 seq_file 结构
-#include <linux/net.h>  // 包含校验和相关定义
-#include <linux/pkt_sched.h>
-#include <linux/skbuff.h>
-#include <linux/netdevice.h>
-#include <linux/if_ether.h>
-
-#include <net/netfilter/nf_conntrack.h>
-#include <net/netfilter/nf_conntrack_core.h>
-#include <net/netfilter/nf_conntrack_tuple.h>
-
 #include "nf_hnat_mtk.h"
 #include "hnat.h"
 
@@ -962,7 +947,7 @@ static void mtk_hnat_nf_update(struct sk_buff *skb)
 	if (unlikely(!skb_hnat_is_hashed(skb)))
 		return ;
 		
-	if (unlikely((skb->mark & 0xFF) == HNAT_EXCEPTION_TAG))
+	if (unlikely(skb->mark == HNAT_EXCEPTION_TAG))
 		return ;
  
 	ct = nf_ct_get(skb, &ctinfo);
@@ -1421,185 +1406,6 @@ struct foe_entry ppe_fill_info_blk(struct ethhdr *eth, struct foe_entry entry,
 	return entry;
 }
 
-/**
- * 流量方向枚举
- * HQOS_UPLOAD:   LAN→WAN, 使用上行队列 Q0-Q31 (sch0/sch2)
- * HQOS_DOWNLOAD: WAN→LAN, 使用下行队列 Q32-Q63 (sch1/sch3)
- * HQOS_LOCAL:    LAN→LAN/WiFi等本地流量, 不应受 WAN 限速
- */
-enum hqos_direction {
-    HQOS_UPLOAD   = 0,
-    HQOS_DOWNLOAD = 1,
-    HQOS_LOCAL    = 2,
-};
-
-
-static enum hqos_direction get_hqos_direction(const struct sk_buff *skb, u32 gmac,
-					      const struct net_device *dev,
-					      const struct nf_conn *ct,
-					      enum ip_conntrack_info ctinfo) {
-    bool to_wan = (gmac == NR_GMAC2_PORT);
-    bool to_wifi = get_wifi_hook_if_index_from_dev(dev) != 0;
-    bool to_lan_switch = (gmac == NR_GMAC1_PORT);
-
-    /* 因素 1: 物理目的地是 WAN 端口，必定是上行 */
-    if (to_wan)
-        return HQOS_UPLOAD;
-
-    /* 因素 2: [BUGFIX] 用 conntrack REPLY 方向检测真实下行
-     * IS_LAN/IS_WAN 宏完全相同，导致 "wan.41" 被 hnat_set_iif 打为 GE_LAN。
-     * FROM_GE_WAN(skb) 对 PPPoE EXT 接口失效。
-     * 改用 ctinfo==IP_CT_ESTABLISHED_REPLY 作为下行 ground-truth。
-     */
-    if (ct && IS_LAN(dev) &&
-        (ctinfo == IP_CT_ESTABLISHED_REPLY || ctinfo == IP_CT_RELATED_REPLY))
-        return HQOS_DOWNLOAD;
-
-    /* 因素 3: 尽管 IS_LAN/IS_WAN 相同，为了兼容非 PPPoE 场景保留 FROM_GE_WAN 检查 */
-    if (FROM_GE_WAN(skb))
-        return HQOS_DOWNLOAD;
-
-    /* 因素 4: 目标是 LAN 交换机或 Wi-Fi，且没有 REPLY 标识 → 内网互访 */
-    if (to_lan_switch || to_wifi)
-        return HQOS_LOCAL;
-
-    /* 因素 5: 来源是 LAN 但目的不是 LAN/Wi-Fi/WAN (MapE/VPN 等虚拟接口) */
-    if (FROM_GE_LAN(skb) || FROM_GE_VIRTUAL(skb))
-        return HQOS_UPLOAD;
-
-    return HQOS_LOCAL;
-}
-/**
- * 检查 IP 是否属于 192.168.109.[2-254] 网段
- * 与 sch_cake.c:is_ip_in_109_range_k() 语义相同，独立实现，无跨文件依赖
- * [HNAT-C-QOS109-01] ip_be: 网络字节序的 IPv4 地址
- */
-static inline bool is_ip_in_109_range_hnat(__be32 ip_be)
-{
-	const u8 *p = (const u8 *)&ip_be;
-
-	if (p[0] != 192 || p[1] != 168)
-		return false;
-	if (p[2] != 109)
-		return false;
-	if (p[3] < 2 || p[3] > 254)
-		return false;
-	return true;
-}
-
-/**
- * 检查 IP 是否属于 VIP 网段（静态范围或动态注册）
- * [HNAT-C-VIP-01] 静态: 192.168.110-119.[10-39]
- * [HNAT-C-VIP-03] 动态: eqos add $ip ... 64 注册到 /sys/kernel/debug/hnat/vip_list
- * ip_be: 网络字节序 IPv4 地址
- * 注意: 此函数只在 HNAT UNBIND→BIND 建表时调用（CPU 慢路径），循环开销可接受
- */
-static bool is_vip_ip_hnat(__be32 ip_be)
-{
-	const u8 *p = (const u8 *)&ip_be;
-	int i, num;
-
-	/* 静态 VIP 范围检测: 192.168.110-119.[10-39] */
-	if (p[0] == 192 && p[1] == 168 &&
-	    p[2] >= 110 && p[2] <= 119 &&
-	    p[3] >= 10  && p[3] <= 39)
-		return true;
-
-	/* 动态 VIP 表查询: 线性扫描, smp_load_acquire 保证计数器可见性
-	 * 写路径已通过 smp_store_release 保证 IP 在计数器之前对其他核可见 */
-	num = smp_load_acquire(&hnat_priv->vip_ip_num);
-	for (i = 0; i < num; i++) {
-		if (hnat_priv->vip_ips[i] == ip_be)
-			return true;
-	}
-	return false;
-}
-
-/**
- * [HNAT-C-VIP-04] 检查 HNAT 条目的目标 MAC 是否在 MAC VIP 表中
- * entry 的 dmac_hi/lo 在 qid 分配前已由 eth->h_dest 写入 (见 1351 行):
- *   dmac_hi = swab32(*((u32 *)eth->h_dest))
- *   dmac_lo = swab16(*((u16 *)&eth->h_dest[4]))
- * 比较方式与 entry_mac_cmp() 完全一致（见 hnat.c:172）
- */
-static bool is_vip_mac_hnat(const struct foe_entry *e)
-{
-	u32 dmac_hi_sw;
-	u16 dmac_lo_sw;
-	const u8 *mac;
-	int i, num;
-
-	if (!IS_IPV4_GRP(e))
-		return false;
-
-	/* 还原: swab32(dmac_hi) = MAC[3]<<24|MAC[2]<<16|MAC[1]<<8|MAC[0]
-	 *       即 MAC[0..3] 在内存中的小端表示，可直接与 *(u32*)mac 比较 */
-	dmac_hi_sw = swab32(e->ipv4_hnapt.dmac_hi);
-	dmac_lo_sw = swab16(e->ipv4_hnapt.dmac_lo);
-
-	num = smp_load_acquire(&hnat_priv->vip_mac_num);
-	for (i = 0; i < num; i++) {
-		mac = hnat_priv->vip_macs[i];
-		if (*((const u32 *)mac)     == dmac_hi_sw &&
-		    *((const u16 *)&mac[4]) == dmac_lo_sw)
-			return true;
-	}
-	return false;
-}
-
-/**
- * 输出: 硬件队列ID (0-31, 连续)
- *
- * 队列布局 (队列号越小优先级越高):
- *   Q0     = EF(46)              VIP最高优先级   (CAKE tin7)
- *   Q1     = CS6(48)/CS7(56)     网络控制        (CAKE tin6)
- *   Q2     = CS4(32)/CS5(40)/VA(44) 实时         (CAKE tin5)
- *   Q3     = CS2/AF2x(16-23)    交互应用        (CAKE tin4)
- *   Q4     = AF3x(24-31)/AF4x(33-39) 视频流     (CAKE tin3)
- *   Q5-Q29 = CS0(0) + 未定义     per-user队列    (CAKE tin2, 按IP hash)
- *   Q30    = LE(1)/CS1/AF1x(8-15) 背景最低      (CAKE tin0+1)
- *   Q31    = 限速设备专用           硬件限速队列
- */
-static uint8_t dscp_to_queue(uint8_t tos, __be32 lan_ip) {
-    uint8_t dscp = tos >> 2;  // 提取高6位为DSCP
-
-    if (dscp == 46) {
-        return 0;   // EF → Q0 (CAKE tin7)
-    } else if (dscp == 48 || dscp == 56) {
-        return 1;   // CS6/CS7 → Q1 (CAKE tin6)
-    } else if (dscp == 32 || dscp == 40 || dscp == 44) {
-        return 2;   // CS4/CS5/VA → Q2 (CAKE tin5)
-    } else if (dscp >= 16 && dscp <= 23) {
-        return 3;   // CS2/AF2x → Q3 (CAKE tin4)
-    } else if ((dscp >= 24 && dscp <= 31) || (dscp >= 33 && dscp <= 39)) {
-        return 4;   // AF3x/AF4x → Q4 (CAKE tin3)
-    } else if (dscp == 2) {
-        return 31;  // 限速设备专用 DSCP → Q31 (硬件限速队列)
-    } else if (dscp == 1 || (dscp >= 8 && dscp <= 15)) {
-        return 30;  // LE/CS1/AF1x → Q30 (CAKE tin0+1, 背景最低)
-    } else {
-        // CS0(0) + 未定义 → 按IP last_octet hash 分配到 Q5-Q29
-        // 25个队列, 实现 per-user 硬件队列隔离
-        uint8_t last_octet = ((const uint8_t *)&lan_ip)[3];
-        return 5 + (last_octet % 25);
-    }
-}
-
-static void hnat_set_entry_dscp(struct foe_entry *entry, u8 dscp)
-{
-    if (IS_IPV4_HNAPT(entry) || IS_IPV4_HNAT(entry)) {
-        entry->ipv4_hnapt.iblk2.dscp = dscp;
-    } else if (IS_IPV4_DSLITE(entry) || IS_IPV4_MAPE(entry) || IS_IPV4_MAPT(entry)) {
-        entry->ipv4_dslite.iblk2.dscp = dscp;
-    } else if (IS_IPV6_5T_ROUTE(entry)) {
-        entry->ipv6_5t_route.iblk2.dscp = dscp;
-    } else if (IS_IPV6_3T_ROUTE(entry)) {
-        entry->ipv6_3t_route.iblk2.dscp = dscp;
-    } else if (IS_IPV6_6RD(entry)) {
-        entry->ipv6_6rd.iblk2.dscp = dscp;
-    }
-}
-
 static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 				     const struct net_device *dev,
 				     struct foe_entry *foe,
@@ -1616,17 +1422,12 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 	enum ip_conntrack_info ctinfo;
 	u32 gmac = NR_DISCARD;
 	int udp = 0;
-	u32 qid = 1;    // 默认 Q1 (sch0 上行), dscp_en开启后由dscp_to_queue覆盖
-	u32 qos_mark = 0;
+	u32 qid = 0;
 	int port_id = 0;
 	int mape = 0;
 	u8  dscp = 0;
 	struct net_device *master_dev = (struct net_device *)dev;
 	struct mtk_mac *mac;
-	__be32 hash_ip = 0;
-	__be32 orig_sip = 0;
-	__be32 new_dip_val = 0;
-	enum hqos_direction dir = HQOS_LOCAL;
 
 	ct = nf_ct_get(skb, &ctinfo);
 	
@@ -1711,7 +1512,6 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 
 				entry.ipv4_dslite.bfib1.rmt = 1;
 				entry.ipv4_dslite.iblk2.dscp = iph->tos;
-				dscp = iph->tos;  // BUG-2 fix: 同步局部变量用于 dscp_to_queue()
 				entry.ipv4_dslite.vlan1 = hw_path->vlan_id;
 				if (hnat_priv->data->per_flow_accounting)
 					entry.ipv4_dslite.iblk2.mibf = 1;
@@ -1840,7 +1640,6 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 			entry.ipv6_5t_route.iblk2.dscp =
 				(ip6h->priority << 4 |
 				 (ip6h->flow_lbl[0] >> 4));
-			dscp = entry.ipv6_5t_route.iblk2.dscp;  // BUG-1 fix: 同步局部变量用于 dscp_to_queue()
 			break;
 
 		case NEXTHDR_IPIP:
@@ -1924,8 +1723,6 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 					entry.ipv4_hnapt.iblk2.qid =
 						(hnat_priv->data->version == MTK_HNAT_V4) ?
 						 skb->mark & 0x7f : skb->mark & 0xf;
-
-					entry.ipv4_hnapt.iblk2.qid = qid;
 					entry.ipv4_hnapt.iblk2.fqos = 1;
 				}
 
@@ -1974,9 +1771,6 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 			entry.ipv6_6rd.dscp = iph->tos;
 			entry.ipv6_6rd.per_flow_6rd_id = 1;
 			entry.ipv6_6rd.vlan1 = hw_path->vlan_id;
-
-			dscp = iph->tos;
-
 			if (hnat_priv->data->per_flow_accounting)
 				entry.ipv6_6rd.iblk2.mibf = 1;
 			break;
@@ -2040,146 +1834,15 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 		return 0;
 	}
 
-    // 首先判断物理方向，这对队列划分和内网 IP 提取至关重要
-    // [BUGFIX] 传入 ct/ctinfo 用于 REPLY 方向检测，解决 IS_LAN/IS_WAN 宏相同导致的方向误判
-    dir = get_hqos_direction(skb, gmac, dev, ct, ctinfo);
-
-		if (IS_HQOS_MODE) {
-			qid = (dir == HQOS_UPLOAD) ? 1 : 33;
-		} else if (skb->mark >= MAX_PPPQ_PORT_NUM) {
-			qid = skb->mark & (MTK_QDMA_TX_MASK);
-		}
-	else if (IS_PPPQ_MODE && (IS_DSA_1G_LAN(dev) || IS_DSA_WAN(dev))) {
+	if (IS_HQOS_MODE || skb->mark >= MAX_PPPQ_PORT_NUM)
+		qid = skb->mark & (MTK_QDMA_TX_MASK);
+	else if (IS_PPPQ_MODE && (IS_DSA_1G_LAN(dev) || IS_DSA_WAN(dev)))
 		qid = port_id & MTK_QDMA_TX_MASK;
-	}
-	else {
-		qid = (dir == HQOS_UPLOAD) ? 1 : 33; // 常规默认队列
-	}
-
-    // 防御性兜底：防止被异常的 mark 或 port_id 污染为 0
-    // 绝对不允许未经显式授权的流量占用 VIP Q0/Q32
-    if (!qid) {
-        qid = (dir == HQOS_UPLOAD) ? 1 : 33;
-    }
-
-    // 从 FOE entry 中提取 LAN IP 用于方向判断和 per-user 队列分配
-    // NAPT 地址映射:
-    //   上行: sip=LAN(111.x) → new_sip=WAN(101.88), dip=服务器 → new_dip=服务器
-    //   下行: sip=服务器 → new_sip=服务器, dip=WAN(101.88) → new_dip=LAN(111.x)
-    // 所以: 上行 LAN IP = sip, 下行 LAN IP = new_dip
-    if (IS_IPV4_HNAPT(&entry) || IS_IPV4_HNAT(&entry)) {
-        orig_sip = htonl(entry.ipv4_hnapt.sip);
-        new_dip_val = htonl(entry.ipv4_hnapt.new_dip);
-
-        // 基于精准方向确定真实内网 IP，用于 WRR per-user hash 隔离，彻底消除子网猜测
-        hash_ip = (dir == HQOS_DOWNLOAD) ? new_dip_val : orig_sip;
-    } else if (IS_IPV4_DSLITE(&entry) || IS_IPV4_MAPE(&entry) || IS_IPV4_MAPT(&entry)) {
-        orig_sip = htonl(entry.ipv4_dslite.sip);
-        // [P2-FIX] 非 NETSYS_V2 构建无 new_dip 字段, 用 orig_sip 作为 hash 兜底,
-        // 确保 DSLITE 下行不全堆积到 Q5
-        new_dip_val = orig_sip;  // fallback: 上行 sip 作为隔离 seed
-#if defined(CONFIG_MEDIATEK_NETSYS_V2)
-        new_dip_val = htonl(entry.ipv4_dslite.new_dip);  // 有 NETSYS_V2 时使用真实下行 LAN IP
-#endif
-        hash_ip = (dir == HQOS_DOWNLOAD) ? new_dip_val : orig_sip;
-    } else if (IS_IPV6_5T_ROUTE(&entry)) {
-        // IPv6 (BUG fix: 修复下载流量错误 Hash 服务器 IP 导致隔离失效)
-        // 提取精准的 LAN 侧 IPv6 尾部用于 hash
-        if (dir == HQOS_DOWNLOAD) {
-            hash_ip = htonl(entry.ipv6_5t_route.ipv6_dip3);
-        } else {
-            hash_ip = htonl(entry.ipv6_5t_route.ipv6_sip3);
-        }
-    } else if (IS_IPV6_3T_ROUTE(&entry)) {
-        if (dir == HQOS_DOWNLOAD) {
-            hash_ip = htonl(entry.ipv6_3t_route.ipv6_dip3);
-        } else {
-            hash_ip = htonl(entry.ipv6_3t_route.ipv6_sip3);
-        }
-    } else if (IS_IPV6_6RD(&entry)) {
-        // 6RD: tunnel_sipv4/dipv4 是IPv4
-        orig_sip = htonl(entry.ipv6_6rd.tunnel_sipv4);
-        new_dip_val = htonl(entry.ipv6_6rd.tunnel_dipv4);
-
-        hash_ip = (dir == HQOS_DOWNLOAD) ? new_dip_val : orig_sip;
-    }
-
-    // 提取完整 QoS mark (仅匹配低8位)，防止受到多线路由 (mwan3 等) 高位 mark 的干扰
-    qos_mark = skb->mark & 0xFF;
-
-    if (dir == HQOS_DOWNLOAD) {
-        if (skb->protocol == htons(ETH_P_IP)) {
-            // IPv4 独有降级与分类策略
-            // 优先级①: eqos 指定 VIP 下行 mark46 → 保留 EF → Q32 (最高)
-            if (qos_mark == 46) {
-                dscp = (dscp & 0x03) | 0xB8;
-                hnat_set_entry_dscp(&entry, dscp);
-            // 优先级②: [HNAT-C-QOS109-02] 109网段 UDP 小包(≤300B) 下行强制 CS6(TOS=0xC0)
-            } else if (is_ip_in_109_range_hnat(hash_ip) && udp && skb->len <= 300) {
-                dscp = 48 << 2;  // CS6: DSCP=48, TOS=0xC0 → dscp_to_queue → Q1 → +32 = Q33
-                hnat_set_entry_dscp(&entry, dscp);
-            // 优先级③: 外来 EF(46) 降级为 VA(44), 防止外部流量占用 VIP Q32/Q0
-            } else if ((dscp & 0xFC) == 0xB8) {
-                dscp = (dscp & 0x03) | 0xB0; // VA: TOS=0xB0, DSCP=44 → Q34
-                hnat_set_entry_dscp(&entry, dscp);
-            // 优先级④: 外来 CS6/CS7(48/56) 降级为 CS3(24), 防止外部服务器自打高 DSCP 占用 Q33 SP
-            } else if ((dscp & 0xE0) >= 0xC0 && qos_mark != 46) {
-                dscp = (dscp & 0x03) | (24 << 2); // CS3: DSCP=24 → dscp_to_queue → Q4 → +32 = Q36
-                hnat_set_entry_dscp(&entry, dscp);
-            }
-        } else if (skb->protocol == htons(ETH_P_IPV6)) {
-            // IPv6 独立降级与分类策略
-            // 优先级①: eqos 指定 VIP 下行 mark46 → 保留 EF → Q32
-            if (qos_mark == 46) {
-                dscp = (dscp & 0x03) | 0xB8;
-                hnat_set_entry_dscp(&entry, dscp);
-            // 优先级②: 外来 EF(46) 降级为 VA(44), 保护 VIP 队列
-            } else if ((dscp & 0xFC) == 0xB8) {
-                dscp = (dscp & 0x03) | 0xB0; // VA: TOS=0xB0, DSCP=44 → Q34
-                hnat_set_entry_dscp(&entry, dscp);
-            // 优先级③: IPv6 外来 CS6/CS7 降级为 CS3
-            } else if ((dscp & 0xE0) >= 0xC0 && qos_mark != 46) {
-                dscp = (dscp & 0x03) | (24 << 2); // CS3 → Q4 → +32 = Q36
-                hnat_set_entry_dscp(&entry, dscp);
-            }
-        }
-    }
-
-    if (IS_HQOS_MODE && hnat_priv->dscp_en) {
-        if (dir != HQOS_LOCAL) {
-            // bit7(0x80)=下行限速→Q63, bit6(0x40)=上行限速→Q31
-            // VIP mark=46=0x2E: bit7=0,bit6=0，不与限速 bit 冲突
-            if ((qos_mark & 0x80) && dir == HQOS_DOWNLOAD) {
-                qid = 63;  // [HNAT-C-FQOS01-05-①] 下行限速 → Q63
-            } else if ((qos_mark & 0x40) && dir == HQOS_UPLOAD) {
-                qid = 31;  // [HNAT-C-FQOS01-05-②] 上行限速 → Q31
-            } else if (dir == HQOS_DOWNLOAD &&
-                       (qos_mark == 46 ||
-                        is_vip_ip_hnat(hash_ip) ||
-                        is_vip_mac_hnat(&entry))) {
-                // [HNAT-C-VIP-02/04] VIP 下行 qid=32 三重保障:
-                // ① qos_mark==46: CONNMARK 正常还原
-                // ② is_vip_ip_hnat: 静态范围 + 动态 IP 表
-                // ③ is_vip_mac_hnat: MAC-only VIP 设备，无需知道设备 IP
-                qid = 32;
-                // 同步修正 iblk2.dscp 为 EF(0xB8)，保持 dscp 一致性
-                if (skb->protocol == htons(ETH_P_IP) &&
-                    (dscp & 0xFC) != 0xB8) {
-                    dscp = (dscp & 0x03) | 0xB8;
-                    hnat_set_entry_dscp(&entry, dscp);
-                }
-                pr_debug_ratelimited(
-                    "[HNAT-C-VIP-02] qid=32 via kernel VIP detect: hash_ip=%pI4 mark=%u dir=%d\n",
-                    &hash_ip, qos_mark, dir);
-            } else {
-                qid = dscp_to_queue(dscp, hash_ip);
-                if (dir == HQOS_DOWNLOAD) {
-                    qid = qid + 32;
-                }
-            }
-        }
-    }
-
+	else
+		qid = 0;
+	if ((IS_HQOS_MODE) && (dscp!=0) &&(hnat_priv->dscp_en))
+		qid = (dscp>>2)& (MTK_QDMA_TX_MASK);
+		
 	if (IS_IPV4_GRP(foe)) {
 		entry.ipv4_hnapt.iblk2.dp = gmac;
 		entry.ipv4_hnapt.iblk2.port_mg =
@@ -2187,16 +1850,9 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 
 		if (qos_toggle) {
 			if (hnat_priv->data->version == MTK_HNAT_V4) {
-				// [P1-FIX] V4: qid 字段 7-bit, 直接写入即可(qid≤63<128无截断)
-				// [HNAT-DIAG] 下行 VIP qid 根因追踪: mark=46 且 qid 不是 0/32时输出
-				if ((skb->mark & 0xFF) == 46 && qid != 0 && qid != 32)
-					pr_warn_ratelimited("[HNAT-VIP-DL-BUG] qid=%u want=32 hqos=%d dscp_en=%d mark=0x%x dir=%d iface=0x%x\n",
-						qid, IS_HQOS_MODE, (int)hnat_priv->dscp_en,
-						skb->mark, (int)dir, (unsigned)skb_hnat_iface(skb));
 				entry.ipv4_hnapt.iblk2.qid = qid & 0x7f;
 			} else {
 				/* qid[5:0]= port_mg[1:0]+ qid[3:0] */
-				// [P1-FIX] 非V4: iblk2.qid 存低4位, 高2位写入 port_mg (见下方 |= 操作)
 				entry.ipv4_hnapt.iblk2.qid = qid & 0xf;
 				if (hnat_priv->data->version != MTK_HNAT_V1)
 					entry.ipv4_hnapt.iblk2.port_mg |=
@@ -2229,11 +1885,9 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 
 		if (qos_toggle) {
 			if (hnat_priv->data->version == MTK_HNAT_V4) {
-				// [P1-FIX] V4: qid 7-bit 直接写入
 				entry.ipv6_5t_route.iblk2.qid = qid & 0x7f;
 			} else {
 				/* qid[5:0]= port_mg[1:0]+ qid[3:0] */
-				// [P1-FIX] 非V4: 只写低4位到 qid 字段
 				entry.ipv6_5t_route.iblk2.qid = qid & 0xf;
 				if (hnat_priv->data->version != MTK_HNAT_V1)
 					entry.ipv6_5t_route.iblk2.port_mg |=
@@ -2637,7 +2291,7 @@ static unsigned int mtk_hnat_nf_post_routing(
 	if (unlikely(!skb_hnat_is_hashed(skb)))
 		return 0;
 		
-	if (unlikely((skb->mark & 0xFF) == HNAT_EXCEPTION_TAG))
+	if (unlikely(skb->mark == HNAT_EXCEPTION_TAG))
 		return 0;
 
 	if (out->netdev_ops->ndo_flow_offload_check) {

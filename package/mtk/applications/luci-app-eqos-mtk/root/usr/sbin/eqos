@@ -1,711 +1,187 @@
 #!/bin/sh
 
 dev=br-lan
+hash_file="/tmp/hash_records.txt"
 
+generate_index() {
+    local input="$1"
+    local hash_value=$(echo -n "$input" | md5sum | cut -d' ' -f1)
+    local decimal_value=$((0x${hash_value:0:8}))
+    local index=$((decimal_value % 31 + 1))
+    echo $index
+}
+
+find_available_index() {
+    local base_index=$(generate_index "$1")
+    local index=$base_index
+
+    while true; do
+        if grep -q "^$index$" "$hash_file"; then
+            index=$((index % 31 + 1))
+            if [[ $index -eq $base_index ]]; then
+                echo "All slots are full. Returning 0."
+                return 0 
+            fi
+        else
+            echo $index >> "$hash_file"
+            echo $index
+            return 0
+        fi
+    done
+}
 stop_qos() {
-    tc qdisc del dev $dev root 2>/dev/null
-    tc qdisc del dev $dev ingress 2>/dev/null
-    tc qdisc del dev ${dev}-ifb root 2>/dev/null
-    ip link del dev ${dev}-ifb 2>/dev/null
+	tc qdisc del dev $dev root 2>/dev/null
+	tc qdisc del dev $dev ingress 2>/dev/null
+	tc qdisc del dev ${dev}-ifb root 2>/dev/null
+	ip link del dev ${dev}-ifb 2>/dev/null
 }
 
 start_qos() {
-    local dl=$1
-    local up=$2
-
-    tc qdisc add dev $dev root handle 1: htb || {
-        logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-20] install software tc root qdisc failed: dev=$dev, dl=$dl, up=$up"
-        exit 1
-    }
-    tc class add dev $dev parent 1: classid 1:1 htb rate ${dl}mbit || {
-        logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-21] install software tc root class failed: dev=$dev, dl=$dl"
-        exit 1
-    }
-
-    ip link add dev ${dev}-ifb name ${dev}-ifb type ifb || {
-        logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-22] create software tc IFB failed: dev=$dev, ifb=${dev}-ifb"
-        exit 1
-    }
-    ip link set dev ${dev}-ifb up || {
-        logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-23] enable software tc IFB failed: dev=$dev, ifb=${dev}-ifb"
-        exit 1
-    }
-
-    tc qdisc add dev ${dev}-ifb root handle 1: htb || {
-        logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-24] install software tc IFB qdisc failed: ifb=${dev}-ifb, up=$up"
-        exit 1
-    }
-    tc class add dev ${dev}-ifb parent 1: classid 1:1 htb rate ${up}mbit || {
-        logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-25] install software tc IFB class failed: ifb=${dev}-ifb, up=$up"
-        exit 1
-    }
-
-    tc qdisc add dev $dev ingress || {
-        logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-26] install software tc ingress qdisc failed: dev=$dev"
-        exit 1
-    }
-    tc filter add dev $dev parent ffff: protocol ip u32 match u32 0 0 \
-        flowid 1:1 action mirred egress redirect dev ${dev}-ifb || {
-        logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-27] install software tc IPv4 ingress redirect failed: dev=$dev, ifb=${dev}-ifb"
-        exit 1
-    }
-    logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-06-01] install software tc IPv4 ingress redirect: dev=$dev, ifb=${dev}-ifb"
-    # IPv6 下行流量同样重定向到 IFB
-    tc filter add dev $dev parent ffff: protocol ipv6 u32 match u32 0 0 \
-        flowid 1:1 action mirred egress redirect dev ${dev}-ifb || {
-        logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-02] install software tc IPv6 ingress redirect failed: dev=$dev, ifb=${dev}-ifb"
-        exit 1
-    }
-    logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-06-03] install software tc IPv6 ingress redirect: dev=$dev, ifb=${dev}-ifb"
-}
-
-validate_global_rate() {
-    local name="$1"
-    local value="$2"
-
-    case "$value" in
-        ''|*[!0-9]*|0)
-            logger -p daemon.err -t eqos "[EQOS-C-FQOS01-01-01] invalid global ${name} speed: value=${value:-empty}, expected=positive_mbit"
-            exit 1
-            ;;
-        *)
-            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-01-02] accept global ${name} speed: value=$value, unit=mbit"
-            ;;
-    esac
-}
-
-cleanup_eqos_route_tables() {
-    local reason="$1"
-    local _ci _om
-
-    for _ci in 0 1 2 3 4 5 6 7; do
-        _om=$(printf "0x%02x00" $((0x20 + _ci)))
-        while ip rule del fwmark ${_om}/0xff00 table "2${_ci}0" 2>/dev/null; do :; done
-        while ip rule del fwmark "2${_ci}" table "2${_ci}0" 2>/dev/null; do :; done
-        ip route flush table "2${_ci}0" 2>/dev/null
-    done
-    logger -p daemon.debug -t eqos "[EQOS-C-FQOS02-03-07] cleanup route tables: reason=$reason, high_fwmark=0x20-0x27, legacy_fwmark=20-27"
-}
-
-eqos_iface_by_index() {
-    local target="$1"
-    local iface_list ifname cur
-
-    iface_list=$(uci -q get eqos.config.interface | tr ',' ' ')
-    [ -n "$iface_list" ] || iface_list="wan wan2 wan3 wan4 wan5 wan6 wan7 wan8"
-
-    cur=0
-    for ifname in $iface_list; do
-        if [ "$cur" -eq "$target" ]; then
-            echo "$ifname"
-            return 0
-        fi
-        cur=$((cur + 1))
-    done
-    return 1
-}
-
-eqos_default_route_for_iface() {
-    local ifname="$1"
-
-    ip route show default | awk -v ifname="$ifname" '
-    {
-        gateway = "";
-        route_dev = "";
-        for (i = 1; i <= NF; i++) {
-            if ($i == "via") {
-                gateway = $(i + 1);
-            }
-            if ($i == "dev") {
-                route_dev = $(i + 1);
-            }
-        }
-        if (route_dev == ifname || route_dev ~ ("(^|[-_.])" ifname "$")) {
-            print gateway "|" route_dev;
-            exit;
-        }
-    }'
-}
-
-install_eqos_dev_route() {
-    local idx="$1"
-    local mark="$2"
-    local ip="$3"
-    local ifname route_info gateway route_dev table
-
-    table="2${idx}0"
-    ifname=$(eqos_iface_by_index "$idx") || {
-        logger -p daemon.err -t eqos "[EQOS-C-FQOS02-03-08] skip device WAN route: ip=$ip, interface=$idx, reason=no_interface_mapping"
-        return 1
-    }
-
-    route_info=$(eqos_default_route_for_iface "$ifname")
-    if [ -z "$route_info" ]; then
-        logger -p daemon.err -t eqos "[EQOS-C-FQOS02-03-09] skip device WAN route: ip=$ip, interface=$idx, ifname=$ifname, reason=no_default_route"
-        return 1
-    fi
-    gateway=${route_info%%|*}
-    route_dev=${route_info#*|}
-
-    if [ -n "$gateway" ]; then
-        ip route replace default via "$gateway" dev "$route_dev" table "$table" || {
-            logger -p daemon.err -t eqos "[EQOS-C-FQOS02-03-11] install device WAN route failed: ip=$ip, interface=$idx, ifname=$ifname, route_dev=$route_dev, gateway=$gateway, table=$table"
-            return 1
-        }
-    else
-        ip route replace default dev "$route_dev" table "$table" || {
-            logger -p daemon.err -t eqos "[EQOS-C-FQOS02-03-11] install device WAN route failed: ip=$ip, interface=$idx, ifname=$ifname, route_dev=$route_dev, gateway=none, table=$table"
-            return 1
-        }
-    fi
-    while ip rule del fwmark ${mark}/0xff00 table "$table" 2>/dev/null; do :; done
-    while ip rule del fwmark "2${idx}" table "$table" 2>/dev/null; do :; done
-    ip rule add fwmark ${mark}/0xff00 table "$table" || {
-        logger -p daemon.err -t eqos "[EQOS-C-FQOS02-03-10] install device WAN ip rule failed: ip=$ip, interface=$idx, ifname=$ifname, route_dev=$route_dev, mark=${mark}/0xff00, table=$table"
-        return 1
-    }
-    logger -p daemon.debug -t eqos "[EQOS-C-FQOS02-03-12] install device WAN route: ip=$ip, interface=$idx, ifname=$ifname, route_dev=$route_dev, gateway=${gateway:-none}, mark=${mark}/0xff00, table=$table"
-    return 0
+	local dl=$1
+	local up=$2
+	rm /tmp/hash_records.txt
+    	touch "$hash_file"
+	tc qdisc add dev $dev root handle 1: htb
+	tc class add dev $dev parent 1: classid 1:1 htb rate ${dl}mbit
+	
+	ip link add dev ${dev}-ifb name ${dev}-ifb type ifb
+	ip link set dev ${dev}-ifb up
+	
+	tc qdisc add dev ${dev}-ifb root handle 1: htb
+	tc class add dev ${dev}-ifb parent 1: classid 1:1 htb rate ${up}mbit
+	
+	tc qdisc add dev $dev ingress
+	tc filter add dev $dev parent ffff: protocol ip u32 match u32 0 0 flowid 1:1 action mirred egress redirect dev ${dev}-ifb
 }
 
 iptables_stop() {
-    iptables -t mangle -D FORWARD  -j eqos
-    ip6tables -t mangle -D FORWARD  -j eqos
-    iptables -t mangle -D FORWARD  -j eqos_apply 2>/dev/null
-    ip6tables -t mangle -D FORWARD  -j eqos_apply 2>/dev/null
-    iptables -t mangle -D FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF 2>/dev/null
-    ip6tables -t mangle -D FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF 2>/dev/null
-    echo 0 > /sys/kernel/debug/hnat/qos_toggle
-    sed -i '/\/etc\/init.d\/eqos start/d' /etc/firewall.user
-    # 清理 dscp_clear 链
-    iptables -t mangle -D FORWARD -j dscp_clear 2>/dev/null
-    iptables -t mangle -F dscp_clear 2>/dev/null
-    iptables -t mangle -X dscp_clear 2>/dev/null
-    ip6tables -t mangle -D FORWARD -j dscp_clear 2>/dev/null
-    ip6tables -t mangle -F dscp_clear 2>/dev/null
-    ip6tables -t mangle -X dscp_clear 2>/dev/null
-    echo "10 0" > /sys/kernel/debug/hnat/hnat_setting
-    echo "11 1" >/sys/kernel/debug/hnat/hnat_setting
-    # [HNAT-C-VIP-03/04] 清空内核动态 VIP 表（IP + MAC）
-    echo flush > /sys/kernel/debug/hnat/vip_list 2>/dev/null
-    echo flush > /sys/kernel/debug/hnat/mac_vip_list 2>/dev/null
-    logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-04-01] flush kernel vip_list + mac_vip_list on stop"
-
-    # 清理 per-device WAN 子链（eqos add 写入的指定 WAN 路由规则）
-    while iptables -t mangle -D PREROUTING -j eqos_dev 2>/dev/null; do :; done
-    iptables -t mangle -F eqos_dev 2>/dev/null
-    iptables -t mangle -X eqos_dev 2>/dev/null
-    while iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \
-        -m comment --comment "eqos_dev" \
-        -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null; do :; done
-    while iptables -t mangle -D PREROUTING -i br-lan \
-        -m conntrack --ctstate ESTABLISHED,RELATED \
-        -m comment --comment "eqos_dev" \
-        -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null; do :; done
-    logger -p daemon.debug -t eqos "[EQOS-C-FQOS02-03-06] stop cleanup device WAN save/restore rules"
-    cleanup_eqos_route_tables "eqos_stop"
-
-    for i in $(seq 0 31); do
-    echo 0 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq$i
-    done
-    for i in $(seq 32 63); do
-    echo 1 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq$i
-    done
-    # 清零限速累加器和per-device速率记录
-    rm -f /tmp/eqos_q31_rate /tmp/eqos_q63_rate /tmp/eqos_dev_up_* /tmp/eqos_dev_dl_*
-    echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch0
-    echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch1
-    echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch2
-    echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch3
+		iptables -t mangle -D FORWARD  -j eqos
+		ip6tables -t mangle -D FORWARD  -j eqos
+		ebtables -t nat -D POSTROUTING  -j eqos -p ipv6
+		echo 0 > /sys/kernel/debug/hnat/qos_toggle
+		sed -i '/\/etc\/init.d\/eqos start/d' /etc/firewall.user
+		iptables -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 0
+		iptables -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 0
+		ip6tables -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 0
+		ip6tables -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 0
+		echo "10 0" > /sys/kernel/debug/hnat/hnat_setting
+		echo "11 30" >/sys/kernel/debug/hnat/hnat_setting
+		for i in $(seq 0 31); do
+		echo 0 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq$i
+		done
+		for i in $(seq 32 63); do
+		echo 1 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq$i
+		done	
+		echo 0 wrr 10000000 > /sys/kernel/debug/hnat/qdma_sch0
+		echo 0 wrr 10000000 > /sys/kernel/debug/hnat/qdma_sch1
+		echo 0 wrr 10000000 > /sys/kernel/debug/hnat/qdma_sch2
+		echo 0 wrr 10000000 > /sys/kernel/debug/hnat/qdma_sch3
 }
 
 iptables_start_prepare() {
-    # ipv6enabled 开关：需在此读取，后面所有 ip6tables 内容必须受此开关控制
-    ipv6_en=$(uci -q get eqos.config.ipv6enabled || echo 0)
-
-    # EF(46) 降级为 VA(44) 即时语音, Q0 只留给 eqos 指定的 VIP 设备
-    # VA(44) 保留, 走 Q2 实时交互队列
-    # 其他全部清零, eqos 链会重新标记: VIP=46, 限速=2, 109小包=46
-    iptables -t mangle -N dscp_clear 2>/dev/null
-    iptables -t mangle -F dscp_clear
-    # VA(44) 保留, 内部已降级的包不再重复处理
-    iptables -t mangle -A dscp_clear -m dscp --dscp 44 -j RETURN
-    # EF(46) → VA(44): 外来高优先级 EF 降为 VA, 防止占用 VIP Q0/Q32 SP
-    iptables -t mangle -A dscp_clear -m dscp --dscp 46 -j DSCP --set-dscp 44
-    # CS6(48) → CS3(24): 外来 CS6 降为 CS3 → dscp_to_queue→Q4→+32=Q36
-    # 防止外部服务器(P2P/游戏服务器)的 CS6 包占用内部 Q33 SP 队列
-    iptables -t mangle -A dscp_clear -m dscp --dscp 48 -j DSCP --set-dscp 24
-    # CS7(56) → CS3(24): 同理
-    iptables -t mangle -A dscp_clear -m dscp --dscp 56 -j DSCP --set-dscp 24
-    iptables -t mangle -D FORWARD -j dscp_clear 2>/dev/null
-    iptables -t mangle -I FORWARD 1 -j dscp_clear
-    logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-03-01] install dscp_clear: EF→VA, CS6→CS3, CS7→CS3"
-
-    if [ "$ipv6_en" = "1" ]; then
-        ip6tables -t mangle -N dscp_clear 2>/dev/null
-        ip6tables -t mangle -F dscp_clear
-        ip6tables -t mangle -A dscp_clear -m dscp --dscp 44 -j RETURN
-        ip6tables -t mangle -A dscp_clear -m dscp --dscp 46 -j DSCP --set-dscp 44
-        ip6tables -t mangle -A dscp_clear -m dscp --dscp 48 -j DSCP --set-dscp 24
-        ip6tables -t mangle -A dscp_clear -m dscp --dscp 56 -j DSCP --set-dscp 24
-        ip6tables -t mangle -D FORWARD -j dscp_clear 2>/dev/null
-        ip6tables -t mangle -I FORWARD 1 -j dscp_clear
-        logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-03-02] install IPv6 dscp_clear: EF→VA, CS6→CS3, CS7→CS3"
-    fi
-
-    # 新架构: 统一连接跟踪标记还原 (仅还原低8位 0xFF，保护 mwan3 等多线高位 mark)
-    iptables -t mangle -D FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF 2>/dev/null
-    iptables -t mangle -I FORWARD 1 -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF
-    if [ "$ipv6_en" = "1" ]; then
-        ip6tables -t mangle -D FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF 2>/dev/null
-        ip6tables -t mangle -I FORWARD 1 -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF
-    fi
+		iptables -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 0
+		iptables -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 0
+		iptables -t mangle -A FORWARD -i br-lan -j DSCP --set-dscp 0
+		iptables -t mangle -A FORWARD -o br-lan -j DSCP --set-dscp 0
+		ip6tables -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 0
+		ip6tables -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 0
+		ip6tables -t mangle -A FORWARD -i br-lan -j DSCP --set-dscp 0
+		ip6tables -t mangle -A FORWARD -o br-lan -j DSCP --set-dscp 0
 }
 
 iptables_start_inital() {
-    iptables -t mangle -N eqos
-    iptables -t mangle -N eqos_apply 2>/dev/null
-    iptables -t mangle -F eqos
-    iptables -t mangle -F eqos_apply 2>/dev/null
-    iptables -t mangle -D FORWARD  -j eqos
-    iptables -t mangle -D FORWARD  -j eqos_apply 2>/dev/null
-    iptables -t mangle -A FORWARD  -j eqos
-    iptables -t mangle -A FORWARD  -j eqos_apply
-
-    # per-device WAN 绑定专属子链（防止 eqos add 直写 PREROUTING 导致死机/stop 后残留）
-    iptables -t mangle -N eqos_dev 2>/dev/null
-    iptables -t mangle -F eqos_dev
-    while iptables -t mangle -D PREROUTING -j eqos_dev 2>/dev/null; do :; done
-    iptables -t mangle -A PREROUTING -j eqos_dev
-    cleanup_eqos_route_tables "eqos_start"
-    while iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \
-        -m comment --comment "eqos_dev" \
-        -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null; do :; done
-    while iptables -t mangle -D PREROUTING -i br-lan \
-        -m conntrack --ctstate ESTABLISHED,RELATED \
-        -m comment --comment "eqos_dev" \
-        -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null; do :; done
-    logger -p daemon.debug -t eqos "[EQOS-C-FQOS02-03-01] cleanup stale broad device WAN save/restore rules: chain=eqos_dev, mask=0xFF00"
-
-    ipv6_en=$(uci -q get eqos.config.ipv6enabled || echo 0)
-
-    if [ "$ipv6_en" = "1" ]; then
-        ip6tables -t mangle -N eqos 2>/dev/null
-        ip6tables -t mangle -N eqos_apply 2>/dev/null
-        ip6tables -t mangle -F eqos 2>/dev/null
-        ip6tables -t mangle -F eqos_apply 2>/dev/null
-        while ip6tables -t mangle -D FORWARD -j eqos 2>/dev/null; do :; done
-        while ip6tables -t mangle -D FORWARD -j eqos_apply 2>/dev/null; do :; done
-        ip6tables -t mangle -A FORWARD -j eqos 2>/dev/null
-        ip6tables -t mangle -A FORWARD -j eqos_apply 2>/dev/null
-        logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-08-01] install IPv6 eqos chain order: eqos before eqos_apply, ipv6enabled=$ipv6_en"
-    fi
-
-    # 全局还原链 (eqos_apply): 将 ct_mark 复制回 skb->mark
-    # 必须覆盖 NEW + ESTABLISHED,RELATED:
-    #   - NEW: eqos chain 刚通过 CONNMARK --set-xmark 写入 ct_mark (只写 ct_mark 不写 skb->mark)
-    #          必须在 eqos_apply 阶段显式 restore，否则 HNAT 首包建表时 mark=0，VIP/限速漏判
-    #   - ESTABLISHED,RELATED: 后续包依赖此步还原已存储的 ct_mark
-    iptables -t mangle -A eqos_apply -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF
-    [ "$ipv6_en" = "1" ] && ip6tables -t mangle -A eqos_apply -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF
-
-    # 全局 DSCP 同步规则 (方向感知): 仅对限速方向设置 DSCP=2，避免非限速方向降级至 Q31
-    # VIP mark=46=0x2E: bit6=0, bit7=0 → 两条规则均不命中，VIP DSCP 不受影响
-    # bit6(0x40)=上行限速: 仅对 LAN→WAN 包 (-i br-lan) 设置 DSCP=2 → dscp_to_queue→Q31
-    iptables  -t mangle -A eqos_apply -i br-lan     -m mark --mark 0x40/0x40 -j DSCP --set-dscp 2
-    [ "$ipv6_en" = "1" ] && ip6tables -t mangle -A eqos_apply -i br-lan     -m mark --mark 0x40/0x40 -j DSCP --set-dscp 2
-    # bit7(0x80)=下行限速: 仅对 WAN→LAN 包 (! -i br-lan) 设置 DSCP=2 → dscp_to_queue→Q63
-    iptables  -t mangle -A eqos_apply ! -i br-lan   -m mark --mark 0x80/0x80 -j DSCP --set-dscp 2
-    [ "$ipv6_en" = "1" ] && ip6tables -t mangle -A eqos_apply ! -i br-lan   -m mark --mark 0x80/0x80 -j DSCP --set-dscp 2
-    # VIP 下行标记同步: mark=46 → DSCP=46 (覆盖 dscp_clear 的 EF→VA 降级)
-    iptables  -t mangle -A eqos_apply -m mark --mark 46/0xFF -j DSCP --set-dscp 46
-    [ "$ipv6_en" = "1" ] && ip6tables -t mangle -A eqos_apply -m mark --mark 46/0xFF -j DSCP --set-dscp 46
-    echo 1 > /sys/kernel/debug/hnat/qos_toggle
-    # 基线调度器配置 (后续 start 会完整覆盖)
-    echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch0
-    echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch1
-    echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch2
-    echo 0 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch3
-    # VIP 队列 SP(weight=0): Q0(上行VIP) Q32(下行VIP)
-    # 默认队列 SP(weight=0): Q1(上行默认) Q33(下行默认) — 对应内核 qid=33
-    echo 0 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq0
-    echo 1 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq8
-    echo 0 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq1
-    echo 1 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq33
-    echo "11 1" >/sys/kernel/debug/hnat/hnat_setting
-    uci -q set "turboacc.config.fastpath_mh_eth_hnat_bind_rate"="1"
-    uci -q commit "turboacc"
-    sed -i '/\/etc\/init.d\/eqos start/d' /etc/firewall.user
-    echo "/etc/init.d/eqos start" >> /etc/firewall.user
-    echo "10 1" > /sys/kernel/debug/hnat/hnat_setting
+		iptables -t mangle -N eqos
+		iptables -t mangle -F eqos
+		iptables -t mangle -D FORWARD  -j eqos
+		iptables -t mangle -A FORWARD  -j eqos	
+		echo 1 > /sys/kernel/debug/hnat/qos_toggle
+		echo 0 wrr 10000000 > /sys/kernel/debug/hnat/qdma_sch0
+		echo 0 wrr 10000000 > /sys/kernel/debug/hnat/qdma_sch1
+		echo 0 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq0
+		echo 1 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq32
+		echo "11 5" >/sys/kernel/debug/hnat/hnat_setting
+		uci -q set "turboacc.config.fastpath_mh_eth_hnat_bind_rate"="5"
+		uci -q commit "turboacc"
+		sed -i '/\/etc\/init.d\/eqos start/d' /etc/firewall.user
+		echo "/etc/init.d/eqos start" >> /etc/firewall.user
+		echo "10 1" > /sys/kernel/debug/hnat/hnat_setting
 }
 
 
-
 case "$1" in
-    "stop")
-        stop_qos
-    iptables_stop
-    ;;
-    "start")
-    global_dl="$2"
-    global_up="$3"
-    validate_global_rate "download" "$global_dl"
-    validate_global_rate "upload" "$global_up"
-    stop_qos
-    # 清零限速累加器和per-device速率记录
-    echo 0 > /tmp/eqos_q31_rate
-    echo 0 > /tmp/eqos_q63_rate
-    rm -f /tmp/eqos_dev_up_* /tmp/eqos_dev_dl_*
-    # [HNAT-C-VIP-03/04] start 时先清空内核动态 VIP 表, 确保从干净状态重建
-    # start 只调用 stop_qos 不调用 iptables_stop, 必须在此单独 flush
-    echo flush > /sys/kernel/debug/hnat/vip_list 2>/dev/null
-    echo flush > /sys/kernel/debug/hnat/mac_vip_list 2>/dev/null
-    logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-04-02] flush kernel vip_list + mac_vip_list on start"
-    iptables_start_prepare
-        start_qos "$global_dl" "$global_up"
-    iptables_start_inital
-    echo 1 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch0
-    echo 1 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch1
-    echo 1 wrr $((global_up*1000*10/10)) > /sys/kernel/debug/hnat/qdma_sch2
-    echo 1 wrr $((global_dl*1000*10/10)) > /sys/kernel/debug/hnat/qdma_sch3
-
-    # qdma_txq 格式: scheduler min_en min_rate max_en max_rate weight resv
-    # === 上行 Q0-Q31 ===
-    # Q0-Q4: 优先队列 → sch0 (SP, 不限速)
-    for i in $(seq 0 4); do
-        echo 0 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq$i
-    done
-    # Q5-Q29: per-user 默认队列 → sch2 (WRR 等权重=4)
-    for i in $(seq 5 29); do
-        echo 2 0 0 0 0 4 0 > /sys/kernel/debug/hnat/qdma_txq$i
-    done
-    # Q30: 背景 DSCP (LE/CS1/AF1x) → sch2 (WRR 低权重=1)
-    echo 2 0 0 0 0 1 0 > /sys/kernel/debug/hnat/qdma_txq30
-    # Q31: 限速设备专用 → sch2 (WRR 权重=1, 由 add 命令设 min/max rate)
-    echo 2 0 0 0 0 1 0 > /sys/kernel/debug/hnat/qdma_txq31
-
-    # === 下行 Q32-Q63 ===
-    # Q32-Q36: 优先队列 → sch1 (SP, 不限速)
-    for i in $(seq 32 36); do
-        echo 1 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq$i
-    done
-    # Q37-Q61: per-user 默认队列 → sch3 (WRR 等权重=4)
-    for i in $(seq 37 61); do
-        echo 3 0 0 0 0 4 0 > /sys/kernel/debug/hnat/qdma_txq$i
-    done
-    # Q62: 背景 DSCP (LE/CS1/AF1x) → sch3 (WRR 低权重=1)
-    echo 3 0 0 0 0 1 0 > /sys/kernel/debug/hnat/qdma_txq62
-    # Q63: 限速设备专用 → sch3 (WRR 权重=1, 由 add 命令设 min/max rate)
-    echo 3 0 0 0 0 1 0 > /sys/kernel/debug/hnat/qdma_txq63
-
-    #iptables -t mangle -D eqos -m iprange --src-range 192.168.110.10-192.168.110.39 -j MARK --set-xmark 0x99/0xFF
-    #iptables -t mangle -D eqos -m iprange --dst-range 192.168.110.10-192.168.110.39 -j MARK --set-xmark 0x99/0xFF
-
-    #iptables -t mangle -I eqos -m iprange  --src-range 192.168.110.10-192.168.110.39 -j MARK --set-xmark 0x99/0xFF
-    #iptables -t mangle -I eqos -m iprange  --dst-range 192.168.110.10-192.168.110.39 -j MARK --set-xmark 0x99/0xFF
-
-
-    #iptables -t mangle -D eqos -m iprange --src-range 192.168.110.10-192.168.110.39 -j DSCP --set-dscp 46
-    #iptables -t mangle -D eqos -m iprange --dst-range 192.168.110.10-192.168.110.39 -j DSCP --set-dscp 46
-
-    #iptables -t mangle -I eqos -m iprange  --src-range 192.168.110.10-192.168.110.39 -j DSCP --set-dscp 46
-    #iptables -t mangle -I eqos -m iprange  --dst-range 192.168.110.10-192.168.110.39 -j DSCP --set-dscp 46
-
-    # 插入使用 u32 模块实现更精确"并且"判断的规则
-    # u32 模块读取 4 字节为 32 位整数，必须使用位掩码隔离单个字节
-    #
-    # 源IP: 192.168.x.y, x=[110-119], y=[10-39]
-    # -s 192.168.0.0/16 确保是 192.168 开头
-    # 偏移 0xc = 源 IP 起始 (字节 12-15 = 192.168.x.y)
-    # &0x0000FF00 掩码提取第三字节 x, =0x6E00:0x7700 即 110-119
-    # &0x000000FF 掩码提取第四字节 y, =0x0A:0x27 即 10-39
-    # 新架构: 使用 CONNMARK, 只需要抓取上传方向(源IP), CONNMARK 会自动标记整个双向连接 (加 0xFF 掩码保护)
-    iptables -t mangle -I eqos -s 192.168.0.0/16 -m u32 --u32 "0xc&0x0000FF00=0x00006E00:0x00007700" -m u32 --u32 "0xc&0x000000FF=0x0000000A:0x00000027" -j CONNMARK --set-xmark 46/0xFF
-    logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-05] install unified static VIP marker: src=192.168.110-119.10-39, connmark=46"
-
-    # 192.168.109.0/24 网段: 仅加速小包 UDP（游戏包）
-    # 条件: UDP 协议 + 包长度 ≤ 300 字节
-    # 大于 300 的 UDP 和所有 TCP（视频/下载）不标记，走默认队列
-    iptables -t mangle -I eqos -s 192.168.109.0/24 -p udp -m length --length 0:300 -j DSCP --set-dscp 46
-    iptables -t mangle -I eqos -d 192.168.109.0/24 -p udp -m length --length 0:300 -j DSCP --set-dscp 46
-    logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-03-03] install 109 UDP small packet DSCP marker: udp<=300B, dscp=46(EF)"
-
-    # 所有 iptables 规则安装完毕后, 强制 flush HNAT 表
-    # 原因: 已 BIND 的旧 HNAT 条目使用旧 qid (在 dscp_clear/内核降级规则更新前建立)
-    #       hardware fast path 不经过 iptables, 旧条目的错误 qid 会一直持续到连接超时
-    #       flush 后, 新连接重新经过 CPU slow path 建表, 使用正确的降级规则和 qid
-    echo 1 > /sys/kernel/debug/hnat/hnat_entry
-    logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-03-04] flush HNAT table: force rebind with new dscp_clear rules"
-
-    # Delete existing rules properly
-    #iptables -t mangle -D eqos -m iprange --src-range 192.168.110.2-192.168.110.9 -j MARK --set-xmark 0x99/0xFF
-    #iptables -t mangle -D eqos -m iprange --dst-range 192.168.110.2-192.168.110.9 -j MARK --set-xmark 0x99/0xFF
-
-    #iptables -t mangle -D eqos -m iprange --src-range 192.168.110.40-192.168.110.254 -j MARK --set-xmark 0x99/0xFF
-    #iptables -t mangle -D eqos -m iprange --dst-range 192.168.110.40-192.168.110.254 -j MARK --set-xmark 0x99/0xFF
-
-    # Add new rules properly
-    #iptables -t mangle -A eqos -m iprange --src-range 192.168.110.2-192.168.110.9 -j MARK --set-xmark 0x99/0xFF
-    #iptables -t mangle -A eqos -m iprange --dst-range 192.168.110.2-192.168.110.9 -j MARK --set-xmark 0x99/0xFF
-
-    #iptables -t mangle -A eqos -m iprange  --src-range 192.168.110.40-192.168.110.254 -j MARK --set-xmark 0x99/0xFF
-    #iptables -t mangle -A eqos -m iprange  --dst-range 192.168.110.40-192.168.110.254 -j MARK --set-xmark 0x99/0xFF
-
-    ;;
-    "add")
-    ip="$2"
-    dl="$3"
-    up="$4"
-    id="$5"
-    macaddr="$6"
-    interface="$7"
-    cnt=$(tc class show dev $dev | wc -l)
-
-    case "$dl" in
-        ''|*[!0-9]*) dl=0 ;;
-    esac
-    case "$up" in
-        ''|*[!0-9]*) up=0 ;;
-    esac
-
-    raw_id="$id"
-    ipv6_en=$(uci -q get eqos.config.ipv6enabled || echo 0)
-    if [ -n "$macaddr" ]; then
-        dev_key="mac_${macaddr}"
-    elif [ -n "$ip" ]; then
-        dev_key="ip_${ip}"
-    else
-        logger -p daemon.err -t eqos "[EQOS-C-FQOS01-07-01] skip device without ip/mac: raw_mode=$raw_id, dl=$dl, up=$up"
-        exit 0
-    fi
-    case "$id" in
-        ''|*[!0-9]*)
-            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-01] legacy qos mode fallback: ip=$ip, raw_mode=$raw_id, normalized_mode=0"
-            id=0
-            ;;
-        *)
-            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-02] qos mode accepted: ip=$ip, mode=$id"
-            ;;
-    esac
-
-    if [ "$id" -eq 64 ]; then
-        # 清理旧规则（包含历史遗留的 -d $ip 规则，防止 upgrade 后残留）
-        [ -n "$macaddr" ] && iptables -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF 2>/dev/null
-        [ -n "$ip" ] && iptables -t mangle -D eqos -s $ip -j CONNMARK --set-xmark 46/0xFF 2>/dev/null
-        [ -n "$ip" ] && iptables -t mangle -D eqos -d $ip -j CONNMARK --set-xmark 46/0xFF 2>/dev/null
-        [ "$ipv6_en" = "1" ] && [ -n "$macaddr" ] && ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF 2>/dev/null
-        # [HNAT-C-VIP-03/04] 同步从内核动态 VIP 表删除
-        if [ -n "$ip" ]; then
-            echo "del $ip" > /sys/kernel/debug/hnat/vip_list 2>/dev/null
-            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-06] remove VIP IP from kernel vip_list: ip=$ip"
-        fi
-        if [ -n "$macaddr" ]; then
-            echo "del $macaddr" > /sys/kernel/debug/hnat/mac_vip_list 2>/dev/null
-            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-06b] remove VIP MAC from kernel mac_vip_list: mac=$macaddr"
-        fi
-
-        # 仅写上行方向规则: CONNMARK 是连接级标记，上行首包写入后自动传播到 REPLY 方向
-        # 不需要 -d $ip 规则：下行 ESTABLISHED 包通过 --restore-mark 还原即可，重复写没有意义且增加开销
-        [ -n "$macaddr" ] && iptables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF
-        [ -n "$ip" ] && iptables -t mangle -A eqos -s $ip -j CONNMARK --set-xmark 46/0xFF
-        [ "$ipv6_en" = "1" ] && [ -n "$macaddr" ] && ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF
-        logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-04] install VIP upstream marker only (CONNMARK bidirectional propagation): key=$dev_key, mac=$macaddr, ip=$ip, connmark=46"
-
-        # [HNAT-C-VIP-03/04] 将 IP 和 MAC 注册到内核 VIP 表
-        # 三重保障: CONNMARK(iptables) + IP 内核表 + MAC 内核表
-        if [ -n "$ip" ]; then
-            echo "add $ip" > /sys/kernel/debug/hnat/vip_list 2>/dev/null
-            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-05] register VIP IP to kernel vip_list: ip=$ip"
-        fi
-        if [ -n "$macaddr" ]; then
-            echo "add $macaddr" > /sys/kernel/debug/hnat/mac_vip_list 2>/dev/null
-            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-02-05b] register VIP MAC to kernel mac_vip_list: mac=$macaddr"
-        fi
-
-    elif [ "$id" -lt 64 ]; then
-        # 限速设备: bit6(0x40)=上行限速→Q31, bit7(0x80)=下行限速→Q63
-        # 架构说明: CONNMARK 是连接级双向标记，只需在上行方向(-s $ip / mac-source)写入，
-        #           HNAT 内核通过 get_hqos_direction() 的方向感知逻辑正确处理各方向
-        #           - 下行包(dir=DOWNLOAD): qos_mark&0x80 → Q63; qos_mark&0x40 无效 → WRR
-        #           - 上行包(dir=UPLOAD):  qos_mark&0x40 → Q31; qos_mark&0x80 无效 → WRR
-        #
-        # 穷举删除所有可能的旧限速规则（同时清理历史遗留的 -d $ip 规则，防止 upgrade 后残留）
-        for _xm in 0x40 0x80 0xC0; do
-            [ -n "$macaddr" ] && iptables  -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${_xm}/0xC0 2>/dev/null
-            [ -n "$ip" ] && iptables  -t mangle -D eqos -s $ip -j CONNMARK --set-xmark ${_xm}/0xC0 2>/dev/null
-            [ -n "$ip" ] && iptables  -t mangle -D eqos -d $ip -j CONNMARK --set-xmark ${_xm}/0xC0 2>/dev/null
-            [ "$ipv6_en" = "1" ] && [ -n "$macaddr" ] && ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${_xm}/0xC0 2>/dev/null
-        done
-
-        # 检查该设备是否已有记录, 如有则减去其旧速率后再加新速率
-        old_up_file="/tmp/eqos_dev_up_${dev_key}"
-        old_dl_file="/tmp/eqos_dev_dl_${dev_key}"
-        old_up=$(cat "$old_up_file" 2>/dev/null || echo 0)
-        old_dl=$(cat "$old_dl_file" 2>/dev/null || echo 0)
-
-        # 从总累加器中减去该设备的旧速率
-        if [ "$old_up" -gt 0 ]; then
-            cur_up=$(cat /tmp/eqos_q31_rate 2>/dev/null || echo 0)
-            new_total=$((cur_up - old_up))
-            [ $new_total -lt 0 ] && new_total=0
-            echo $new_total > /tmp/eqos_q31_rate
-            if [ $new_total -gt 0 ]; then
-                echo 2 1 ${new_total} 1 ${new_total} 1 1 > /sys/kernel/debug/hnat/qdma_txq31
-            else
-                echo 2 0 0 0 0 1 0 > /sys/kernel/debug/hnat/qdma_txq31
-            fi
-        fi
-        if [ "$old_dl" -gt 0 ]; then
-            cur_dl=$(cat /tmp/eqos_q63_rate 2>/dev/null || echo 0)
-            new_total=$((cur_dl - old_dl))
-            [ $new_total -lt 0 ] && new_total=0
-            echo $new_total > /tmp/eqos_q63_rate
-            if [ $new_total -gt 0 ]; then
-                echo 3 1 ${new_total} 1 ${new_total} 1 1 > /sys/kernel/debug/hnat/qdma_txq63
-            else
-                echo 3 0 0 0 0 1 0 > /sys/kernel/debug/hnat/qdma_txq63
-            fi
-        fi
-
-        # 记录每设备速率用于后续删除时减法, 再累加到总限速
-        echo $up > "$old_up_file"
-        echo $dl > "$old_dl_file"
-
-        # 按 up/dl 计算方向 xmark: bit6(0x40)=上行, bit7(0x80)=下行, 0xC0=双向
-        xmark=0
-        [ $up -ne 0 ] && xmark=$((xmark | 0x40))
-        [ $dl -ne 0 ] && xmark=$((xmark | 0x80))
-        if [ $xmark -ne 0 ]; then
-            # 只写上行方向规则（-s $ip / mac-source）:
-            # CONNMARK 会自动将 ct_mark 传播到 REPLY 方向的后续包
-            # HNAT 内核的方向感知逻辑已区分: 0x80+DOWNLOAD→Q63, 0x40+UPLOAD→Q31
-            [ -n "$macaddr" ] && iptables  -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${xmark}/0xC0
-            [ -n "$ip" ] && iptables  -t mangle -A eqos -s $ip -j CONNMARK --set-xmark ${xmark}/0xC0
-            [ "$ipv6_en" = "1" ] && [ -n "$macaddr" ] && ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${xmark}/0xC0
-            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-05-03] install upstream-only directional limit marker (CONNMARK bidirectional): key=$dev_key, mac=$macaddr, ip=$ip, xmark=${xmark}/0xC0, up=${up}, dl=${dl}"
-        fi
-
-        if [ $up -ne 0 ]; then
-            cur_up=$(cat /tmp/eqos_q31_rate 2>/dev/null || echo 0)
-            new_up=$((cur_up + up))
-            echo $new_up > /tmp/eqos_q31_rate
-            echo 2 1 ${new_up} 1 ${new_up} 1 1 > /sys/kernel/debug/hnat/qdma_txq31
-        fi
-
-        if [ $dl -ne 0 ]; then
-            cur_dl=$(cat /tmp/eqos_q63_rate 2>/dev/null || echo 0)
-            new_dl=$((cur_dl + dl))
-            echo $new_dl > /tmp/eqos_q63_rate
-            echo 3 1 ${new_dl} 1 ${new_dl} 1 1 > /sys/kernel/debug/hnat/qdma_txq63
-        fi
-
-        # 刷新 HNAT 表, 强制已有流重新绑定到新队列
-        echo 1 > /sys/kernel/debug/hnat/hnat_entry
-    else
-        if [ -n "$ip" ]; then
-            while iptables -t mangle -D eqos -s $ip -j MARK --set-xmark 0x99/0xFF 2>/dev/null; do :; done
-            while iptables -t mangle -D eqos -d $ip -j MARK --set-xmark 0x99/0xFF 2>/dev/null; do :; done
-        fi
-        logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-06-28] cleanup legacy software tc MARK rules: key=$dev_key, ip=$ip, mode=$id"
-    fi
-
-	    if [ "$id" -gt 64 ]; then
-	        if [ "$dl" -ne 0 ]; then
-	            tc class add dev $dev parent 1:1 classid 1:1$cnt htb rate ${dl}kbit ceil ${dl}kbit || {
-	                logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-04] install software tc download class failed: ip=$ip, mac=$macaddr, dl=$dl, flowid=1:1$cnt"
-	                exit 1
-	            }
-	            if [ -n "$ip" ]; then
-	                tc filter add dev $dev parent 1:0 protocol ip u32 match ip dst $ip flowid 1:1$cnt || {
-	                    logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-05] install software tc IPv4 download filter failed: ip=$ip, flowid=1:1$cnt"
-	                    exit 1
-	                }
-	                logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-06-06] install software tc IPv4 download filter: ip=$ip, flowid=1:1$cnt"
-	            else
-	                logger -p daemon.warn -t eqos "[EQOS-C-FQOS01-06-07] skip software tc IPv4 download filter: mac=$macaddr, ip empty"
-	            fi
-	            if [ -n "$macaddr" ]; then
-	                tc filter add dev $dev parent 1:0 protocol ipv6 flower dst_mac $macaddr flowid 1:1$cnt || {
-	                    logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-08] install software tc IPv6 download filter failed: mac=$macaddr, flowid=1:1$cnt"
-	                    exit 1
-	                }
-	                logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-06-09] install software tc IPv6 download filter: mac=$macaddr, flowid=1:1$cnt"
-	            else
-	                logger -p daemon.warn -t eqos "[EQOS-C-FQOS01-06-10] skip software tc IPv6 download filter: ip=$ip, mac empty"
-	            fi
-	        else
-	            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-06-11] skip software tc download direction: key=$dev_key, dl=0"
-	        fi
-
-	        if [ "$up" -ne 0 ]; then
-	            tc class add dev ${dev}-ifb parent 1:1 classid 1:1$cnt htb rate ${up}kbit ceil ${up}kbit || {
-	                logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-12] install software tc upload class failed: ip=$ip, mac=$macaddr, up=$up, flowid=1:1$cnt"
-	                exit 1
-	            }
-	            if [ -n "$ip" ]; then
-	                tc filter add dev ${dev}-ifb parent 1:0 protocol ip u32 match ip src $ip flowid 1:1$cnt || {
-	                    logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-13] install software tc IPv4 upload filter failed: ip=$ip, flowid=1:1$cnt"
-	                    exit 1
-	                }
-	                logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-06-14] install software tc IPv4 upload filter: ip=$ip, flowid=1:1$cnt"
-	            else
-	                logger -p daemon.warn -t eqos "[EQOS-C-FQOS01-06-15] skip software tc IPv4 upload filter: mac=$macaddr, ip empty"
-	            fi
-	            if [ -n "$macaddr" ]; then
-	                tc filter add dev ${dev}-ifb parent 1:0 protocol ipv6 flower src_mac $macaddr flowid 1:1$cnt || {
-	                    logger -p daemon.err -t eqos "[EQOS-C-FQOS01-06-16] install software tc IPv6 upload filter failed: mac=$macaddr, flowid=1:1$cnt"
-	                    exit 1
-	                }
-	                logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-06-17] install software tc IPv6 upload filter: mac=$macaddr, flowid=1:1$cnt"
-	            else
-	                logger -p daemon.warn -t eqos "[EQOS-C-FQOS01-06-18] skip software tc IPv6 upload filter: ip=$ip, mac empty"
-	            fi
-	        else
-	            logger -p daemon.debug -t eqos "[EQOS-C-FQOS01-06-19] skip software tc upload direction: key=$dev_key, up=0"
-	        fi
-	    fi
-
-    # per-device WAN 路由选择: 指定接口序号则锁定到对应 WAN 出口
-    if [ "$interface" ]; then
-        case "$interface" in
-            *[!0-9]*)
-                logger -p daemon.warn -t eqos "[EQOS-C-FQOS02-03-02] skip device WAN binding with legacy nonnumeric interface: ip=$ip, mac=$macaddr, interface=$interface"
-                ;;
-            *)
-                if [ -n "$ip" ]; then
-                    if [ "$interface" -gt 7 ]; then
-                        logger -p daemon.err -t eqos "[EQOS-C-FQOS02-03-13] skip device WAN binding with out-of-range interface: ip=$ip, mac=$macaddr, interface=$interface, valid_range=0-7"
-                    else
-                        rm_val=$(printf "0x%02x00" $((0x20 + interface)))
-                        if install_eqos_dev_route "$interface" "$rm_val" "$ip"; then
-                            # 路由标记写入 eqos_dev 专属子链（eqos start 时 flush，防止设备删除/stop 后残留）
-                            while iptables -t mangle -D eqos_dev -s $ip -m conntrack --ctstate NEW -j MARK --set-xmark ${rm_val}/0xFF00 2>/dev/null; do :; done
-                            while iptables -t mangle -D eqos_dev -s $ip -m conntrack --ctstate NEW -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null; do :; done
-                            iptables -t mangle -A eqos_dev -s $ip -m conntrack --ctstate NEW -j MARK --set-xmark ${rm_val}/0xFF00
-                            iptables -t mangle -A eqos_dev -s $ip -m conntrack --ctstate NEW -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00
-                            while iptables -t mangle -D eqos_dev -i br-lan -s $ip -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00 2>/dev/null; do :; done
-                            iptables -t mangle -A eqos_dev -i br-lan -s $ip -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF00 --ctmask 0xFF00
-                            logger -p daemon.debug -t eqos "[EQOS-C-FQOS02-03-03] install device WAN binding: ip=$ip, mac=$macaddr, interface=$interface, mark=${rm_val}/0xFF00"
-                        else
-                            logger -p daemon.err -t eqos "[EQOS-C-FQOS02-03-14] skip device WAN binding after route install failure: ip=$ip, mac=$macaddr, interface=$interface, mark=${rm_val}/0xFF00"
-                        fi
-                    fi
-                else
-                    logger -p daemon.err -t eqos "[EQOS-C-FQOS02-03-04] skip device WAN binding without IPv4 source: mac=$macaddr, interface=$interface"
-                fi
-                ;;
-        esac
-    fi
-    ;;
-    *)
-    echo "Usage: $0 <command> [options]"
-    echo "Commands:"
-    echo "  start dl_rate up_rate       #Total bandwidth (Mbit/s)"
-    echo "  stop"
-    echo "  add ip dl_rate up_rate      #Limiting the bandwidth of a single IP (kbit/s)"
-    echo "Example:"
-    echo "  $0 start 30 20              # Total bandwidth: down 30Mbit/s up 20Mbit/s"
-    echo "  $0 add 192.168.22.12 10 2   # down 10kbit/s  up 2kbit/s"
-    ;;
+	"stop")
+		stop_qos
+		iptables_stop
+	;;
+	"start")
+		stop_qos
+		iptables_start_prepare
+		start_qos $2 $3
+		iptables_start_inital
+		echo 1 wrr $(($3*1000)) > /sys/kernel/debug/hnat/qdma_sch2
+		echo 1 wrr $(($2*1000)) > /sys/kernel/debug/hnat/qdma_sch3
+	;;
+	"add")
+		ip="$2"
+		dl="$3"
+		up="$4"
+		macaddr="$6"
+		cnt=$(tc class show dev $dev | wc -l)
+		
+		interface="$7"
+		if [ -n "$ip" ]; then
+		id="$(find_available_index "$ip")"
+		elif [ -n "$macaddr" ]; then
+		id="$(find_available_index "$macaddr")"
+		fi
+		idpair=$((id+32))
+		if [ $id -lt 32 ]; then
+		iptables -t mangle -D eqos -s $ip -j DSCP --set-dscp ${id}
+		iptables -t mangle -D eqos -d $ip -j DSCP --set-dscp ${idpair}
+		ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j MARK --set-mark ${id}
+		ebtables -t nat -D eqos -p ipv6 -d $macaddr -j mark --mark-set ${idpair}
+		if [ $up -ne 0 ]; then
+		echo 2 0 0 1 ${up} 4 1 > /sys/kernel/debug/hnat/qdma_txq${id}
+		iptables -t mangle -A eqos -s $ip -j DSCP --set-dscp ${id}
+		ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j MARK --set-mark ${id}
+		fi
+		if [ $dl -ne 0 ]; then
+		echo 3 0 0 1 ${dl} 4 1 > /sys/kernel/debug/hnat/qdma_txq${idpair}
+		iptables -t mangle -A eqos -d $ip -j DSCP --set-dscp ${idpair}
+		ebtables -t nat -A eqos -p ipv6 -d $macaddr -j mark --mark-set ${idpair}
+		fi
+		else
+		iptables -t mangle -D eqos -s $ip -j MARK --set-mark 0x99
+		iptables -t mangle -D eqos -d $ip -j MARK --set-mark 0x99
+		if [ $up -ne 0 ]; then
+		iptables -t mangle -A eqos -s $ip -j MARK --set-mark 0x99
+		fi
+		if [ $dl -ne 0 ]; then
+		iptables -t mangle -A eqos -d $ip -j MARK --set-mark 0x99
+		fi
+		fi
+		if [ $id -gt 31 ]; then
+		tc class add dev $dev parent 1:1 classid 1:1$cnt htb rate ${dl}kbit ceil ${dl}kbit
+		tc filter add dev $dev parent 1:0 protocol ip u32 match ip dst $ip flowid 1:1$cnt
+		
+		tc class add dev ${dev}-ifb parent 1:1 classid 1:1$cnt htb rate ${up}kbit ceil ${up}kbit
+		tc filter add dev ${dev}-ifb parent 1:0 protocol ip u32 match ip src $ip flowid 1:1$cnt
+		fi
+		if [ $interface ]; then
+		iptables -t mangle -D PREROUTING -s $ip -m conntrack --ctstate NEW -j MARK --set-mark 2"$interface"
+		iptables -t mangle -A PREROUTING -s $ip -m conntrack --ctstate NEW -j MARK --set-mark 2"$interface"
+		iptables -t mangle -D PREROUTING -i br-lan -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark
+        	iptables -t mangle -A PREROUTING -i br-lan -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark
+		fi
+	;;
+	*)
+		echo "Usage: $0 <command> [options]"
+		echo "Commands:"
+		echo "  start dl_rate up_rate       #Total bandwidth (Mbit/s)"
+		echo "  stop"
+		echo "  add ip dl_rate up_rate      #Limiting the bandwidth of a single IP (kbit/s)"
+		echo "Example:"
+		echo "  $0 start 30 20              # Total bandwidth: down 30Mbit/s up 20Mbit/s"
+		echo "  $0 add 192.168.22.12 10 2   # down 10kbit/s  up 2kbit/s"
+	;;
 esac
