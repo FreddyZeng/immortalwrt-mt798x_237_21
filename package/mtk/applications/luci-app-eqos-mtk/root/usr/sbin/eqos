@@ -207,12 +207,23 @@ iptables_start_inital() {
     echo 0 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq0
     # Q1:  Game upload SP → sch0, no rate limit
     echo 0 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq1
+    # Q2-Q30: WRR per-user upload → sch2 (AF41, normal priority)
+    # MUST be explicit: iptables_stop resets Q0-31 to sch=0 (SP).
+    # Without this loop, normal devices would run at SP priority = same as VIP.
+    for i in $(seq 2 30); do
+        echo 2 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq$i
+    done
     # Q31: Rate-limited upload WRR → sch2 (lower priority than VIP/game)
     echo 2 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq31
     # Q32: VIP download  SP → sch1, no rate limit
     echo 1 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq32
     # Q33: Game download SP → sch1, no rate limit
     echo 1 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq33
+    # Q34-Q62: WRR per-user download → sch3 (AF41, normal priority)
+    # MUST be explicit: iptables_stop resets Q32-63 to sch=1 (SP).
+    for i in $(seq 34 62); do
+        echo 3 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq$i
+    done
     # Q63: Rate-limited download WRR → sch3 (lower priority than VIP/game)
     echo 3 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq63
 
