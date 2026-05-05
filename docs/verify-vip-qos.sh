@@ -287,33 +287,36 @@ else
     echo "  ╠══════════════════╬═══════════╬══════════════════════════╬══════╣"
 
     # hnat_entry 格式: ...info2=0xHEXVAL...
-    # qid 存储在 info2 的 bits 0-6 (低 7 位)，需要从 hex 提取
-    # 用 awk 解析所有 BIND 条目的 info2 字段，计算各队列的 qid 分布
-    parse_qid_counts() {
-        grep "state=BIND" "$HNAT_FILE" 2>/dev/null | \
+    # qid 存储在 info2 的 bits 0-6 (低 7 位)
+    # 用 shell 算术做 hex→dec（busybox ash 支持 $((0xHEX))），
+    # 再管道给 awk 统计（不依赖 strtonum）
+    _qids=$(grep "state=BIND" "$HNAT_FILE" 2>/dev/null | \
         grep -oE 'info2=0x[0-9a-fA-F]+' | \
-        awk -F'0x' '{
-            v = strtonum("0x" $2)
-            qid = v % 128   # bits 0-6
-            if (qid == 0)             c0++
-            else if (qid == 1)        c1++
-            else if (qid >= 2  && qid <= 30) cup++
-            else if (qid == 31)       c31++
-            else if (qid == 32)       c32++
-            else if (qid == 33)       c33++
-            else if (qid >= 34 && qid <= 62) cdn++
-            else if (qid == 63)       c63++
-            else                      unk++
-        }
-        END {
-            printf "%d %d %d %d %d %d %d %d %d\n",
-                c0+0, c32+0, c1+0, c33+0, cup+0, cdn+0, c31+0, c63+0, unk+0
-        }'
+        sed 's/info2=0x//' | \
+        while read hex; do
+            val=$(( 0x$hex & 0x7f ))
+            echo "$val"
+        done)
+
+    # 用 set -- 赋值位置参数（ash 兼容，代替 <<< here-string）
+    set -- $(echo "$_qids" | awk '
+    {
+        qid = $1 + 0
+        if      (qid == 0)              c0++
+        else if (qid == 1)              c1++
+        else if (qid >= 2  && qid <= 30) cup++
+        else if (qid == 31)             c31++
+        else if (qid == 32)             c32++
+        else if (qid == 33)             c33++
+        else if (qid >= 34 && qid <= 62) cdn++
+        else if (qid == 63)             c63++
+        else                            unk++
     }
-    read C0 C32 C1 C33 CNT_UP CNT_DN C31 C63 UNK <<< "$(parse_qid_counts)"
-    C0=${C0:-0}; C32=${C32:-0}; C1=${C1:-0}; C33=${C33:-0}
-    CNT_UP=${CNT_UP:-0}; CNT_DN=${CNT_DN:-0}
-    C31=${C31:-0}; C63=${C63:-0}; UNK=${UNK:-0}
+    END { printf "%d %d %d %d %d %d %d %d %d\n",
+            c0+0,c32+0,c1+0,c33+0,cup+0,cdn+0,c31+0,c63+0,unk+0 }')
+    C0=${1:-0}; C32=${2:-0}; C1=${3:-0}; C33=${4:-0}
+    CNT_UP=${5:-0}; CNT_DN=${6:-0}
+    C31=${7:-0}; C63=${8:-0}; UNK=${9:-0}
 
     printf "  ║ %-16s ║ %-9s ║ %-24s ║ %4d ║\n" "VIP" "Q0"  "VIP 上传 SP EF"  "$C0"
     printf "  ║ %-16s ║ %-9s ║ %-24s ║ %4d ║\n" ""   "Q32" "VIP 下载 SP EF"  "$C32"
@@ -337,15 +340,13 @@ else
     fi
     echo "  ╚══════════════════╩═══════════╩══════════════════════════╩══════╝"
 
-    # ── 分项展开：WRR per-slot 分布（从 info2 hex 解析 qid）──
+    # ── 分项展开：WRR per-slot 分布 ──
     echo ""
     echo "  ┌── WRR 普通上传槽位分布（Q2-Q30，per-user）"
-    UP_SLOTS=$(grep "state=BIND" "$HNAT_FILE" 2>/dev/null | grep -oE 'info2=0x[0-9a-fA-F]+' | \
-        awk -F'0x' '{v=strtonum("0x"$2); qid=v%128; if(qid>=2&&qid<=30) print qid}' | sort -n | uniq -c)
+    UP_SLOTS=$(echo "$_qids" | awk '$1>=2 && $1<=30 {print $1}' | sort -n | uniq -c)
     if [ -n "$UP_SLOTS" ]; then
         echo "$UP_SLOTS" | while read cnt q; do
-            BAR=$(printf '%0.s#' $(seq 1 $cnt) 2>/dev/null || echo "#")
-            printf "  │  Q%-2d: %3d  %s\n" "$q" "$cnt" "$BAR"
+            printf "  │  Q%-2d: %3d\n" "$q" "$cnt"
         done
     else
         echo "  │  (无上传条目)"
@@ -354,17 +355,16 @@ else
 
     echo ""
     echo "  ┌── WRR 普通下载槽位分布（Q34-Q62，per-user）"
-    DN_SLOTS=$(grep "state=BIND" "$HNAT_FILE" 2>/dev/null | grep -oE 'info2=0x[0-9a-fA-F]+' | \
-        awk -F'0x' '{v=strtonum("0x"$2); qid=v%128; if(qid>=34&&qid<=62) print qid}' | sort -n | uniq -c)
+    DN_SLOTS=$(echo "$_qids" | awk '$1>=34 && $1<=62 {print $1}' | sort -n | uniq -c)
     if [ -n "$DN_SLOTS" ]; then
         echo "$DN_SLOTS" | while read cnt q; do
-            BAR=$(printf '%0.s#' $(seq 1 $cnt) 2>/dev/null || echo "#")
-            printf "  │  Q%-2d: %3d  %s\n" "$q" "$cnt" "$BAR"
+            printf "  │  Q%-2d: %3d\n" "$q" "$cnt"
         done
     else
         echo "  │  (无下载条目)"
     fi
     echo "  └──"
+
 
     # ── 限速队列健康检查（硬件 max_rate shaper 版）──
     echo ""
