@@ -135,16 +135,19 @@ iptables_start_inital() {
         -d 192.168.109.0/24 -j DSCP --set-dscp 33
 
     # Static VIP range: 192.168.110-119.10-39 → Q0 upload / Q32 download
-    # APPENDED LAST so they override any per-user DSCP set by eqos add.
-    # (DSCP is non-terminating: last matching rule wins)
-    for _vip_oct in $(seq 110 119); do
-        iptables -t mangle -A eqos -m iprange \
-            --src-range 192.168.${_vip_oct}.10-192.168.${_vip_oct}.39 \
-            -j DSCP --set-dscp 0
-        iptables -t mangle -A eqos -m iprange \
-            --dst-range 192.168.${_vip_oct}.10-192.168.${_vip_oct}.39 \
-            -j DSCP --set-dscp 32
-    done
+    # u32 bitfield matching: single rule covers all 10 subnets precisely
+    # Offset 0xc = src IP (bytes 12-15), 0x10 = dst IP (bytes 16-19)
+    # &0x0000FF00 isolates 3rd octet, range 0x6E00-0x7700 = 110-119
+    # &0x000000FF isolates 4th octet, range 0x0A-0x27   = 10-39
+    # APPENDED LAST → overrides any per-user DSCP (last match wins for non-terminating targets)
+    iptables -t mangle -A eqos -s 192.168.0.0/16 \
+        -m u32 --u32 "0xc&0x0000FF00=0x00006E00:0x00007700" \
+        -m u32 --u32 "0xc&0x000000FF=0x0000000A:0x00000027" \
+        -j DSCP --set-dscp 0
+    iptables -t mangle -A eqos -d 192.168.0.0/16 \
+        -m u32 --u32 "0x10&0x0000FF00=0x00006E00:0x00007700" \
+        -m u32 --u32 "0x10&0x000000FF=0x0000000A:0x00000027" \
+        -j DSCP --set-dscp 32
 
     echo "11 5" > /sys/kernel/debug/hnat/hnat_setting
     uci -q set "turboacc.config.fastpath_mh_eth_hnat_bind_rate"="5"
