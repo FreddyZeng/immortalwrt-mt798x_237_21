@@ -2,7 +2,7 @@
 # eqos - Hardware QoS management script
 #
 # ═══════════════════════════════════════════════════════════════
-#  IPv4 队列分配规则
+#  IPv4 队列分配规则（已通过代码逐行审计验证）
 # ═══════════════════════════════════════════════════════════════
 #
 # SP 专属队列（Strict Priority，最高优先级，零共享）：
@@ -12,43 +12,65 @@
 #   Q33 (DSCP=33) : 游戏下载 SP EF  — 109.x 子网 UDP≤300B
 #
 # VIP 设备判定（满足任一条件即为 VIP → Q0/Q32）：
-#   ① 静态 IP 段（FORWARD 链 u32，最终覆盖所有其他规则）：
-#        192.168.11x.{10-39}（第三段 110-119，第四段 10-39）
-#        第四段 .10-.39  = VIP
-#        第四段 .1-.9   = WRR 普通流量（不在 VIP 范围）
-#        第四段 .40-.254 = 普通流量（DHCP 下发范围）
-#   ② 动态标记：eqos add comment=64 或 comment=vip
-#        适用于任意 IP（.1-.9 / .40-.254 均可在 LuCI 标为 VIP）
+#   ① 静态 u32 规则（FORWARD 链追加到末尾，覆盖 eqos chain）：
+#        条件：-s/-d 192.168.0.0/16（只适用于 192.168.x.x 地址段）
+#             AND 第三段 0x6E-0x77 = 110-119
+#             AND 第四段 0x0A-0x27 = 10-39
+#        即：192.168.{110-119}.{10-39} → Q0(上传) / Q32(下载)
+#        第四段 .1-.9   = 不在 VIP 范围（走 WRR 普通槽）
+#        第四段 .40-.254 = 不在 VIP 范围（DHCP 下发范围，走 WRR）
+#   ② eqos add comment=64 或 comment=vip（eqos chain 头部插入）：
+#        适用于任意 IP 的设备，在 LuCI 中显式标记为 VIP
+#        → DSCP=0 (upload), DSCP=32 (download) → Q0/Q32
 #
 # WRR 普通槽（per-user 隔离，AF41）：
 #   Q2-Q30  (DSCP=2-30 ) : 上传 WRR sch2 — 29 个用户 hash 槽
 #   Q34-Q62 (DSCP=34-62) : 下载 WRR sch3 — 29 个用户 hash 槽
-#   触发条件（满足任一即走 WRR 普通槽）：
-#     · 109.x 子网非游戏流量（TCP 或 UDP>300B）
-#     · 第四段 .1-.9  手动 IP（未被 VIP/限速标记）
-#     · 第四段 .40-.254 DHCP 下发 IP（未被 VIP/限速标记）
-#     · 其他任何未限速、未标 VIP 的设备
+#   兜底默认（所有未匹配设备）：
+#     iptables_start_prepare() 把所有 LAN 上传默认设为 DSCP=2 (Q2)
+#     iptables_start_prepare() 把所有 LAN 下载默认设为 DSCP=34 (Q34)
+#     → 任何未在 eqos/dhcp_mark 中配置的设备自动进入 WRR
+#   精确分槽路径（覆盖默认值）：
+#     路径 A — eqos add（rates=0 且 comment≠vip）：
+#       Branch 3：MD5 hash → slot 2-30，upload DSCP=slot，download DSCP=slot+32
+#     路径 B — dhcp_mark.sh（DHCP 设备，需 smarthqos=1）：
+#       MAC 哈希 → MARK 2-30，iptables DSCP=MARK(upload) / MARK+32(download)
+#
+# 109.x 子网的完整流量路径：
+#   UDP ≤300B → FORWARD 链静态规则 → DSCP=1/33 → Q1/Q33 (SP EF)
+#   其余（TCP / UDP>300B）→ 兜底默认 DSCP=2/34 → Q2/Q34 WRR
+#     （若该设备已配置 eqos add 或 dhcp_mark.sh 处理，则用精确 hash 槽）
+#
+# 手动指定任意 IP 段的设备：
+#   无论第四段是 .1-.9 / .40-.254 还是其他范围，
+#   未配置则走兜底 DSCP=2/34（WRR），配置了则走对应规则
 #
 # 限速队列（所有限速设备共享，BE）：
 #   Q31 (DSCP=31) : 限速上传 WRR BE sch2
 #   Q63 (DSCP=63) : 限速下载 WRR BE sch3
-#   触发条件：eqos add 时 dl>0 或 up>0（tc HTB 执行带宽上限）
+#   触发条件：eqos add 时 dl>0 OR up>0（任一非零均走限速队列）
+#   注意：限速设备强制使用 -I eqos 1（插入 eqos 链头），最优先匹配
+#   tc HTB 在软件层执行实际带宽上限，Q31/Q63 在硬件层实现 WRR 隔离
 #
 # ═══════════════════════════════════════════════════════════════
-#  IPv6 队列分配规则（2 类）
+#  IPv6 队列分配规则（2 类，按 MAC 识别，无 u32 IP 匹配）
 # ═══════════════════════════════════════════════════════════════
 #
-# IPv6 按 MAC 地址识别，无 u32 IP 匹配：
-#   类型 1 — 普通 WRR（无限速配置的设备）：
-#     ip6tables -m mac --mac-source → MARK=wrr_id (2-30)
-#     ebtables  -p ipv6 -d MAC      → mark=wrr_dl (34-62)
-#     与对应 IPv4 设备共享同一 WRR hash 槽
-#   类型 2 — 限速队列（LuCI 配置了带宽限速的设备）：
-#     ip6tables -m mac --mac-source → MARK=31
-#     ebtables  -p ipv6 -d MAC      → mark=63
-#     进入 Q31/Q63 限速队列
-#   注：IPv6 无 SP VIP 队列（DSCP=0/32 不适用），
-#       VIP 优先级由 IPv4 规则承担。
+# 类型 1 — 普通 WRR（无限速配置的设备）：
+#   上传：ip6tables -m mac --mac-source MAC -j MARK --set-mark {2-30}
+#   下载：ebtables  -p ipv6 -d MAC -j mark --mark-set {34-62}
+#   值：mark+32，即 MARK=2 → ebtables=34，MARK=30 → ebtables=62
+#   来源：dhcp_mark.sh（DHCP 设备）或 eqos add Branch 3（有 MAC 参数时）
+#   与 IPv4 对应设备共享同一 WRR hash slot
+#
+# 类型 2 — 限速队列（LuCI 配置了带宽限速的设备）：
+#   上传：ip6tables -m mac --mac-source MAC -j MARK --set-mark 31
+#   下载：ebtables  -p ipv6 -d MAC -j mark --mark-set 63
+#   来源：eqos add Branch 2（dl>0 或 up>0 时，有 MAC 参数）
+#   进入 Q31/Q63 限速队列（与 IPv4 限速设备共用）
+#
+# 注：IPv6 无 SP VIP 队列（DSCP=0/32 机制不适用于 IPv6）
+#     VIP 优先级仅由 IPv4 地址的 u32 规则和 eqos chain 规则承担
 
 dev=br-lan
 hash_file="/tmp/hash_records.txt"
@@ -134,8 +156,8 @@ iptables_stop() {
     echo 0 > /sys/kernel/debug/hnat/qos_toggle
     sed -i '/\/etc\/init.d\/eqos start/d' /etc/firewall.user
     remove_static_forward_rules
-    iptables  -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 0 2>/dev/null
-    iptables  -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 0 2>/dev/null
+    iptables  -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 2  2>/dev/null
+    iptables  -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 34 2>/dev/null
     ip6tables -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 0 2>/dev/null
     ip6tables -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 0 2>/dev/null
     echo "10 0" > /sys/kernel/debug/hnat/hnat_setting
@@ -153,11 +175,16 @@ iptables_stop() {
 }
 
 iptables_start_prepare() {
-    # Clear all LAN DSCP so per-IP rules below are the single source of truth
-    iptables  -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 0 2>/dev/null
-    iptables  -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 0 2>/dev/null
-    iptables  -t mangle -A FORWARD -i br-lan -j DSCP --set-dscp 0
-    iptables  -t mangle -A FORWARD -o br-lan -j DSCP --set-dscp 0
+    # Default all LAN traffic to WRR fallback slots:
+    #   Upload (from LAN, -i br-lan) → DSCP=2  → Q2  (WRR sch2, lowest per-user slot)
+    #   Download (to LAN, -o br-lan) → DSCP=34 → Q34 (WRR sch3, lowest per-user slot)
+    # This ensures ANY unconfigured device (static IP / unknown / 109.x non-game)
+    # lands in WRR instead of accidentally hitting Q0 (VIP SP).
+    # Per-device rules in the eqos chain override this default for known devices.
+    iptables  -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 2  2>/dev/null
+    iptables  -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 34 2>/dev/null
+    iptables  -t mangle -A FORWARD -i br-lan -j DSCP --set-dscp 2
+    iptables  -t mangle -A FORWARD -o br-lan -j DSCP --set-dscp 34
     ip6tables -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 0 2>/dev/null
     ip6tables -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 0 2>/dev/null
     ip6tables -t mangle -A FORWARD -i br-lan -j DSCP --set-dscp 0
