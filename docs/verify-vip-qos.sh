@@ -193,14 +193,22 @@ else
     info "Q31/Q63 max_rate shaper 应处于禁用状态"
 fi
 
-# smarthqos 队列抽查 (Q5, Q15, Q30, Q35, Q50, Q62)
+# Q2-30/Q34-62 调度器抽查（无条件）
+# 新架构：iptables_start_inital 始终将这些队列绑定到 sch2/sch3，
+# 无论 smarthqos 是否开启。smarthqos 只决定是否有 per-device HNAT 条目。
+info "验证 WRR 普通槽 Q2-30 → sch2，Q34-62 → sch3（无条件）"
+for q in 2 5 15 30; do
+    check_queue $q 2 "WRR 普通槽 上传 Q${q}"
+done
+for q in 34 40 55 62; do
+    check_queue $q 3 "WRR 普通槽 下载 Q${q}"
+done
+
 SMART_ENABLED=$(uci -q get eqos.config.smarthqos 2>/dev/null)
 if [ "${SMART_ENABLED:-0}" = "1" ]; then
-    info "smarthqos=ON, 验证 Q2-30/Q34-62 → sch2/sch3"
-    for q in 2 5 15 30; do     check_queue $q 2 "smarthqos 上传 WRR"; done
-    for q in 34 40 55 62; do   check_queue $q 3 "smarthqos 下载 WRR"; done
+    info "smarthqos=ON：dhcp_mark.sh 为每个 DHCP 设备调用 eqos add，HNAT 条目应分布在 Q2-30/Q34-62"
 else
-    info "smarthqos=OFF, 跳过 Q2-30/Q34-62 检查"
+    info "smarthqos=OFF：无 per-device HNAT 条目，但队列调度器已正确初始化"
 fi
 
 # ─────────────────────────────────────────────────────
