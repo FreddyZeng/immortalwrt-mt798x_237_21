@@ -216,12 +216,16 @@ case "$1" in
         wrr_dl=$((wrr_id + 32))
 
         # ── Unified cleanup: remove ALL possible previous DSCP rules for $ip ──
-        iptables -t mangle -D eqos -s "$ip" -j DSCP --set-dscp 0         2>/dev/null
-        iptables -t mangle -D eqos -d "$ip" -j DSCP --set-dscp 32        2>/dev/null
-        iptables -t mangle -D eqos -s "$ip" -j DSCP --set-dscp "$wrr_id" 2>/dev/null
-        iptables -t mangle -D eqos -d "$ip" -j DSCP --set-dscp "$wrr_dl" 2>/dev/null
-        iptables -t mangle -D eqos -s "$ip" -j DSCP --set-dscp 31        2>/dev/null
-        iptables -t mangle -D eqos -d "$ip" -j DSCP --set-dscp 63        2>/dev/null
+        # Covers: VIP(0/32), WRR(2-30/34-62), rate-limit(31/63),
+        # and dhcp_mark.sh smarthqos range (1-31 upload, 33-63 download).
+        # Exhaustive loop guarantees no stale rule survives a state transition.
+        local d
+        for d in $(seq 0 31); do
+            iptables -t mangle -D eqos -s "$ip" -j DSCP --set-dscp $d 2>/dev/null
+        done
+        for d in $(seq 32 63); do
+            iptables -t mangle -D eqos -d "$ip" -j DSCP --set-dscp $d 2>/dev/null
+        done
 
         if [ "$comment" = "64" ] || [ "$comment" = "vip" ]; then
             # ── Branch 1: VIP → Q0 upload (SP EF) / Q32 download (SP EF) ──

@@ -3,14 +3,17 @@
 ACTION=$2
 MARK_FILE="/tmp/dhcp_mac_mark_mapping"  # 存储MAC和MARK映射关系的文件
 LEASE_FILE="/tmp/dhcp.leases"           # DHCP leases 文件
-MAX_MARK=31   # 限制mark值在1到31之间
+# Marks 2-30: smarthqos per-user WRR slots (matches Q2-Q30 / Q34-Q62).
+# Mark 1  is reserved for 109.x game upload  (Q1 SP).
+# Mark 31 is reserved for rate-limited overflow (Q31 WRR).
+MIN_MARK=2
+MAX_MARK=30
 
-# 定义哈希函数，将MAC地址转化为一个数值，限制在1到31之间
+# 定义哈希函数，将MAC地址转化为一个数值，限制在MIN_MARK到MAX_MARK之间
 hash_mac() {
     MAC=$1
-    # 将MAC地址中的冒号去掉，转化为十六进制数值，取模限制在1到31之间
     MAC_HEX=$(echo "$MAC" | sed 's/://g')
-    echo $(( 0x$MAC_HEX % MAX_MARK + 1 ))
+    echo $(( 0x$MAC_HEX % 29 + MIN_MARK ))  # 29 slots: 2-30
 }
 
 # 从文件中加载当前的MAC-MARK映射
@@ -28,27 +31,26 @@ is_mark_in_use() {
     return $?
 }
 
-# 分配一个可用的mark
+# 分配一个可用的mark (范围 MIN_MARK-MAX_MARK = 2-30)
+# 溢出时返回 31 (WRR overflow, shared with rate-limited devices)
 allocate_mark() {
     MAC=$1
     MARK=$(hash_mac $MAC)
-    retries=0  # 记录重试次数
-    max_retries=$((MAX_MARK - 1))  # 允许的最大重试次数
+    retries=0
+    max_retries=28  # 29 slots (2-30), max 28 linear probes
 
-    # 循环检查mark是否被占用，直到找到可用的mark
     while is_mark_in_use $MARK; do
         MARK=$((MARK + 1))
         retries=$((retries + 1))
         if [ "$MARK" -gt $MAX_MARK ]; then
-            MARK=1
+            MARK=$MIN_MARK  # wrap within 2-30
         fi
-        # 如果重试次数达到最大值，退出循环，表示无法找到可用的MARK
         if [ "$retries" -ge "$max_retries" ]; then
-            MARK=1
+            # All 29 slots full: overflow to Q31/Q63 (shared WRR pool)
+            MARK=31
             break
         fi
     done
-    # 返回可用的MARK
     echo $MARK
 }
 
