@@ -476,49 +476,73 @@ sep
 echo "【7】实时队列速率采样（3秒间隔）"
 sep
 
-rpkt() { grep -i "packet count" "$QDMA/qdma_txq${1}" 2>/dev/null | awk '{print $NF}'; }
-rsum() {
-    local s=0
-    for q in $(seq $1 $2); do
-        v=$(rpkt $q); s=$((s + ${v:-0}))
-    done; echo $s
+# ── iptables 包计数器速率采样（不受 QDMA MIB 重置影响）──────
+# iptables 计数器只在链被 flush（eqos stop）时归零，远比 QDMA MIB 稳定。
+# HNAT CPU 路径下（BIND=0）计数完整；HNAT BIND 激活时会偏低但仍有参考价值。
+
+_ipt() {
+    # 读取指定链中匹配 pattern 的规则包计数之和
+    iptables -t mangle -L "$1" -n -v -x 2>/dev/null | \
+        grep "$2" | awk '{s+=$1} END{print s+0}'
+}
+# eqos 上传：源IP=设备（$8非0.0.0.0/0），排除限速（DSCP 0x1f）
+_eq_up() {
+    iptables -t mangle -L eqos -n -v -x 2>/dev/null | \
+        awk 'NR>2 && $8!="0.0.0.0/0" && !/DSCP set 0x1f/{s+=$1} END{print s+0}'
+}
+# eqos 下载：目的IP=设备（$9非0.0.0.0/0），排除限速（DSCP 0x3f）
+_eq_dn() {
+    iptables -t mangle -L eqos -n -v -x 2>/dev/null | \
+        awk 'NR>2 && $9!="0.0.0.0/0" && !/DSCP set 0x3f/{s+=$1} END{print s+0}'
 }
 
-A0=$(rpkt 0);  A1=$(rpkt 1);  A31=$(rpkt 31)
-A32=$(rpkt 32); A33=$(rpkt 33); A63=$(rpkt 63)
-AUP=$(rsum 2 30); ADN=$(rsum 34 62)
-sleep 3
-B0=$(rpkt 0);  B1=$(rpkt 1);  B31=$(rpkt 31)
-B32=$(rpkt 32); B33=$(rpkt 33); B63=$(rpkt 63)
-BUP=$(rsum 2 30); BDN=$(rsum 34 62)
+# 第一次采样
+A_0=$(_ipt  FORWARD "DSCP set 0x00")   # VIP 上传  (DSCP=0)
+A_32=$(_ipt FORWARD "DSCP set 0x20")   # VIP 下载  (DSCP=32=0x20)
+A_1=$(_ipt  FORWARD "DSCP set 0x01")   # 游戏 上传 (DSCP=1)
+A_33=$(_ipt FORWARD "DSCP set 0x21")   # 游戏 下载 (DSCP=33=0x21)
+A_UP=$(_eq_up)                          # WRR 普通上传
+A_DN=$(_eq_dn)                          # WRR 普通下载
+A_31=$(_ipt eqos "DSCP set 0x1f")      # 限速 上传 (DSCP=31=0x1f)
+A_63=$(_ipt eqos "DSCP set 0x3f")      # 限速 下载 (DSCP=63=0x3f)
 
-pps() {
-    local diff=$(( (${2:-0} - ${1:-0}) ))
-    # 负值表示 QDMA MIB 计数器在采样窗口内被重置（eqos flush/dhcp_mark），
-    # 显示 "重置" 而非负数，避免混淆
-    if [ "$diff" -lt 0 ]; then
-        echo "重置"
-    else
-        echo $(( diff / 3 ))
-    fi
+sleep 3
+
+# 第二次采样
+B_0=$(_ipt  FORWARD "DSCP set 0x00")
+B_32=$(_ipt FORWARD "DSCP set 0x20")
+B_1=$(_ipt  FORWARD "DSCP set 0x01")
+B_33=$(_ipt FORWARD "DSCP set 0x21")
+B_UP=$(_eq_up)
+B_DN=$(_eq_dn)
+B_31=$(_ipt eqos "DSCP set 0x1f")
+B_63=$(_ipt eqos "DSCP set 0x3f")
+
+# pps 计算；负值（链被 flush）→ 显示 0
+_pps() {
+    local d=$(( ${2:-0} - ${1:-0} ))
+    [ "$d" -lt 0 ] && d=0
+    echo $(( d / 3 ))
 }
 
 echo "  队列        | 期望流量               | pps（包/秒）"
 echo "  ------------|------------------------|-------------"
-printf "  Q0  (SP EF) | VIP 上传               | %s\n"   "$(pps $A0  $B0)"
-printf "  Q1  (SP EF) | 游戏 上传 UDP<=300B    | %s\n"   "$(pps $A1  $B1)"
-printf "  Q2-30(WRR)  | smarthqos 上传 AF41    | %s\n"   "$(pps $AUP $BUP)"
-printf "  Q31 (WRR)   | 限速设备 上传 BE       | %s\n"   "$(pps $A31 $B31)"
-printf "  Q32 (SP EF) | VIP 下载               | %s\n"   "$(pps $A32 $B32)"
-printf "  Q33 (SP EF) | 游戏 下载 UDP<=300B    | %s\n"   "$(pps $A33 $B33)"
-printf "  Q34-62(WRR) | smarthqos 下载 AF41    | %s\n"   "$(pps $ADN $BDN)"
-printf "  Q63 (WRR)   | 限速设备 下载 BE       | %s\n"   "$(pps $A63 $B63)"
+printf "  Q0  (SP EF) | VIP 上传               | %s\n" "$(_pps $A_0  $B_0)"
+printf "  Q1  (SP EF) | 游戏 上传 UDP<=300B    | %s\n" "$(_pps $A_1  $B_1)"
+printf "  Q2-30(WRR)  | smarthqos 上传 AF41    | %s\n" "$(_pps $A_UP $B_UP)"
+printf "  Q31 (WRR)   | 限速设备 上传 BE       | %s\n" "$(_pps $A_31 $B_31)"
+printf "  Q32 (SP EF) | VIP 下载               | %s\n" "$(_pps $A_32 $B_32)"
+printf "  Q33 (SP EF) | 游戏 下载 UDP<=300B    | %s\n" "$(_pps $A_33 $B_33)"
+printf "  Q34-62(WRR) | smarthqos 下载 AF41    | %s\n" "$(_pps $A_DN $B_DN)"
+printf "  Q63 (WRR)   | 限速设备 下载 BE       | %s\n" "$(_pps $A_63 $B_63)"
 
 echo ""
-echo "  ◀ 标记 = 有包计数的队列（非零）"
+echo "  ◀ 基于 iptables 包计数差值（每3秒）"
 echo "  期望正常运行: Q0>0 或 Q32>0 (有VIP流量时)"
 echo "               Q1>0 或 Q33>0 (有109.x UDP小包时)"
 echo "               Q31/Q63 仅限速设备有流量时非零"
+
+
 
 # ─────────────────────────────────────────────────────
 sep
