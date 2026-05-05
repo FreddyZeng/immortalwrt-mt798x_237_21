@@ -75,7 +75,6 @@
 #     VIP 优先级仅由 IPv4 地址的 u32 规则和 eqos chain 规则承担
 
 dev=br-lan
-hash_file="/tmp/hash_records.txt"
 rl_max_file="/tmp/rl_max_rates"  # 格式: "<max_dl_kbps> <max_up_kbps>"
 
 # Returns hash slot 2-30 (29 per-user slots)
@@ -87,24 +86,6 @@ generate_index() {
     echo $index
 }
 
-# Find available slot in 2-30; returns 31 if all full (overflow)
-find_available_index() {
-    local base_index=$(generate_index "$1")
-    local index=$base_index
-    while true; do
-        if grep -q "^$index$" "$hash_file"; then
-            index=$(( (index - 2 + 1) % 29 + 2 ))
-            if [ "$index" -eq "$base_index" ]; then
-                echo 31
-                return 0
-            fi
-        else
-            echo "$index" >> "$hash_file"
-            echo "$index"
-            return 0
-        fi
-    done
-}
 
 stop_qos() {
     tc qdisc del dev $dev root 2>/dev/null

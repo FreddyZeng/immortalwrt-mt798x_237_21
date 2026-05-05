@@ -237,9 +237,9 @@ iptables -t mangle -L eqos -v -n 2>/dev/null | grep DSCP | while read line; do
         33) TAG="⚠️ DSCP=33 (应在FORWARD不在eqos)" ;;
         *)
             if [ "$VAL" -ge 2 ] && [ "$VAL" -le 30 ] 2>/dev/null; then
-                TAG="smarthqos 上传槽 Q${VAL} WRR AF41"
+                TAG="WRR 普通槽 上传 Q${VAL} WRR AF41"
             elif [ "$VAL" -ge 34 ] && [ "$VAL" -le 62 ] 2>/dev/null; then
-                TAG="smarthqos 下载槽 Q${VAL} WRR AF41"
+                TAG="WRR 普通槽 下载 Q${VAL} WRR AF41"
             else
                 TAG="未知 DSCP=${VAL}"
             fi ;;
@@ -507,7 +507,8 @@ if [ -f "$MARK_FILE" ]; then
         || fail "发现 $BAD_MARKS 条 mark=1 或 >=31 的异常映射（应为 2-30）"
     if [ "$TOTAL_MAP" -gt 29 ]; then
         OVERFLOW=$((TOTAL_MAP - 29))
-        info "smarthqos 设备超过 29 个，溢出设备 $OVERFLOW 台 → 共享 Q31/Q63 WRR（设计正确）"
+        info "dhcp_mark 设备超过 29 个（共 ${TOTAL_MAP} 条），多出 ${OVERFLOW} 条映射。"
+        info "注：dhcp_mark 哈希可能存在碌撞（>29 设备共享取模 29 个槽位），监控 HNAT Q2-30 分布确认是否均匀。"
     fi
 else
     info "dhcp_mark 映射文件不存在（smarthqos=OFF 或尚未初始化）"
