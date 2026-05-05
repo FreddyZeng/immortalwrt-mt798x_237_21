@@ -286,89 +286,84 @@ else
     echo "  ║ 类别             ║ 队列      ║ 用途                     ║ 条目 ║"
     echo "  ╠══════════════════╬═══════════╬══════════════════════════╬══════╣"
 
-    # VIP Q0 / Q32
-    C0=$(grep  -c "qid=0[^0-9]"  "$HNAT_FILE" 2>/dev/null || echo 0)
-    C0=$(echo "$C0"  | tr -d '\n\r'); C0=${C0:-0}
-    C32=$(grep -c "qid=32[^0-9]" "$HNAT_FILE" 2>/dev/null || echo 0)
-    C32=$(echo "$C32" | tr -d '\n\r'); C32=${C32:-0}
+    # hnat_entry 格式: ...info2=0xHEXVAL...
+    # qid 存储在 info2 的 bits 0-6 (低 7 位)，需要从 hex 提取
+    # 用 awk 解析所有 BIND 条目的 info2 字段，计算各队列的 qid 分布
+    parse_qid_counts() {
+        grep "state=BIND" "$HNAT_FILE" 2>/dev/null | \
+        grep -oE 'info2=0x[0-9a-fA-F]+' | \
+        awk -F'0x' '{
+            v = strtonum("0x" $2)
+            qid = v % 128   # bits 0-6
+            if (qid == 0)             c0++
+            else if (qid == 1)        c1++
+            else if (qid >= 2  && qid <= 30) cup++
+            else if (qid == 31)       c31++
+            else if (qid == 32)       c32++
+            else if (qid == 33)       c33++
+            else if (qid >= 34 && qid <= 62) cdn++
+            else if (qid == 63)       c63++
+            else                      unk++
+        }
+        END {
+            printf "%d %d %d %d %d %d %d %d %d\n",
+                c0+0, c32+0, c1+0, c33+0, cup+0, cdn+0, c31+0, c63+0, unk+0
+        }'
+    }
+    read C0 C32 C1 C33 CNT_UP CNT_DN C31 C63 UNK <<< "$(parse_qid_counts)"
+    C0=${C0:-0}; C32=${C32:-0}; C1=${C1:-0}; C33=${C33:-0}
+    CNT_UP=${CNT_UP:-0}; CNT_DN=${CNT_DN:-0}
+    C31=${C31:-0}; C63=${C63:-0}; UNK=${UNK:-0}
+
     printf "  ║ %-16s ║ %-9s ║ %-24s ║ %4d ║\n" "VIP" "Q0"  "VIP 上传 SP EF"  "$C0"
     printf "  ║ %-16s ║ %-9s ║ %-24s ║ %4d ║\n" ""   "Q32" "VIP 下载 SP EF"  "$C32"
     echo "  ╠══════════════════╬═══════════╬══════════════════════════╬══════╣"
-
-    # 游戏 Q1 / Q33
-    C1=$(grep  -c "qid=1[^0-9]"  "$HNAT_FILE" 2>/dev/null || echo 0)
-    C1=$(echo "$C1"  | tr -d '\n\r'); C1=${C1:-0}
-    C33=$(grep -c "qid=33[^0-9]" "$HNAT_FILE" 2>/dev/null || echo 0)
-    C33=$(echo "$C33" | tr -d '\n\r'); C33=${C33:-0}
     printf "  ║ %-16s ║ %-9s ║ %-24s ║ %4d ║\n" "游戏(109.x)" "Q1"  "游戏上传 UDP≤300B"  "$C1"
     printf "  ║ %-16s ║ %-9s ║ %-24s ║ %4d ║\n" ""             "Q33" "游戏下载 UDP≤300B"  "$C33"
     echo "  ╠══════════════════╬═══════════╬══════════════════════════╬══════╣"
-
-    # WRR 普通 Q2-30 / Q34-62 — 总计
-    CNT_UP=0; CNT_DN=0
-    for q in $(seq 2 30); do
-        C=$(grep -c "qid=$q[^0-9]" "$HNAT_FILE" 2>/dev/null || echo 0)
-        C=$(echo "$C" | tr -d '\n\r'); C=${C:-0}
-        CNT_UP=$((CNT_UP + C))
-    done
-    for q in $(seq 34 62); do
-        C=$(grep -c "qid=$q[^0-9]" "$HNAT_FILE" 2>/dev/null || echo 0)
-        C=$(echo "$C" | tr -d '\n\r'); C=${C:-0}
-        CNT_DN=$((CNT_DN + C))
-    done
     printf "  ║ %-16s ║ %-9s ║ %-24s ║ %4d ║\n" "WRR普通" "Q2-30"  "WRR 普通上传 AF41" "$CNT_UP"
     printf "  ║ %-16s ║ %-9s ║ %-24s ║ %4d ║\n" ""       "Q34-62" "WRR 普通下载 AF41" "$CNT_DN"
     echo "  ╠══════════════════╬═══════════╬══════════════════════════╬══════╣"
-
-    # 限速 Q31 / Q63
-    C31=$(grep -c "qid=31[^0-9]" "$HNAT_FILE" 2>/dev/null || echo 0)
-    C31=$(echo "$C31" | tr -d '\n\r'); C31=${C31:-0}
-    C63=$(grep -c "qid=63[^0-9]" "$HNAT_FILE" 2>/dev/null || echo 0)
-    C63=$(echo "$C63" | tr -d '\n\r'); C63=${C63:-0}
     printf "  ║ %-16s ║ %-9s ║ %-24s ║ %4d ║\n" "限速" "Q31" "限速上传 WRR BE" "$C31"
     printf "  ║ %-16s ║ %-9s ║ %-24s ║ %4d ║\n" ""     "Q63" "限速下载 WRR BE" "$C63"
     echo "  ╠══════════════════╬═══════════╬══════════════════════════╬══════╣"
 
     VIP_T=$((C0  + C32)); GAME_T=$((C1 + C33))
     WRR_T=$((CNT_UP + CNT_DN)); RATE_T=$((C31 + C63))
-    CLASSIFIED=$((VIP_T + GAME_T + WRR_T + RATE_T))
-    UNCLASSIFIED=$((TOTAL - CLASSIFIED))
     printf "  ║ %-16s ║ %-9s ║ VIP=%-4d 游戏=%-4d WRR=%-4d 限速=%-4d ║\n" \
         "分类合计" "总=$TOTAL" "$VIP_T" "$GAME_T" "$WRR_T" "$RATE_T"
-    if [ "$UNCLASSIFIED" -ne 0 ]; then
-        printf "  ║ %-16s ║ %-9s ║ %-24s ║ %4d ║\n" "⚠️ 未分类" "(其他qid)" "qid不在0-1/31-33/63范围" "$UNCLASSIFIED"
+    if [ "${UNK:-0}" -ne 0 ]; then
+        printf "  ║ %-16s ║ %-9s ║ %-24s ║ %4d ║\n" "⚠️ 未分类" "(其他qid)" "qid超出0-63范围" "$UNK"
     fi
     echo "  ╚══════════════════╩═══════════╩══════════════════════════╩══════╝"
 
-    # ── 分项展开：WRR per-slot 分布 ──
+    # ── 分项展开：WRR per-slot 分布（从 info2 hex 解析 qid）──
     echo ""
     echo "  ┌── WRR 普通上传槽位分布（Q2-Q30，per-user）"
-    SLOT_MAX=0
-    for q in $(seq 2 30); do
-        C=$(grep -c "qid=$q[^0-9]" "$HNAT_FILE" 2>/dev/null || echo 0)
-        C=$(echo "$C" | tr -d '\n\r'); C=${C:-0}
-        [ "$C" -gt "$SLOT_MAX" ] && SLOT_MAX=$C
-        if [ "$C" -gt 0 ]; then
-            BAR=$(printf '%0.s#' $(seq 1 $C) 2>/dev/null || echo "#")
-            printf "  │  Q%-2d: %3d  %s\n" "$q" "$C" "$BAR"
-        fi
-    done
-    [ "$SLOT_MAX" -eq 0 ] && echo "  │  (无上传条目)"
+    UP_SLOTS=$(grep "state=BIND" "$HNAT_FILE" 2>/dev/null | grep -oE 'info2=0x[0-9a-fA-F]+' | \
+        awk -F'0x' '{v=strtonum("0x"$2); qid=v%128; if(qid>=2&&qid<=30) print qid}' | sort -n | uniq -c)
+    if [ -n "$UP_SLOTS" ]; then
+        echo "$UP_SLOTS" | while read cnt q; do
+            BAR=$(printf '%0.s#' $(seq 1 $cnt) 2>/dev/null || echo "#")
+            printf "  │  Q%-2d: %3d  %s\n" "$q" "$cnt" "$BAR"
+        done
+    else
+        echo "  │  (无上传条目)"
+    fi
     echo "  └──"
 
     echo ""
     echo "  ┌── WRR 普通下载槽位分布（Q34-Q62，per-user）"
-    SLOT_MAX=0
-    for q in $(seq 34 62); do
-        C=$(grep -c "qid=$q[^0-9]" "$HNAT_FILE" 2>/dev/null || echo 0)
-        C=$(echo "$C" | tr -d '\n\r'); C=${C:-0}
-        [ "$C" -gt "$SLOT_MAX" ] && SLOT_MAX=$C
-        if [ "$C" -gt 0 ]; then
-            BAR=$(printf '%0.s#' $(seq 1 $C) 2>/dev/null || echo "#")
-            printf "  │  Q%-2d: %3d  %s\n" "$q" "$C" "$BAR"
-        fi
-    done
-    [ "$SLOT_MAX" -eq 0 ] && echo "  │  (无下载条目)"
+    DN_SLOTS=$(grep "state=BIND" "$HNAT_FILE" 2>/dev/null | grep -oE 'info2=0x[0-9a-fA-F]+' | \
+        awk -F'0x' '{v=strtonum("0x"$2); qid=v%128; if(qid>=34&&qid<=62) print qid}' | sort -n | uniq -c)
+    if [ -n "$DN_SLOTS" ]; then
+        echo "$DN_SLOTS" | while read cnt q; do
+            BAR=$(printf '%0.s#' $(seq 1 $cnt) 2>/dev/null || echo "#")
+            printf "  │  Q%-2d: %3d  %s\n" "$q" "$cnt" "$BAR"
+        done
+    else
+        echo "  │  (无下载条目)"
+    fi
     echo "  └──"
 
     # ── 限速队列健康检查（硬件 max_rate shaper 版）──
