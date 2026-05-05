@@ -277,8 +277,12 @@ HNAT_FILE="$HNAT_DBG/hnat_entry"
 if [ ! -f "$HNAT_FILE" ]; then
     info "hnat_entry 不存在，跳过"
 else
-    TOTAL_ALL=$(grep -c "=>" "$HNAT_FILE" 2>/dev/null || echo 0)
-    TOTAL=$(grep -c "state=BIND" "$HNAT_FILE" 2>/dev/null || echo 0)
+    # 用 wc -l 代替 grep -c，避免 grep -c 无匹配时 exit=1 触发 || echo 0
+    # 造成变量含 "0\n0"（两个0，中间换行），引发格式错乱
+    TOTAL_ALL=$(grep -c "=>" "$HNAT_FILE" 2>/dev/null | tr -d ' \n'; echo)
+    TOTAL_ALL=${TOTAL_ALL:-0}
+    TOTAL=$(grep "state=BIND" "$HNAT_FILE" 2>/dev/null | wc -l | tr -d ' \n')
+    TOTAL=${TOTAL:-0}
     info "HNAT 条目: 全部=$TOTAL_ALL（含UNBIND），BIND活跃=$TOTAL"
     echo ""
     echo "  ╔══════════════════════════════════════════════════════════════════╗"
@@ -287,10 +291,8 @@ else
     echo "  ║ 类别             ║ 队列      ║ 用途                     ║ 条目 ║"
     echo "  ╠══════════════════╬═══════════╬══════════════════════════╬══════╣"
 
-    # hnat_entry 格式: ...info2=0xHEXVAL...
-    # qid 存储在 info2 的 bits 0-6 (低 7 位)
-    # 用 shell 算术做 hex→dec（busybox ash 支持 $((0xHEX))），
-    # 再管道给 awk 统计（不依赖 strtonum）
+    # hnat_entry 格式: ...info2=0xHEXVAL...  qid 在 bits 0-6
+    # shell 算术做 hex→dec，避免依赖 awk strtonum
     _qids=$(grep "state=BIND" "$HNAT_FILE" 2>/dev/null | \
         grep -oE 'info2=0x[0-9a-fA-F]+' | \
         sed 's/info2=0x//' | \
@@ -299,19 +301,20 @@ else
             echo "$val"
         done)
 
-    # 用 set -- 赋值位置参数（ash 兼容，代替 <<< here-string）
+    # NF 守卫：跳过空行（_qids 为空时 echo "" 会产生一条空记录）
+    # set -- 赋值位置参数，ash 兼容，代替 <<< here-string
     set -- $(echo "$_qids" | awk '
-    {
+    NF {
         qid = $1 + 0
-        if      (qid == 0)              c0++
-        else if (qid == 1)              c1++
+        if      (qid == 0)               c0++
+        else if (qid == 1)               c1++
         else if (qid >= 2  && qid <= 30) cup++
-        else if (qid == 31)             c31++
-        else if (qid == 32)             c32++
-        else if (qid == 33)             c33++
+        else if (qid == 31)              c31++
+        else if (qid == 32)              c32++
+        else if (qid == 33)              c33++
         else if (qid >= 34 && qid <= 62) cdn++
-        else if (qid == 63)             c63++
-        else                            unk++
+        else if (qid == 63)              c63++
+        else                             unk++
     }
     END { printf "%d %d %d %d %d %d %d %d %d\n",
             c0+0,c32+0,c1+0,c33+0,cup+0,cdn+0,c31+0,c63+0,unk+0 }')
