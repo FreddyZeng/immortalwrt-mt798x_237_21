@@ -185,42 +185,63 @@ case "$1" in
         # VIP detection: comment=="64"/"vip" OR both rates == 0
         if [ "$comment" = "64" ] || [ "$comment" = "vip" ] || \
            { [ "${dl:-0}" -eq 0 ] && [ "${up:-0}" -eq 0 ]; }; then
-            # VIP: upload DSCP=0 (already cleared by global rule → Q0)
-            #      download DSCP=32 → Q32
+            # VIP: upload → Q0 (explicit DSCP=0 clears any stale rate-limit rule)
+            #      download → Q32 (DSCP=32)
+            iptables -t mangle -D eqos -s "$ip" -j DSCP --set-dscp 0  2>/dev/null
+            iptables -t mangle -D eqos -s "$ip" -j DSCP --set-dscp 31 2>/dev/null
             iptables -t mangle -D eqos -d "$ip" -j DSCP --set-dscp 32 2>/dev/null
-            iptables -t mangle -A eqos -d "$ip" -j DSCP --set-dscp 32
+            iptables -t mangle -D eqos -d "$ip" -j DSCP --set-dscp 63 2>/dev/null
+            # Upload: DSCP=0 inserted at head so it overrides any stale per-user rules.
+            # The static VIP u32 rules at chain-end will ALSO set 0 for the static
+            # range; this explicit rule covers dynamically-promoted DHCP devices.
+            iptables -t mangle -I eqos 1 -s "$ip" -j DSCP --set-dscp 0
+            iptables -t mangle -I eqos 1 -d "$ip" -j DSCP --set-dscp 32
         else
-            # Per-user: get hash slot 2-30 (or 31 if full)
-            id=$(find_available_index "$ip")
-            idpair=$((id + 32))
-
-            # Clean up any previous rules for this IP
-            iptables -t mangle -D eqos -s "$ip" -j DSCP --set-dscp "$id"     2>/dev/null
-            iptables -t mangle -D eqos -d "$ip" -j DSCP --set-dscp "$idpair" 2>/dev/null
+            # Rate-limited device: ALL share Q31 (upload) and Q63 (download).
+            # Hardware QoS: Q31/Q63 are WRR on sch2/sch3 → lower priority than VIP/game.
+            # Software QoS: tc HTB below enforces per-device limits on slow-path traffic.
+            iptables -t mangle -D eqos -s "$ip" -j DSCP --set-dscp 0  2>/dev/null
+            iptables -t mangle -D eqos -s "$ip" -j DSCP --set-dscp 31 2>/dev/null
+            iptables -t mangle -D eqos -d "$ip" -j DSCP --set-dscp 32 2>/dev/null
+            iptables -t mangle -D eqos -d "$ip" -j DSCP --set-dscp 63 2>/dev/null
 
             if [ "${up:-0}" -ne 0 ]; then
-                # Upload: Q${id} on sch2 with rate limit
-                # Use -I 1 (insert at head) so static VIP range rules
-                # appended in init can still override at the end of chain
-                echo 2 0 0 1 "${up}" 4 1 > /sys/kernel/debug/hnat/qdma_txq"${id}"
-                iptables -t mangle -I eqos 1 -s "$ip" -j DSCP --set-dscp "$id"
+                # Upload: DSCP=31 → Q31 (WRR, lowest priority upload)
+                iptables -t mangle -I eqos 1 -s "$ip" -j DSCP --set-dscp 31
             fi
             if [ "${dl:-0}" -ne 0 ]; then
-                # Download: Q${idpair} on sch3 with rate limit
-                echo 3 0 0 1 "${dl}" 4 1 > /sys/kernel/debug/hnat/qdma_txq"${idpair}"
-                iptables -t mangle -I eqos 1 -d "$ip" -j DSCP --set-dscp "$idpair"
+                # Download: DSCP=63 → Q63 (WRR, lowest priority download)
+                iptables -t mangle -I eqos 1 -d "$ip" -j DSCP --set-dscp 63
             fi
 
-            # IPv6 MAC-based marking (same slots)
-            ip6tables -t mangle -D eqos -m mac --mac-source "$macaddr" \
-                -j MARK --set-mark "$id" 2>/dev/null
-            ip6tables -t mangle -I eqos 1 -m mac --mac-source "$macaddr" \
-                -j MARK --set-mark "$id"
-            ebtables -t nat -D eqos -p ipv6 -d "$macaddr" \
-                -j mark --mark-set "$idpair" 2>/dev/null
-            ebtables -t nat -A eqos -p ipv6 -d "$macaddr" \
-                -j mark --mark-set "$idpair"
-        fi
+            # tc HTB: per-device software rate limiting (applies to slow-path traffic;
+            # HNAT hardware fast-path bypasses tc but Q31/Q63 WRR provides HW fairness)
+            local cnt
+            cnt=$(tc class show dev $dev | wc -l)
+            if [ "${dl:-0}" -ne 0 ]; then
+                tc class add dev $dev parent 1:1 classid 1:1"$cnt" htb \
+                    rate "${dl}"kbit ceil "${dl}"kbit
+                tc filter add dev $dev parent 1:0 protocol ip u32 \
+                    match ip dst "$ip" flowid 1:1"$cnt"
+            fi
+            if [ "${up:-0}" -ne 0 ]; then
+                tc class add dev ${dev}-ifb parent 1:1 classid 1:1"$cnt" htb \
+                    rate "${up}"kbit ceil "${up}"kbit
+                tc filter add dev ${dev}-ifb parent 1:0 protocol ip u32 \
+                    match ip src "$ip" flowid 1:1"$cnt"
+            fi
+
+            # IPv6 MAC-based marking for rate-limited devices
+            if [ -n "$macaddr" ]; then
+                ip6tables -t mangle -D eqos -m mac --mac-source "$macaddr" \
+                    -j MARK --set-mark 31 2>/dev/null
+                ip6tables -t mangle -I eqos 1 -m mac --mac-source "$macaddr" \
+                    -j MARK --set-mark 31
+                ebtables -t nat -D eqos -p ipv6 -d "$macaddr" \
+                    -j mark --mark-set 63 2>/dev/null
+                ebtables -t nat -A eqos -p ipv6 -d "$macaddr" \
+                    -j mark --mark-set 63
+            fi
 
         # Multi-WAN load balance interface binding
         if [ "$interface" ]; then
@@ -245,9 +266,9 @@ case "$1" in
         echo "  add ip dl_kbps up_kbps [64|vip] [mac] [iface]"
         echo ""
         echo "Queue layout:"
-        echo "  Q0/Q32  : VIP          (comment=64 or rates=0)"
-        echo "  Q1/Q33  : 109.x game UDP<=300B (automatic)"
-        echo "  Q2-Q30/Q34-Q62: per-user hash WRR"
-        echo "  Q31/Q63 : overflow"
+        echo "  Q0/Q32  : VIP SP     (static 11x.10-39 OR comment=64)"
+        echo "  Q1/Q33  : Game SP    (109.x UDP<=300B, automatic)"
+        echo "  Q2-Q30/Q34-Q62: smarthqos WRR (unused when smarthqos=0)"
+        echo "  Q31/Q63 : Rate-limit WRR (ALL rate-limited devices share)"
         ;;
 esac
