@@ -1,14 +1,54 @@
 #!/bin/sh
 # eqos - Hardware QoS management script
-# Queue Layout (DSCP 6-bit value == queue ID):
-#   Q0  (DSCP=0 ) : VIP upload        SP  (upload highest priority)
-#   Q1  (DSCP=1 ) : 109.x UDP<=300B   SP  (game upload)
-#   Q2-Q30(DSCP=2-30): per-user hash  WRR (upload isolation)
-#   Q31 (DSCP=31) : rate-limited      WRR (upload overflow)
-#   Q32 (DSCP=32) : VIP download      SP  (download highest priority)
-#   Q33 (DSCP=33) : 109.x UDP<=300B   SP  (game download)
-#   Q34-Q62(DSCP=34-62): per-user hash WRR (download isolation)
-#   Q63 (DSCP=63) : rate-limited      WRR (download overflow)
+#
+# ═══════════════════════════════════════════════════════════════
+#  IPv4 队列分配规则
+# ═══════════════════════════════════════════════════════════════
+#
+# SP 专属队列（Strict Priority，最高优先级，零共享）：
+#   Q0  (DSCP=0 ) : VIP 上传 SP EF  — 仅 VIP 设备占用
+#   Q32 (DSCP=32) : VIP 下载 SP EF  — 仅 VIP 设备占用
+#   Q1  (DSCP=1 ) : 游戏上传 SP EF  — 109.x 子网 UDP≤300B
+#   Q33 (DSCP=33) : 游戏下载 SP EF  — 109.x 子网 UDP≤300B
+#
+# VIP 设备判定（满足任一条件即为 VIP → Q0/Q32）：
+#   ① 静态 IP 段（FORWARD 链 u32，最终覆盖所有其他规则）：
+#        192.168.11x.{10-39}（第三段 110-119，第四段 10-39）
+#        第四段 .10-.39  = VIP
+#        第四段 .1-.9   = WRR 普通流量（不在 VIP 范围）
+#        第四段 .40-.254 = 普通流量（DHCP 下发范围）
+#   ② 动态标记：eqos add comment=64 或 comment=vip
+#        适用于任意 IP（.1-.9 / .40-.254 均可在 LuCI 标为 VIP）
+#
+# WRR 普通槽（per-user 隔离，AF41）：
+#   Q2-Q30  (DSCP=2-30 ) : 上传 WRR sch2 — 29 个用户 hash 槽
+#   Q34-Q62 (DSCP=34-62) : 下载 WRR sch3 — 29 个用户 hash 槽
+#   触发条件（满足任一即走 WRR 普通槽）：
+#     · 109.x 子网非游戏流量（TCP 或 UDP>300B）
+#     · 第四段 .1-.9  手动 IP（未被 VIP/限速标记）
+#     · 第四段 .40-.254 DHCP 下发 IP（未被 VIP/限速标记）
+#     · 其他任何未限速、未标 VIP 的设备
+#
+# 限速队列（所有限速设备共享，BE）：
+#   Q31 (DSCP=31) : 限速上传 WRR BE sch2
+#   Q63 (DSCP=63) : 限速下载 WRR BE sch3
+#   触发条件：eqos add 时 dl>0 或 up>0（tc HTB 执行带宽上限）
+#
+# ═══════════════════════════════════════════════════════════════
+#  IPv6 队列分配规则（2 类）
+# ═══════════════════════════════════════════════════════════════
+#
+# IPv6 按 MAC 地址识别，无 u32 IP 匹配：
+#   类型 1 — 普通 WRR（无限速配置的设备）：
+#     ip6tables -m mac --mac-source → MARK=wrr_id (2-30)
+#     ebtables  -p ipv6 -d MAC      → mark=wrr_dl (34-62)
+#     与对应 IPv4 设备共享同一 WRR hash 槽
+#   类型 2 — 限速队列（LuCI 配置了带宽限速的设备）：
+#     ip6tables -m mac --mac-source → MARK=31
+#     ebtables  -p ipv6 -d MAC      → mark=63
+#     进入 Q31/Q63 限速队列
+#   注：IPv6 无 SP VIP 队列（DSCP=0/32 不适用），
+#       VIP 优先级由 IPv4 规则承担。
 
 dev=br-lan
 hash_file="/tmp/hash_records.txt"
