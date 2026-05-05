@@ -45,7 +45,10 @@
 # │  Q63 │ 限速下载  WRR BE — sch3                     │
 # │                                                     │
 # │ 触发条件：eqos add 时 dl>0 或 up>0                  │
-# │ 所有限速设备共享 Q31/Q63，tc HTB 执行带宽上限        │
+# │ 纯硬件实现：Q31/Q63 的 max_rate shaper 设置为       │
+# │   所有限速设备中 up/dl 的最大值（kbps）。           │
+# │ 状态文件：/tmp/rl_max_rates "<max_dl> <max_up>"     │
+# │ 无 tc HTB，无 IFB，零 CPU 开销。                    │
 # └─────────────────────────────────────────────────────┘
 #
 # 109.x 子网游戏加速（FORWARD 链静态规则）：
@@ -142,6 +145,41 @@ check_queue 31 2 "限速 上传 WRR"
 check_queue 32 1 "VIP 下载 SP"
 check_queue 33 1 "游戏 下载 SP"
 check_queue 63 3 "限速 下载 WRR"
+
+# ── Q31/Q63 硬件 max_rate shaper 验证 ──
+RL_MAX_FILE="/tmp/rl_max_rates"
+if [ -f "$RL_MAX_FILE" ]; then
+    read RL_MAX_DL RL_MAX_UP < "$RL_MAX_FILE" 2>/dev/null
+    RL_MAX_DL=${RL_MAX_DL:-0}; RL_MAX_UP=${RL_MAX_UP:-0}
+    info "限速状态文件: max_dl=${RL_MAX_DL}kbps  max_up=${RL_MAX_UP}kbps"
+
+    # 读取 Q31 当前 max_rate（从 qdma_txq31 输出中提取 max rate enable/value）
+    Q31_VAL=$(cat "$QDMA/qdma_txq31" 2>/dev/null)
+    Q31_MAX_EN=$(echo "$Q31_VAL" | grep -i 'max' | grep -oE 'enable.*[01]' | grep -oE '[01]$' | head -1)
+    Q31_MAX_RATE=$(echo "$Q31_VAL" | grep -i 'max' | grep -oE 'rate.*[0-9]+' | grep -oE '[0-9]+$' | head -1)
+    Q63_VAL=$(cat "$QDMA/qdma_txq63" 2>/dev/null)
+    Q63_MAX_EN=$(echo "$Q63_VAL" | grep -i 'max' | grep -oE 'enable.*[01]' | grep -oE '[01]$' | head -1)
+    Q63_MAX_RATE=$(echo "$Q63_VAL" | grep -i 'max' | grep -oE 'rate.*[0-9]+' | grep -oE '[0-9]+$' | head -1)
+
+    if [ "${RL_MAX_UP:-0}" -gt 0 ]; then
+        [ "${Q31_MAX_EN:-0}" = "1" ] \
+            && ok "Q31 max_rate shaper 已启用，rate=${Q31_MAX_RATE}kbps (期望>=${RL_MAX_UP}kbps)" \
+            || fail "Q31 max_rate shaper 未启用，但 rl_max_file 中 max_up=${RL_MAX_UP}kbps"
+    else
+        info "无上传限速设备，Q31 max_rate shaper 应为禁用"
+    fi
+
+    if [ "${RL_MAX_DL:-0}" -gt 0 ]; then
+        [ "${Q63_MAX_EN:-0}" = "1" ] \
+            && ok "Q63 max_rate shaper 已启用，rate=${Q63_MAX_RATE}kbps (期望>=${RL_MAX_DL}kbps)" \
+            || fail "Q63 max_rate shaper 未启用，但 rl_max_file 中 max_dl=${RL_MAX_DL}kbps"
+    else
+        info "无下载限速设备，Q63 max_rate shaper 应为禁用"
+    fi
+else
+    info "限速状态文件不存在（无限速设备配置，或 eqos 未启动）"
+    info "Q31/Q63 max_rate shaper 应处于禁用状态"
+fi
 
 # smarthqos 队列抽查 (Q5, Q15, Q30, Q35, Q50, Q62)
 SMART_ENABLED=$(uci -q get eqos.config.smarthqos 2>/dev/null)
@@ -313,38 +351,53 @@ else
     [ "$SLOT_MAX" -eq 0 ] && echo "  │  (无下载条目)"
     echo "  └──"
 
-    # ── 限速逻辑健康检查 ──
+    # ── 限速队列健康检查（硬件 max_rate shaper 版）──
     echo ""
     sep
     echo "  《限速队列健康检查》"
     sep
-    # 检查：Q31/Q63 应只有限速设备，不应有 VIP/游戏流量
-    # VIP 流量 = qid=0/32，游戏流量 = qid=1/33，任何进入 Q31/Q63 的都应是限速设备
+
+    # 1. 检查 eqos 链中 DSCP=31/63 规则数（每个限速设备 2 条：上传+下载）
+    RL_RULES_UP=$(iptables -t mangle -L eqos -n 2>/dev/null | grep -c 'DSCP set 0x1f')
+    RL_RULES_DN=$(iptables -t mangle -L eqos -n 2>/dev/null | grep -c 'DSCP set 0x3f')
+    RL_RULES_UP=$(echo "$RL_RULES_UP" | tr -d '\n\r'); RL_RULES_UP=${RL_RULES_UP:-0}
+    RL_RULES_DN=$(echo "$RL_RULES_DN" | tr -d '\n\r'); RL_RULES_DN=${RL_RULES_DN:-0}
+
+    if [ "$RL_RULES_UP" -gt 0 ] && [ "$RL_RULES_UP" -eq "$RL_RULES_DN" ]; then
+        ok "eqos 链限速规则对称：DSCP=31 ($RL_RULES_UP 条) = DSCP=63 ($RL_RULES_DN 条)"
+    elif [ "$RL_RULES_UP" -eq 0 ] && [ "$RL_RULES_DN" -eq 0 ]; then
+        info "eqos 链无限速规则（无限速设备配置）"
+    else
+        fail "eqos 链限速规则不对称：DSCP=31=$RL_RULES_UP 条，DSCP=63=$RL_RULES_DN 条"
+    fi
+
+    # 2. 验证 rl_max_file 状态与 HNAT 条目数一致性
+    RL_MAX_FILE="/tmp/rl_max_rates"
+    if [ -f "$RL_MAX_FILE" ]; then
+        read CHK_DL CHK_UP < "$RL_MAX_FILE" 2>/dev/null
+        CHK_DL=${CHK_DL:-0}; CHK_UP=${CHK_UP:-0}
+        info "rl_max_file: max_dl=${CHK_DL}kbps  max_up=${CHK_UP}kbps"
+        if [ "$RL_RULES_UP" -gt 0 ] && [ "$CHK_UP" -eq 0 ] && [ "$CHK_DL" -eq 0 ]; then
+            fail "有限速规则但 rl_max_file 速率为 0 — Q31/Q63 max_rate shaper 未正确配置"
+        elif [ "$RL_RULES_UP" -gt 0 ]; then
+            ok "rl_max_file 与 eqos 限速规则一致（有限速设备，max_dl=${CHK_DL}k max_up=${CHK_UP}k）"
+        fi
+    else
+        [ "$RL_RULES_UP" -gt 0 ] \
+            && fail "eqos 链有限速规则但 rl_max_file 不存在 — max_rate shaper 状态丢失" \
+            || info "rl_max_file 不存在（无限速设备或 eqos 未启动）"
+    fi
+
+    # 3. Q31/Q63 HNAT 条目数报告
     [ "$C31" -gt 0 ] || [ "$C63" -gt 0 ] \
-        && info "Q31/Q63 有条目（$((C31+C63)) 条），验证是否全为限速设备……" \
-        || info "Q31/Q63 当前无条目（无限速设备在线或 HNAT 未建表）"
+        && info "Q31/Q63 HNAT 条目：上传=$C31 下载=$C63（限速设备已建 HNAT 表）" \
+        || info "Q31/Q63 无 HNAT 条目（限速设备未通信或 HNAT 未建表）"
 
-    # 检查 Q31 中是否混入了 game 的 qid（理论上不可能，但做二次验证）
-    # 因为游戏是 DSCP=1/33 → qid=(4>>2)=1 和 (132>>2)=33，不会等于 31
-    # 检查 eqos 链中有无 DSCP=31 被 Branch 3 错误分配的情况
-    BAD_WRR_TO_RL=$(iptables -t mangle -L eqos -n 2>/dev/null | grep 'DSCP set 0x1f' | wc -l)
-    BAD_WRR_TO_RL=$(echo "$BAD_WRR_TO_RL" | tr -d '\n\r'); BAD_WRR_TO_RL=${BAD_WRR_TO_RL:-0}
-    [ "$BAD_WRR_TO_RL" -gt 0 ] \
-        && ok "eqos 链有 $BAD_WRR_TO_RL 条 DSCP=31 规则（限速设备，期望值）" \
-        || info "eqos 链中无 DSCP=31 规则（无配置限速设备，或设备未添加）"
-
-    BAD_WRR_TO_RL63=$(iptables -t mangle -L eqos -n 2>/dev/null | grep 'DSCP set 0x3f' | wc -l)
-    BAD_WRR_TO_RL63=$(echo "$BAD_WRR_TO_RL63" | tr -d '\n\r'); BAD_WRR_TO_RL63=${BAD_WRR_TO_RL63:-0}
-    [ "$BAD_WRR_TO_RL63" -gt 0 ] \
-        && ok "eqos 链有 $BAD_WRR_TO_RL63 条 DSCP=63 规则（限速设备下行，期望值）" \
-        || info "eqos 链中无 DSCP=63 规则（无配置限速设备）"
-
-    # 检查：Q31/Q63 应对称 —— 同一设备上传/下载都进入限速队列
-    # 如果 C31 和 C63 严重不对称，说明存在只有单向限速规则的问题
+    # 4. Q31/Q63 对称性检查
     if [ "$C31" -gt 0 ] && [ "$C63" -gt 0 ]; then
         DIFF=$(( C31 - C63 ))
         [ "$DIFF" -lt 0 ] && DIFF=$(( 0 - DIFF ))
-        RATIO_THRESHOLD=5  # 允许最多 5 条差距（同一 IP 的不同 5-tuple 连接数差异）
+        RATIO_THRESHOLD=5
         if [ "$DIFF" -le "$RATIO_THRESHOLD" ]; then
             ok "Q31/Q63 条目数基本对称（上传=$C31 下载=$C63 差值=$DIFF ≤ $RATIO_THRESHOLD）"
         else
