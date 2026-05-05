@@ -172,9 +172,9 @@ case "$1" in
         iptables_start_prepare
         start_qos "$2" "$3"
         iptables_start_inital
-        # sch2: WRR for upload  (Q2-Q30 per-user, Q31 overflow)
+        # sch2: WRR for upload  (Q2-Q30 per-user, Q31 rate-limited)
         echo 1 wrr $(($3*1000)) > /sys/kernel/debug/hnat/qdma_sch2
-        # sch3: WRR for download (Q34-Q62 per-user, Q63 overflow)
+        # sch3: WRR for download (Q34-Q62 per-user, Q63 rate-limited)
         echo 1 wrr $(($2*1000)) > /sys/kernel/debug/hnat/qdma_sch3
         ;;
 
@@ -186,41 +186,38 @@ case "$1" in
         macaddr="$6"
         interface="$7"
 
-        # VIP detection: ONLY via explicit comment="64" or "vip".
-        # Do NOT use rates==0 as VIP indicator: smarthqos auto-assigns devices
-        # with rates=0 to WRR slots Q2-Q30, which would conflict with VIP.
+        # Pre-compute deterministic WRR slot for this IP.
+        # generate_index is pure-hash (no file state), so the same IP always
+        # maps to the same slot. Used for cross-state cleanup below.
+        wrr_id=$(generate_index "$ip")
+        wrr_dl=$((wrr_id + 32))
+
+        # ── Unified cleanup: remove ALL possible previous DSCP rules for $ip ──
+        iptables -t mangle -D eqos -s "$ip" -j DSCP --set-dscp 0         2>/dev/null
+        iptables -t mangle -D eqos -d "$ip" -j DSCP --set-dscp 32        2>/dev/null
+        iptables -t mangle -D eqos -s "$ip" -j DSCP --set-dscp "$wrr_id" 2>/dev/null
+        iptables -t mangle -D eqos -d "$ip" -j DSCP --set-dscp "$wrr_dl" 2>/dev/null
+        iptables -t mangle -D eqos -s "$ip" -j DSCP --set-dscp 31        2>/dev/null
+        iptables -t mangle -D eqos -d "$ip" -j DSCP --set-dscp 63        2>/dev/null
+
         if [ "$comment" = "64" ] || [ "$comment" = "vip" ]; then
-            # VIP: upload → Q0 (explicit DSCP=0 clears any stale rate-limit rule)
-            #      download → Q32 (DSCP=32)
-            iptables -t mangle -D eqos -s "$ip" -j DSCP --set-dscp 0  2>/dev/null
-            iptables -t mangle -D eqos -s "$ip" -j DSCP --set-dscp 31 2>/dev/null
-            iptables -t mangle -D eqos -d "$ip" -j DSCP --set-dscp 32 2>/dev/null
-            iptables -t mangle -D eqos -d "$ip" -j DSCP --set-dscp 63 2>/dev/null
-            # Upload: DSCP=0 inserted at head so it overrides any stale per-user rules.
-            # The static VIP u32 rules at chain-end will ALSO set 0 for the static
-            # range; this explicit rule covers dynamically-promoted DHCP devices.
+            # ── Branch 1: VIP → Q0 upload (SP EF) / Q32 download (SP EF) ──
+            # Upload DSCP=0 at chain head overrides any smarthqos WRR rule.
+            # Static u32 at chain-end also sets 0 for the static range (11x.10-39);
+            # this explicit rule covers dynamically-promoted DHCP devices (40-254).
             iptables -t mangle -I eqos 1 -s "$ip" -j DSCP --set-dscp 0
             iptables -t mangle -I eqos 1 -d "$ip" -j DSCP --set-dscp 32
-        else
-            # Rate-limited device: ALL share Q31 (upload) and Q63 (download).
-            # Hardware QoS: Q31/Q63 are WRR on sch2/sch3 → lower priority than VIP/game.
-            # Software QoS: tc HTB below enforces per-device limits on slow-path traffic.
-            iptables -t mangle -D eqos -s "$ip" -j DSCP --set-dscp 0  2>/dev/null
-            iptables -t mangle -D eqos -s "$ip" -j DSCP --set-dscp 31 2>/dev/null
-            iptables -t mangle -D eqos -d "$ip" -j DSCP --set-dscp 32 2>/dev/null
-            iptables -t mangle -D eqos -d "$ip" -j DSCP --set-dscp 63 2>/dev/null
 
-            if [ "${up:-0}" -ne 0 ]; then
-                # Upload: DSCP=31 → Q31 (WRR, lowest priority upload)
+        elif [ "${up:-0}" -ne 0 ] || [ "${dl:-0}" -ne 0 ]; then
+            # ── Branch 2: Rate-limited → Q31 upload / Q63 download (WRR BE) ──
+            # ALL rate-limited devices share Q31/Q63 (sch2/sch3 WRR).
+            # Lower hardware priority than VIP/game SP queues.
+            [ "${up:-0}" -ne 0 ] && \
                 iptables -t mangle -I eqos 1 -s "$ip" -j DSCP --set-dscp 31
-            fi
-            if [ "${dl:-0}" -ne 0 ]; then
-                # Download: DSCP=63 → Q63 (WRR, lowest priority download)
+            [ "${dl:-0}" -ne 0 ] && \
                 iptables -t mangle -I eqos 1 -d "$ip" -j DSCP --set-dscp 63
-            fi
 
-            # tc HTB: per-device software rate limiting (applies to slow-path traffic;
-            # HNAT hardware fast-path bypasses tc but Q31/Q63 WRR provides HW fairness)
+            # tc HTB: per-device software rate limiting
             local cnt
             cnt=$(tc class show dev $dev | wc -l)
             if [ "${dl:-0}" -ne 0 ]; then
@@ -236,7 +233,7 @@ case "$1" in
                     match ip src "$ip" flowid 1:1"$cnt"
             fi
 
-            # IPv6 MAC-based marking for rate-limited devices
+            # IPv6 MAC-based marking
             if [ -n "$macaddr" ]; then
                 ip6tables -t mangle -D eqos -m mac --mac-source "$macaddr" \
                     -j MARK --set-mark 31 2>/dev/null
@@ -247,7 +244,29 @@ case "$1" in
                 ebtables -t nat -A eqos -p ipv6 -d "$macaddr" \
                     -j mark --mark-set 63
             fi
-        fi  # end of VIP/rate-limited if/else
+
+        else
+            # ── Branch 3: WRR per-user slot → Q${wrr_id} / Q${wrr_dl} (WRR AF41) ──
+            # rates=0 and no VIP comment: per-user WRR isolation without rate limit.
+            # Covers: LuCI device added without explicit limits, or smarthqos
+            # auto-assign path if dhcp_mark.sh calls eqos add with rates=0.
+            # Deterministic hash: same IP always maps to same slot (2-30 range).
+            # Static VIP u32 at chain-end still overrides for 11x.10-39 range.
+            iptables -t mangle -I eqos 1 -s "$ip" -j DSCP --set-dscp "$wrr_id"
+            iptables -t mangle -I eqos 1 -d "$ip" -j DSCP --set-dscp "$wrr_dl"
+
+            # IPv6 MAC-based marking
+            if [ -n "$macaddr" ]; then
+                ip6tables -t mangle -D eqos -m mac --mac-source "$macaddr" \
+                    -j MARK --set-mark "$wrr_id" 2>/dev/null
+                ip6tables -t mangle -I eqos 1 -m mac --mac-source "$macaddr" \
+                    -j MARK --set-mark "$wrr_id"
+                ebtables -t nat -D eqos -p ipv6 -d "$macaddr" \
+                    -j mark --mark-set "$wrr_dl" 2>/dev/null
+                ebtables -t nat -A eqos -p ipv6 -d "$macaddr" \
+                    -j mark --mark-set "$wrr_dl"
+            fi
+        fi  # end of 3-way branch
 
         # Multi-WAN load balance interface binding
         if [ "$interface" ]; then
@@ -274,7 +293,7 @@ case "$1" in
         echo "Queue layout:"
         echo "  Q0/Q32  : VIP SP     (static 11x.10-39 OR comment=64)"
         echo "  Q1/Q33  : Game SP    (109.x UDP<=300B, automatic)"
-        echo "  Q2-Q30/Q34-Q62: smarthqos WRR (unused when smarthqos=0)"
+        echo "  Q2-Q30/Q34-Q62: per-user WRR (smarthqos or rates=0 add)"
         echo "  Q31/Q63 : Rate-limit WRR (ALL rate-limited devices share)"
         ;;
 esac
