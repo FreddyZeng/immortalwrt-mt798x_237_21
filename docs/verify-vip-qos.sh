@@ -128,10 +128,12 @@ check_queue() {
     local F="$QDMA/qdma_txq${qid}"
     [ -f "$F" ] || { fail "qdma_txq${qid} 不存在"; return; }
     local VAL=$(cat "$F")
-    local SCH=$(echo "$VAL" | awk '{print $1}')
+    # qdma_txq 输出为多行格式，scheduler id 在 "scheduler: N" 行
+    local SCH=$(echo "$VAL" | grep -i 'scheduler:' | grep -oE '[0-9]+' | head -1)
+    SCH=${SCH:-"?"}
     [ "$SCH" = "$expect_sch" ] \
         && ok "Q${qid} (${label}): sch=${SCH} ✓" \
-        || fail "Q${qid} (${label}): 期望 sch=${expect_sch}, 实际 sch=${SCH}  [$VAL]"
+        || fail "Q${qid} (${label}): 期望 sch=${expect_sch}, 实际 sch=${SCH}"
 }
 
 check_queue 0  0 "VIP 上传 SP"
@@ -220,33 +222,55 @@ else
     TOTAL=$(grep -c "=>" "$HNAT_FILE" 2>/dev/null || echo 0)
     info "总 HNAT 条目: $TOTAL"
     echo ""
-    echo "  qid | 期望流量类型                    | 条目数"
-    echo "  ----|--------------------------------|-------"
-    for qid in 0 1 31 32 33 63; do
-        CNT=$(grep -c "qid=$qid[^0-9]" "$HNAT_FILE" 2>/dev/null || echo 0)
-        case $qid in
-            0)  LABEL="VIP 上传 SP EF" ;;
-            1)  LABEL="游戏 上传 SP EF" ;;
-            31) LABEL="限速设备 上传 WRR BE (共享)" ;;
-            32) LABEL="VIP 下载 SP EF" ;;
-            33) LABEL="游戏 下载 SP EF" ;;
-            63) LABEL="限速设备 下载 WRR BE (共享)" ;;
-        esac
-        printf "  Q%-3s | %-30s | %d\n" "$qid" "$LABEL" "$CNT"
-    done
+    echo "  《四类队列分布》"
+    echo "  ================================================================"
+    echo "  类别           | 队列     | 用途                       | 条目数"
+    echo "  ----------------|---------|----------------------------|-------"
 
-    # smarthqos 范围统计
+    # VIP Q0 / Q32
+    C0=$(grep  -c "qid=0[^0-9]"  "$HNAT_FILE" 2>/dev/null || echo 0)
+    C0=$(echo "$C0"  | tr -d '\n\r'); C0=${C0:-0}
+    C32=$(grep -c "qid=32[^0-9]" "$HNAT_FILE" 2>/dev/null || echo 0)
+    C32=$(echo "$C32" | tr -d '\n\r'); C32=${C32:-0}
+    printf "  %-15s | Q0      | VIP 上传 SP EF              | %d\n" "VIP" "$C0"
+    printf "  %-15s | Q32     | VIP 下载 SP EF              | %d\n" "" "$C32"
+
+    # 游戏 Q1 / Q33
+    C1=$(grep  -c "qid=1[^0-9]"  "$HNAT_FILE" 2>/dev/null || echo 0)
+    C1=$(echo "$C1"  | tr -d '\n\r'); C1=${C1:-0}
+    C33=$(grep -c "qid=33[^0-9]" "$HNAT_FILE" 2>/dev/null || echo 0)
+    C33=$(echo "$C33" | tr -d '\n\r'); C33=${C33:-0}
+    printf "  %-15s | Q1      | 游戏上传 UDP≤300B SP EF    | %d\n" "游戏(109.x)" "$C1"
+    printf "  %-15s | Q33     | 游戏下载 UDP≤300B SP EF    | %d\n" "" "$C33"
+
+    # WRR 普通 Q2-30 / Q34-62
     CNT_UP=0; CNT_DN=0
     for q in $(seq 2 30); do
         C=$(grep -c "qid=$q[^0-9]" "$HNAT_FILE" 2>/dev/null || echo 0)
+        C=$(echo "$C" | tr -d '\n\r'); C=${C:-0}
         CNT_UP=$((CNT_UP + C))
     done
     for q in $(seq 34 62); do
         C=$(grep -c "qid=$q[^0-9]" "$HNAT_FILE" 2>/dev/null || echo 0)
+        C=$(echo "$C" | tr -d '\n\r'); C=${C:-0}
         CNT_DN=$((CNT_DN + C))
     done
-    printf "  Q%-3s | %-30s | %d\n" "2-30"  "smarthqos 上传 WRR AF41" "$CNT_UP"
-    printf "  Q%-3s | %-30s | %d\n" "34-62" "smarthqos 下载 WRR AF41" "$CNT_DN"
+    printf "  %-15s | Q2-30   | WRR 普通上传 AF41 (per-user) | %d\n" "WRR普通" "$CNT_UP"
+    printf "  %-15s | Q34-62  | WRR 普通下载 AF41 (per-user) | %d\n" "" "$CNT_DN"
+
+    # 限速 Q31 / Q63
+    C31=$(grep -c "qid=31[^0-9]" "$HNAT_FILE" 2>/dev/null || echo 0)
+    C31=$(echo "$C31" | tr -d '\n\r'); C31=${C31:-0}
+    C63=$(grep -c "qid=63[^0-9]" "$HNAT_FILE" 2>/dev/null || echo 0)
+    C63=$(echo "$C63" | tr -d '\n\r'); C63=${C63:-0}
+    printf "  %-15s | Q31     | 限速上传 WRR BE (共享)      | %d\n" "限速" "$C31"
+    printf "  %-15s | Q63     | 限速下载 WRR BE (共享)      | %d\n" "" "$C63"
+
+    echo "  ================================================================"
+    VIP_T=$((C0  + C32)); GAME_T=$((C1 + C33))
+    WRR_T=$((CNT_UP + CNT_DN)); RATE_T=$((C31 + C63))
+    printf "  分类合计: VIP=%-4d 游戏=%-4d WRR=%-5d 限速=%-4d 总=%d\n" \
+        "$VIP_T" "$GAME_T" "$WRR_T" "$RATE_T" "$TOTAL"
 fi
 
 # ─────────────────────────────────────────────────────
@@ -254,47 +278,46 @@ sep
 echo "【6】全部 QDMA 队列包计数（当前快照）"
 sep
 echo "  上传 Q0-Q31:"
-echo "  QID   | 期望流量          | 调度器 | 包数       | 丢包"
-echo "  ------|-------------------|--------|------------|-----"
+echo "  QID   | 类别   | 用途                       | sch | 包数       | 丢包"
+echo "  ------|--------|----------------------------|-----|------------|-----"
 for q in $(seq 0 31); do
     F="$QDMA/qdma_txq${q}"
     [ -f "$F" ] || continue
     PKTS=$(grep -i "packet count" "$F" | awk '{print $NF}'); PKTS=${PKTS:-0}
     DROP=$(grep -i "drop"         "$F" | awk '{print $NF}'); DROP=${DROP:-0}
-    SCH=$(awk '{print $1}' "$F" 2>/dev/null)
+    SCH=$(grep -i 'scheduler:' "$F" | grep -oE '[0-9]+' | head -1); SCH=${SCH:-"?"}
     case $q in
-        0)  LBL="VIP SP EF"       ;;
-        1)  LBL="游戏 SP EF"      ;;
-        31) LBL="限速共享 WRR BE" ;;
-        *)  if [ $q -ge 2 ] && [ $q -le 30 ]; then LBL="smarthqos WRR AF41"
-            else LBL="保留"; fi ;;
+        0)  CAT="VIP";  LBL="VIP 上传 SP EF"              ;;
+        1)  CAT="游戏"; LBL="游戏 UDP≤300B 上传 SP EF"    ;;
+        31) CAT="限速"; LBL="限速设备 上传 WRR BE(共享)"  ;;
+        *)  CAT="WRR";  LBL="WRR 普通上传 AF41"           ;;
     esac
     [ "$PKTS" != "0" ] && FLAG="◀" || FLAG=""
-    printf "  Q%-4s | %-17s | sch%-4s | %-10s | %s %s\n" \
-        "$q" "$LBL" "$SCH" "$PKTS" "$DROP" "$FLAG"
+    printf "  Q%-4s | %-6s | %-26s | %-3s | %-10s | %s %s\n" \
+        "$q" "$CAT" "$LBL" "$SCH" "$PKTS" "$DROP" "$FLAG"
 done
 
 echo ""
 echo "  下载 Q32-Q63:"
-echo "  QID   | 期望流量          | 调度器 | 包数       | 丢包"
-echo "  ------|-------------------|--------|------------|-----"
+echo "  QID   | 类别   | 用途                       | sch | 包数       | 丢包"
+echo "  ------|--------|----------------------------|-----|------------|-----"
 for q in $(seq 32 63); do
     F="$QDMA/qdma_txq${q}"
     [ -f "$F" ] || continue
     PKTS=$(grep -i "packet count" "$F" | awk '{print $NF}'); PKTS=${PKTS:-0}
     DROP=$(grep -i "drop"         "$F" | awk '{print $NF}'); DROP=${DROP:-0}
-    SCH=$(awk '{print $1}' "$F" 2>/dev/null)
+    SCH=$(grep -i 'scheduler:' "$F" | grep -oE '[0-9]+' | head -1); SCH=${SCH:-"?"}
     case $q in
-        32) LBL="VIP SP EF"       ;;
-        33) LBL="游戏 SP EF"      ;;
-        63) LBL="限速共享 WRR BE" ;;
-        *)  if [ $q -ge 34 ] && [ $q -le 62 ]; then LBL="smarthqos WRR AF41"
-            else LBL="保留"; fi ;;
+        32) CAT="VIP";  LBL="VIP 下载 SP EF"              ;;
+        33) CAT="游戏"; LBL="游戏 UDP≤300B 下载 SP EF"    ;;
+        63) CAT="限速"; LBL="限速设备 下载 WRR BE(共享)"  ;;
+        *)  CAT="WRR";  LBL="WRR 普通下载 AF41"           ;;
     esac
     [ "$PKTS" != "0" ] && FLAG="◀" || FLAG=""
-    printf "  Q%-4s | %-17s | sch%-4s | %-10s | %s %s\n" \
-        "$q" "$LBL" "$SCH" "$PKTS" "$DROP" "$FLAG"
+    printf "  Q%-4s | %-6s | %-26s | %-3s | %-10s | %s %s\n" \
+        "$q" "$CAT" "$LBL" "$SCH" "$PKTS" "$DROP" "$FLAG"
 done
+
 
 # ─────────────────────────────────────────────────────
 sep
