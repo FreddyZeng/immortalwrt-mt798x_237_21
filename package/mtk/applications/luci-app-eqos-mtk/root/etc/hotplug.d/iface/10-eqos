@@ -1,3 +1,7 @@
 #!/bin/sh
 
+# Only restart eqos when an interface comes UP (e.g. WAN reconnect).
+# Firing on ifdown/ifupdate causes unnecessary rule flushes and rebuilds.
+[ "$ACTION" = "ifup" ] || exit 0
+
 /etc/init.d/eqos start

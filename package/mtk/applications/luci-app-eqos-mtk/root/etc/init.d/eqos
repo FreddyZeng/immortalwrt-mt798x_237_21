@@ -49,21 +49,27 @@ start_service() {
         ip6tables -t mangle -D FORWARD  -j eqos
         ip6tables -t mangle -A FORWARD  -j eqos             
         fi  
-        
+
         if [ "$smarthqos" -eq "1" ]; then
-        # Q2-Q30: per-user upload WRR (skip Q0=VIP-SP, Q1=game-SP, Q31=overflow)
+        # Q2-Q30: per-user upload WRR (sch2). Always bind to sch2 regardless of rate.
+        # BUG FIX: when upload=0, previously skipped → queues stayed on sch0 (SP)!
         for i in $(seq 2 30); do
-        	if [ "$upload" -ne "0" ]; then
-		echo 2 1 $(($upload*225)) 1 $(($upload*1000)) 4 1 > /sys/kernel/debug/hnat/qdma_txq$i
-		fi
-		done
-		# Q34-Q62: per-user download WRR (skip Q32=VIP-SP, Q33=game-SP, Q63=overflow)
-		for i in $(seq 34 62); do
-		if [ "$download" -ne "0" ]; then
-		echo 3 1 $(($download*200)) 1 $(($download*1000)) 4 1 > /sys/kernel/debug/hnat/qdma_txq$i
-		fi
-	done
-	fi 
+            if [ "${upload:-0}" -ne "0" ]; then
+                echo 2 1 $(($upload*225)) 1 $(($upload*1000)) 4 1 > /sys/kernel/debug/hnat/qdma_txq$i
+            else
+                echo 2 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq$i
+            fi
+        done
+        # Q34-Q62: per-user download WRR (sch3). Same guard as above.
+        for i in $(seq 34 62); do
+            if [ "${download:-0}" -ne "0" ]; then
+                echo 3 1 $(($download*200)) 1 $(($download*1000)) 4 1 > /sys/kernel/debug/hnat/qdma_txq$i
+            else
+                echo 3 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq$i
+            fi
+        done
+        fi
+
         iptables -t mangle -F PREROUTING
         if [ $interface ]; then
 	bash /usr/sbin/loadbalance "$interface"
