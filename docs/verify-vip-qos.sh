@@ -492,18 +492,27 @@ B0=$(rpkt 0);  B1=$(rpkt 1);  B31=$(rpkt 31)
 B32=$(rpkt 32); B33=$(rpkt 33); B63=$(rpkt 63)
 BUP=$(rsum 2 30); BDN=$(rsum 34 62)
 
-pps() { echo $(( (${2:-0} - ${1:-0}) / 3 )); }
+pps() {
+    local diff=$(( (${2:-0} - ${1:-0}) ))
+    # 负值表示 QDMA MIB 计数器在采样窗口内被重置（eqos flush/dhcp_mark），
+    # 显示 "重置" 而非负数，避免混淆
+    if [ "$diff" -lt 0 ]; then
+        echo "重置"
+    else
+        echo $(( diff / 3 ))
+    fi
+}
 
 echo "  队列        | 期望流量               | pps（包/秒）"
 echo "  ------------|------------------------|-------------"
-printf "  Q0  (SP EF) | VIP 上传               | %d\n"   "$(pps $A0  $B0)"
-printf "  Q1  (SP EF) | 游戏 上传 UDP<=300B    | %d\n"   "$(pps $A1  $B1)"
-printf "  Q2-30(WRR)  | smarthqos 上传 AF41    | %d\n"   "$(pps $AUP $BUP)"
-printf "  Q31 (WRR)   | 限速设备 上传 BE       | %d\n"   "$(pps $A31 $B31)"
-printf "  Q32 (SP EF) | VIP 下载               | %d\n"   "$(pps $A32 $B32)"
-printf "  Q33 (SP EF) | 游戏 下载 UDP<=300B    | %d\n"   "$(pps $A33 $B33)"
-printf "  Q34-62(WRR) | smarthqos 下载 AF41    | %d\n"   "$(pps $ADN $BDN)"
-printf "  Q63 (WRR)   | 限速设备 下载 BE       | %d\n"   "$(pps $A63 $B63)"
+printf "  Q0  (SP EF) | VIP 上传               | %s\n"   "$(pps $A0  $B0)"
+printf "  Q1  (SP EF) | 游戏 上传 UDP<=300B    | %s\n"   "$(pps $A1  $B1)"
+printf "  Q2-30(WRR)  | smarthqos 上传 AF41    | %s\n"   "$(pps $AUP $BUP)"
+printf "  Q31 (WRR)   | 限速设备 上传 BE       | %s\n"   "$(pps $A31 $B31)"
+printf "  Q32 (SP EF) | VIP 下载               | %s\n"   "$(pps $A32 $B32)"
+printf "  Q33 (SP EF) | 游戏 下载 UDP<=300B    | %s\n"   "$(pps $A33 $B33)"
+printf "  Q34-62(WRR) | smarthqos 下载 AF41    | %s\n"   "$(pps $ADN $BDN)"
+printf "  Q63 (WRR)   | 限速设备 下载 BE       | %s\n"   "$(pps $A63 $B63)"
 
 echo ""
 echo "  ◀ 标记 = 有包计数的队列（非零）"
