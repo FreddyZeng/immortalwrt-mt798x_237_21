@@ -237,14 +237,13 @@ case "$1" in
 
         elif [ "${up:-0}" -ne 0 ] || [ "${dl:-0}" -ne 0 ]; then
             # ── Branch 2: Rate-limited → Q31 upload / Q63 download (WRR BE) ──
-            # ALL rate-limited devices share Q31/Q63 (sch2/sch3 WRR).
-            # Lower hardware priority than VIP/game SP queues.
-            [ "${up:-0}" -ne 0 ] && \
-                iptables -t mangle -I eqos 1 -s "$ip" -j DSCP --set-dscp 31
-            [ "${dl:-0}" -ne 0 ] && \
-                iptables -t mangle -I eqos 1 -d "$ip" -j DSCP --set-dscp 63
+            # ALWAYS force BOTH directions to Q31/Q63, even if only one side has rates>0.
+            # Reason: a device with dl=5000 up=0 must NOT get Q0 SP upload.
+            # tc HTB below enforces per-device limits; QDMA WRR provides HW fairness.
+            iptables -t mangle -I eqos 1 -s "$ip" -j DSCP --set-dscp 31
+            iptables -t mangle -I eqos 1 -d "$ip" -j DSCP --set-dscp 63
 
-            # tc HTB: per-device software rate limiting
+            # tc HTB: per-device software rate limiting (only when rates are set)
             local cnt
             cnt=$(tc class show dev $dev | wc -l)
             if [ "${dl:-0}" -ne 0 ]; then
