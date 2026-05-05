@@ -277,8 +277,9 @@ HNAT_FILE="$HNAT_DBG/hnat_entry"
 if [ ! -f "$HNAT_FILE" ]; then
     info "hnat_entry 不存在，跳过"
 else
-    TOTAL=$(grep -c "=>" "$HNAT_FILE" 2>/dev/null || echo 0)
-    info "总 HNAT 条目: $TOTAL"
+    TOTAL_ALL=$(grep -c "=>" "$HNAT_FILE" 2>/dev/null || echo 0)
+    TOTAL=$(grep -c "state=BIND" "$HNAT_FILE" 2>/dev/null || echo 0)
+    info "HNAT 条目: 全部=$TOTAL_ALL（含UNBIND），BIND活跃=$TOTAL"
     echo ""
     echo "  ╔══════════════════════════════════════════════════════════════════╗"
     echo "  ║                《四类队列分布总览》                               ║"
