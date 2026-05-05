@@ -103,7 +103,7 @@ QDMA="$HNAT_DBG"
 # ─────────────────────────────────────────────────────
 sep
 echo "【1】QDMA 调度器配置验证"
-echo "  期望: sch0/sch1=SP(上传/下载VIP), sch2/sch3=WRR(smarthqos/限速)"
+echo "  期望: sch0/sch1=SP（VIP/游戏 上传/下载）, sch2/sch3=WRR（普通+限速）"
 sep
 
 for SCH in 0 1 2 3; do
@@ -162,17 +162,29 @@ if [ -f "$RL_MAX_FILE" ]; then
     Q63_MAX_RATE=$(echo "$Q63_VAL" | grep -i 'max' | grep -oE 'rate.*[0-9]+' | grep -oE '[0-9]+$' | head -1)
 
     if [ "${RL_MAX_UP:-0}" -gt 0 ]; then
-        [ "${Q31_MAX_EN:-0}" = "1" ] \
-            && ok "Q31 max_rate shaper 已启用，rate=${Q31_MAX_RATE}kbps (期望>=${RL_MAX_UP}kbps)" \
-            || fail "Q31 max_rate shaper 未启用，但 rl_max_file 中 max_up=${RL_MAX_UP}kbps"
+        if [ "${Q31_MAX_EN:-0}" = "1" ]; then
+            if [ -n "$Q31_MAX_RATE" ] && [ "$Q31_MAX_RATE" -ge "$RL_MAX_UP" ] 2>/dev/null; then
+                ok "Q31 max_rate shaper 已启用，rate=${Q31_MAX_RATE}kbps ≥ max_up=${RL_MAX_UP}kbps ✓"
+            else
+                fail "Q31 max_rate shaper 已启用但 rate=${Q31_MAX_RATE}kbps < 期望 max_up=${RL_MAX_UP}kbps"
+            fi
+        else
+            fail "Q31 max_rate shaper 未启用，但 rl_max_file 中 max_up=${RL_MAX_UP}kbps"
+        fi
     else
         info "无上传限速设备，Q31 max_rate shaper 应为禁用"
     fi
 
     if [ "${RL_MAX_DL:-0}" -gt 0 ]; then
-        [ "${Q63_MAX_EN:-0}" = "1" ] \
-            && ok "Q63 max_rate shaper 已启用，rate=${Q63_MAX_RATE}kbps (期望>=${RL_MAX_DL}kbps)" \
-            || fail "Q63 max_rate shaper 未启用，但 rl_max_file 中 max_dl=${RL_MAX_DL}kbps"
+        if [ "${Q63_MAX_EN:-0}" = "1" ]; then
+            if [ -n "$Q63_MAX_RATE" ] && [ "$Q63_MAX_RATE" -ge "$RL_MAX_DL" ] 2>/dev/null; then
+                ok "Q63 max_rate shaper 已启用，rate=${Q63_MAX_RATE}kbps ≥ max_dl=${RL_MAX_DL}kbps ✓"
+            else
+                fail "Q63 max_rate shaper 已启用但 rate=${Q63_MAX_RATE}kbps < 期望 max_dl=${RL_MAX_DL}kbps"
+            fi
+        else
+            fail "Q63 max_rate shaper 未启用，但 rl_max_file 中 max_dl=${RL_MAX_DL}kbps"
+        fi
     else
         info "无下载限速设备，Q63 max_rate shaper 应为禁用"
     fi

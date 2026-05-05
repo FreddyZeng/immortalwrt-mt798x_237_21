@@ -372,9 +372,10 @@ case "$1" in
         echo "  add ip dl_kbps up_kbps [64|vip] [mac] [iface]"
         echo ""
         echo "Queue layout:"
-        echo "  Q0/Q32  : VIP SP     (static 11x.10-39 OR comment=64)"
-        echo "  Q1/Q33  : Game SP    (109.x UDP<=300B, automatic)"
-        echo "  Q2-Q30/Q34-Q62: per-user WRR (smarthqos or rates=0 add)"
-        echo "  Q31/Q63 : Rate-limit WRR (ALL rate-limited devices share)"
+        echo "  Q0/Q32  : VIP SP        (static 192.168.11x.10-39 OR comment=64/vip)"
+        echo "  Q1/Q33  : Game SP       (109.x UDP<=300B, automatic FORWARD rule)"
+        echo "  Q2-Q30/Q34-Q62: WRR AF41 per-user (eqos add rates=0, or dhcp_mark.sh)"
+        echo "  Q31/Q63 : Rate-limit WRR BE (all rate-limited devices share)"
+        echo "            hw max_rate = max(all up) for Q31, max(all dl) for Q63"
         ;;
 esac
