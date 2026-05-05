@@ -67,12 +67,33 @@ start_qos() {
         action mirred egress redirect dev ${dev}-ifb
 }
 
+# Helper: remove game+VIP rules from FORWARD chain (called by stop and before re-init)
+remove_static_forward_rules() {
+    # 109.x game rules
+    iptables -t mangle -D FORWARD \
+        -p udp -m length --length :300 \
+        -s 192.168.109.0/24 -j DSCP --set-dscp 1  2>/dev/null
+    iptables -t mangle -D FORWARD \
+        -p udp -m length --length :300 \
+        -d 192.168.109.0/24 -j DSCP --set-dscp 33 2>/dev/null
+    # Static VIP u32 rules
+    iptables -t mangle -D FORWARD -s 192.168.0.0/16 \
+        -m u32 --u32 "0xc&0x0000FF00=0x00006E00:0x00007700" \
+        -m u32 --u32 "0xc&0x000000FF=0x0000000A:0x00000027" \
+        -j DSCP --set-dscp 0  2>/dev/null
+    iptables -t mangle -D FORWARD -d 192.168.0.0/16 \
+        -m u32 --u32 "0x10&0x0000FF00=0x00006E00:0x00007700" \
+        -m u32 --u32 "0x10&0x000000FF=0x0000000A:0x00000027" \
+        -j DSCP --set-dscp 32 2>/dev/null
+}
+
 iptables_stop() {
     iptables  -t mangle -D FORWARD -j eqos 2>/dev/null
     ip6tables -t mangle -D FORWARD -j eqos 2>/dev/null
     ebtables  -t nat   -D POSTROUTING -j eqos -p ipv6 2>/dev/null
     echo 0 > /sys/kernel/debug/hnat/qos_toggle
     sed -i '/\/etc\/init.d\/eqos start/d' /etc/firewall.user
+    remove_static_forward_rules
     iptables  -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 0 2>/dev/null
     iptables  -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 0 2>/dev/null
     ip6tables -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 0 2>/dev/null
@@ -129,26 +150,28 @@ iptables_start_inital() {
     # Q63: Rate-limited download WRR → sch3 (lower priority than VIP/game)
     echo 3 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq63
 
-    # 109.x game acceleration: UDP<=300B upload→Q1(DSCP=1), download→Q33(DSCP=33)
-    # Appended AFTER per-IP rules so they override per-user DSCP for game packets
-    iptables -t mangle -A eqos \
+    # ── Static rules in FORWARD chain (survives dhcp_mark.sh eqos flush) ──
+    # FORWARD chain order: global-clear → -j eqos → game → VIP
+    # Last matching DSCP rule wins; game/VIP always execute AFTER eqos per-device rules.
+    remove_static_forward_rules  # idempotent: remove before re-adding
+
+    # 109.x game acceleration: UDP<=300B → Q1(DSCP=1) upload / Q33(DSCP=33) download
+    iptables -t mangle -A FORWARD \
         -p udp -m length --length :300 \
         -s 192.168.109.0/24 -j DSCP --set-dscp 1
-    iptables -t mangle -A eqos \
+    iptables -t mangle -A FORWARD \
         -p udp -m length --length :300 \
         -d 192.168.109.0/24 -j DSCP --set-dscp 33
 
     # Static VIP range: 192.168.110-119.10-39 → Q0 upload / Q32 download
-    # u32 bitfield matching: single rule covers all 10 subnets precisely
-    # Offset 0xc = src IP (bytes 12-15), 0x10 = dst IP (bytes 16-19)
-    # &0x0000FF00 isolates 3rd octet, range 0x6E00-0x7700 = 110-119
-    # &0x000000FF isolates 4th octet, range 0x0A-0x27   = 10-39
-    # APPENDED LAST → overrides any per-user DSCP (last match wins for non-terminating targets)
-    iptables -t mangle -A eqos -s 192.168.0.0/16 \
+    # u32 bitfield: 0xc=src IP, 0x10=dst IP
+    # 3rd octet 0x6E-0x77=110-119, 4th octet 0x0A-0x27=10-39
+    # Appended LAST in FORWARD → overrides all per-device DSCP from eqos chain
+    iptables -t mangle -A FORWARD -s 192.168.0.0/16 \
         -m u32 --u32 "0xc&0x0000FF00=0x00006E00:0x00007700" \
         -m u32 --u32 "0xc&0x000000FF=0x0000000A:0x00000027" \
         -j DSCP --set-dscp 0
-    iptables -t mangle -A eqos -d 192.168.0.0/16 \
+    iptables -t mangle -A FORWARD -d 192.168.0.0/16 \
         -m u32 --u32 "0x10&0x0000FF00=0x00006E00:0x00007700" \
         -m u32 --u32 "0x10&0x000000FF=0x0000000A:0x00000027" \
         -j DSCP --set-dscp 32
