@@ -50,17 +50,19 @@ start_service() {
         ip6tables -t mangle -A FORWARD  -j eqos             
         fi  
         
-        if [ "$smarthqos" -eq "1" ]; then  
-        for i in $(seq 1 31); do
+        if [ "$smarthqos" -eq "1" ]; then
+        # Q2-Q30: per-user upload WRR (skip Q0=VIP-SP, Q1=game-SP, Q31=overflow)
+        for i in $(seq 2 30); do
         	if [ "$upload" -ne "0" ]; then
 		echo 2 1 $(($upload*225)) 1 $(($upload*1000)) 4 1 > /sys/kernel/debug/hnat/qdma_txq$i
 		fi
 		done
-		for i in $(seq 33 63); do
+		# Q34-Q62: per-user download WRR (skip Q32=VIP-SP, Q33=game-SP, Q63=overflow)
+		for i in $(seq 34 62); do
 		if [ "$download" -ne "0" ]; then
 		echo 3 1 $(($download*200)) 1 $(($download*1000)) 4 1 > /sys/kernel/debug/hnat/qdma_txq$i
 		fi
-	done 
+	done
 	fi 
         iptables -t mangle -F PREROUTING
         if [ $interface ]; then

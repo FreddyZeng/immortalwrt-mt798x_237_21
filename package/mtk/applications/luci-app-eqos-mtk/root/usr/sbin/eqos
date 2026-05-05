@@ -1,187 +1,250 @@
 #!/bin/sh
+# eqos - Hardware QoS management script
+# Queue Layout (DSCP 6-bit value == queue ID):
+#   Q0  (DSCP=0 ) : VIP upload        SP  (upload highest priority)
+#   Q1  (DSCP=1 ) : 109.x UDP<=300B   SP  (game upload)
+#   Q2-Q30(DSCP=2-30): per-user hash  WRR (upload isolation)
+#   Q31 (DSCP=31) : rate-limited      WRR (upload overflow)
+#   Q32 (DSCP=32) : VIP download      SP  (download highest priority)
+#   Q33 (DSCP=33) : 109.x UDP<=300B   SP  (game download)
+#   Q34-Q62(DSCP=34-62): per-user hash WRR (download isolation)
+#   Q63 (DSCP=63) : rate-limited      WRR (download overflow)
 
 dev=br-lan
 hash_file="/tmp/hash_records.txt"
 
+# Returns hash slot 2-30 (29 per-user slots)
 generate_index() {
     local input="$1"
     local hash_value=$(echo -n "$input" | md5sum | cut -d' ' -f1)
     local decimal_value=$((0x${hash_value:0:8}))
-    local index=$((decimal_value % 31 + 1))
+    local index=$((decimal_value % 29 + 2))
     echo $index
 }
 
+# Find available slot in 2-30; returns 31 if all full (overflow)
 find_available_index() {
     local base_index=$(generate_index "$1")
     local index=$base_index
-
     while true; do
         if grep -q "^$index$" "$hash_file"; then
-            index=$((index % 31 + 1))
-            if [[ $index -eq $base_index ]]; then
-                echo "All slots are full. Returning 0."
-                return 0 
+            index=$(( (index - 2 + 1) % 29 + 2 ))
+            if [ "$index" -eq "$base_index" ]; then
+                echo 31
+                return 0
             fi
         else
-            echo $index >> "$hash_file"
-            echo $index
+            echo "$index" >> "$hash_file"
+            echo "$index"
             return 0
         fi
     done
 }
+
 stop_qos() {
-	tc qdisc del dev $dev root 2>/dev/null
-	tc qdisc del dev $dev ingress 2>/dev/null
-	tc qdisc del dev ${dev}-ifb root 2>/dev/null
-	ip link del dev ${dev}-ifb 2>/dev/null
+    tc qdisc del dev $dev root 2>/dev/null
+    tc qdisc del dev $dev ingress 2>/dev/null
+    tc qdisc del dev ${dev}-ifb root 2>/dev/null
+    ip link del dev ${dev}-ifb 2>/dev/null
 }
 
 start_qos() {
-	local dl=$1
-	local up=$2
-	rm /tmp/hash_records.txt
-    	touch "$hash_file"
-	tc qdisc add dev $dev root handle 1: htb
-	tc class add dev $dev parent 1: classid 1:1 htb rate ${dl}mbit
-	
-	ip link add dev ${dev}-ifb name ${dev}-ifb type ifb
-	ip link set dev ${dev}-ifb up
-	
-	tc qdisc add dev ${dev}-ifb root handle 1: htb
-	tc class add dev ${dev}-ifb parent 1: classid 1:1 htb rate ${up}mbit
-	
-	tc qdisc add dev $dev ingress
-	tc filter add dev $dev parent ffff: protocol ip u32 match u32 0 0 flowid 1:1 action mirred egress redirect dev ${dev}-ifb
+    local dl=$1
+    local up=$2
+    rm -f "$hash_file"
+    touch "$hash_file"
+    tc qdisc add dev $dev root handle 1: htb
+    tc class add dev $dev parent 1: classid 1:1 htb rate ${dl}mbit
+
+    ip link add dev ${dev}-ifb name ${dev}-ifb type ifb
+    ip link set dev ${dev}-ifb up
+
+    tc qdisc add dev ${dev}-ifb root handle 1: htb
+    tc class add dev ${dev}-ifb parent 1: classid 1:1 htb rate ${up}mbit
+
+    tc qdisc add dev $dev ingress
+    tc filter add dev $dev parent ffff: protocol ip u32 match u32 0 0 flowid 1:1 \
+        action mirred egress redirect dev ${dev}-ifb
 }
 
 iptables_stop() {
-		iptables -t mangle -D FORWARD  -j eqos
-		ip6tables -t mangle -D FORWARD  -j eqos
-		ebtables -t nat -D POSTROUTING  -j eqos -p ipv6
-		echo 0 > /sys/kernel/debug/hnat/qos_toggle
-		sed -i '/\/etc\/init.d\/eqos start/d' /etc/firewall.user
-		iptables -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 0
-		iptables -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 0
-		ip6tables -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 0
-		ip6tables -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 0
-		echo "10 0" > /sys/kernel/debug/hnat/hnat_setting
-		echo "11 30" >/sys/kernel/debug/hnat/hnat_setting
-		for i in $(seq 0 31); do
-		echo 0 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq$i
-		done
-		for i in $(seq 32 63); do
-		echo 1 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq$i
-		done	
-		echo 0 wrr 10000000 > /sys/kernel/debug/hnat/qdma_sch0
-		echo 0 wrr 10000000 > /sys/kernel/debug/hnat/qdma_sch1
-		echo 0 wrr 10000000 > /sys/kernel/debug/hnat/qdma_sch2
-		echo 0 wrr 10000000 > /sys/kernel/debug/hnat/qdma_sch3
+    iptables  -t mangle -D FORWARD -j eqos 2>/dev/null
+    ip6tables -t mangle -D FORWARD -j eqos 2>/dev/null
+    ebtables  -t nat   -D POSTROUTING -j eqos -p ipv6 2>/dev/null
+    echo 0 > /sys/kernel/debug/hnat/qos_toggle
+    sed -i '/\/etc\/init.d\/eqos start/d' /etc/firewall.user
+    iptables  -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 0 2>/dev/null
+    iptables  -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 0 2>/dev/null
+    ip6tables -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 0 2>/dev/null
+    ip6tables -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 0 2>/dev/null
+    echo "10 0" > /sys/kernel/debug/hnat/hnat_setting
+    echo "11 30" > /sys/kernel/debug/hnat/hnat_setting
+    for i in $(seq 0 31); do
+        echo 0 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq$i
+    done
+    for i in $(seq 32 63); do
+        echo 1 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq$i
+    done
+    echo 0 wrr 10000000 > /sys/kernel/debug/hnat/qdma_sch0
+    echo 0 wrr 10000000 > /sys/kernel/debug/hnat/qdma_sch1
+    echo 0 wrr 10000000 > /sys/kernel/debug/hnat/qdma_sch2
+    echo 0 wrr 10000000 > /sys/kernel/debug/hnat/qdma_sch3
 }
 
 iptables_start_prepare() {
-		iptables -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 0
-		iptables -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 0
-		iptables -t mangle -A FORWARD -i br-lan -j DSCP --set-dscp 0
-		iptables -t mangle -A FORWARD -o br-lan -j DSCP --set-dscp 0
-		ip6tables -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 0
-		ip6tables -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 0
-		ip6tables -t mangle -A FORWARD -i br-lan -j DSCP --set-dscp 0
-		ip6tables -t mangle -A FORWARD -o br-lan -j DSCP --set-dscp 0
+    # Clear all LAN DSCP so per-IP rules below are the single source of truth
+    iptables  -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 0 2>/dev/null
+    iptables  -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 0 2>/dev/null
+    iptables  -t mangle -A FORWARD -i br-lan -j DSCP --set-dscp 0
+    iptables  -t mangle -A FORWARD -o br-lan -j DSCP --set-dscp 0
+    ip6tables -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 0 2>/dev/null
+    ip6tables -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 0 2>/dev/null
+    ip6tables -t mangle -A FORWARD -i br-lan -j DSCP --set-dscp 0
+    ip6tables -t mangle -A FORWARD -o br-lan -j DSCP --set-dscp 0
 }
 
 iptables_start_inital() {
-		iptables -t mangle -N eqos
-		iptables -t mangle -F eqos
-		iptables -t mangle -D FORWARD  -j eqos
-		iptables -t mangle -A FORWARD  -j eqos	
-		echo 1 > /sys/kernel/debug/hnat/qos_toggle
-		echo 0 wrr 10000000 > /sys/kernel/debug/hnat/qdma_sch0
-		echo 0 wrr 10000000 > /sys/kernel/debug/hnat/qdma_sch1
-		echo 0 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq0
-		echo 1 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq32
-		echo "11 5" >/sys/kernel/debug/hnat/hnat_setting
-		uci -q set "turboacc.config.fastpath_mh_eth_hnat_bind_rate"="5"
-		uci -q commit "turboacc"
-		sed -i '/\/etc\/init.d\/eqos start/d' /etc/firewall.user
-		echo "/etc/init.d/eqos start" >> /etc/firewall.user
-		echo "10 1" > /sys/kernel/debug/hnat/hnat_setting
+    iptables -t mangle -N eqos 2>/dev/null
+    iptables -t mangle -F eqos
+    iptables -t mangle -D FORWARD -j eqos 2>/dev/null
+    iptables -t mangle -A FORWARD -j eqos
+    echo 1 > /sys/kernel/debug/hnat/qos_toggle
+
+    # sch0: Strict Priority for upload  (Q0=VIP, Q1=game → absolute priority)
+    # enable=1, sp mode (BIT(15)=0), rate=10G (effectively unlimited)
+    echo 1 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch0
+    # sch1: Strict Priority for download (Q32=VIP, Q33=game → absolute priority)
+    echo 1 sp 10000000 > /sys/kernel/debug/hnat/qdma_sch1
+
+    # Q0:  VIP upload  SP → sch0, no rate limit
+    echo 0 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq0
+    # Q1:  Game upload SP → sch0, no rate limit
+    echo 0 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq1
+    # Q32: VIP download  SP → sch1, no rate limit
+    echo 1 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq32
+    # Q33: Game download SP → sch1, no rate limit
+    echo 1 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq33
+
+    # 109.x game acceleration: UDP<=300B upload→Q1(DSCP=1), download→Q33(DSCP=33)
+    # Appended AFTER per-IP rules so they override per-user DSCP for game packets
+    iptables -t mangle -A eqos \
+        -p udp -m length --length :300 \
+        -s 192.168.109.0/24 -j DSCP --set-dscp 1
+    iptables -t mangle -A eqos \
+        -p udp -m length --length :300 \
+        -d 192.168.109.0/24 -j DSCP --set-dscp 33
+
+    # Static VIP range: 192.168.110-119.10-39 → Q0 upload / Q32 download
+    # APPENDED LAST so they override any per-user DSCP set by eqos add.
+    # (DSCP is non-terminating: last matching rule wins)
+    for _vip_oct in $(seq 110 119); do
+        iptables -t mangle -A eqos -m iprange \
+            --src-range 192.168.${_vip_oct}.10-192.168.${_vip_oct}.39 \
+            -j DSCP --set-dscp 0
+        iptables -t mangle -A eqos -m iprange \
+            --dst-range 192.168.${_vip_oct}.10-192.168.${_vip_oct}.39 \
+            -j DSCP --set-dscp 32
+    done
+
+    echo "11 5" > /sys/kernel/debug/hnat/hnat_setting
+    uci -q set "turboacc.config.fastpath_mh_eth_hnat_bind_rate"="5"
+    uci -q commit "turboacc"
+    sed -i '/\/etc\/init.d\/eqos start/d' /etc/firewall.user
+    echo "/etc/init.d/eqos start" >> /etc/firewall.user
+    echo "10 1" > /sys/kernel/debug/hnat/hnat_setting
 }
 
-
 case "$1" in
-	"stop")
-		stop_qos
-		iptables_stop
-	;;
-	"start")
-		stop_qos
-		iptables_start_prepare
-		start_qos $2 $3
-		iptables_start_inital
-		echo 1 wrr $(($3*1000)) > /sys/kernel/debug/hnat/qdma_sch2
-		echo 1 wrr $(($2*1000)) > /sys/kernel/debug/hnat/qdma_sch3
-	;;
-	"add")
-		ip="$2"
-		dl="$3"
-		up="$4"
-		macaddr="$6"
-		cnt=$(tc class show dev $dev | wc -l)
-		
-		interface="$7"
-		if [ -n "$ip" ]; then
-		id="$(find_available_index "$ip")"
-		elif [ -n "$macaddr" ]; then
-		id="$(find_available_index "$macaddr")"
-		fi
-		idpair=$((id+32))
-		if [ $id -lt 32 ]; then
-		iptables -t mangle -D eqos -s $ip -j DSCP --set-dscp ${id}
-		iptables -t mangle -D eqos -d $ip -j DSCP --set-dscp ${idpair}
-		ip6tables -t mangle -D eqos -m mac --mac-source $macaddr -j MARK --set-mark ${id}
-		ebtables -t nat -D eqos -p ipv6 -d $macaddr -j mark --mark-set ${idpair}
-		if [ $up -ne 0 ]; then
-		echo 2 0 0 1 ${up} 4 1 > /sys/kernel/debug/hnat/qdma_txq${id}
-		iptables -t mangle -A eqos -s $ip -j DSCP --set-dscp ${id}
-		ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j MARK --set-mark ${id}
-		fi
-		if [ $dl -ne 0 ]; then
-		echo 3 0 0 1 ${dl} 4 1 > /sys/kernel/debug/hnat/qdma_txq${idpair}
-		iptables -t mangle -A eqos -d $ip -j DSCP --set-dscp ${idpair}
-		ebtables -t nat -A eqos -p ipv6 -d $macaddr -j mark --mark-set ${idpair}
-		fi
-		else
-		iptables -t mangle -D eqos -s $ip -j MARK --set-mark 0x99
-		iptables -t mangle -D eqos -d $ip -j MARK --set-mark 0x99
-		if [ $up -ne 0 ]; then
-		iptables -t mangle -A eqos -s $ip -j MARK --set-mark 0x99
-		fi
-		if [ $dl -ne 0 ]; then
-		iptables -t mangle -A eqos -d $ip -j MARK --set-mark 0x99
-		fi
-		fi
-		if [ $id -gt 31 ]; then
-		tc class add dev $dev parent 1:1 classid 1:1$cnt htb rate ${dl}kbit ceil ${dl}kbit
-		tc filter add dev $dev parent 1:0 protocol ip u32 match ip dst $ip flowid 1:1$cnt
-		
-		tc class add dev ${dev}-ifb parent 1:1 classid 1:1$cnt htb rate ${up}kbit ceil ${up}kbit
-		tc filter add dev ${dev}-ifb parent 1:0 protocol ip u32 match ip src $ip flowid 1:1$cnt
-		fi
-		if [ $interface ]; then
-		iptables -t mangle -D PREROUTING -s $ip -m conntrack --ctstate NEW -j MARK --set-mark 2"$interface"
-		iptables -t mangle -A PREROUTING -s $ip -m conntrack --ctstate NEW -j MARK --set-mark 2"$interface"
-		iptables -t mangle -D PREROUTING -i br-lan -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark
-        	iptables -t mangle -A PREROUTING -i br-lan -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark
-		fi
-	;;
-	*)
-		echo "Usage: $0 <command> [options]"
-		echo "Commands:"
-		echo "  start dl_rate up_rate       #Total bandwidth (Mbit/s)"
-		echo "  stop"
-		echo "  add ip dl_rate up_rate      #Limiting the bandwidth of a single IP (kbit/s)"
-		echo "Example:"
-		echo "  $0 start 30 20              # Total bandwidth: down 30Mbit/s up 20Mbit/s"
-		echo "  $0 add 192.168.22.12 10 2   # down 10kbit/s  up 2kbit/s"
-	;;
+    "stop")
+        stop_qos
+        iptables_stop
+        ;;
+
+    "start")
+        stop_qos
+        iptables_start_prepare
+        start_qos "$2" "$3"
+        iptables_start_inital
+        # sch2: WRR for upload  (Q2-Q30 per-user, Q31 overflow)
+        echo 1 wrr $(($3*1000)) > /sys/kernel/debug/hnat/qdma_sch2
+        # sch3: WRR for download (Q34-Q62 per-user, Q63 overflow)
+        echo 1 wrr $(($2*1000)) > /sys/kernel/debug/hnat/qdma_sch3
+        ;;
+
+    "add")
+        ip="$2"
+        dl="$3"
+        up="$4"
+        comment="$5"   # "64" or "vip" = VIP device
+        macaddr="$6"
+        interface="$7"
+
+        # VIP detection: comment=="64"/"vip" OR both rates == 0
+        if [ "$comment" = "64" ] || [ "$comment" = "vip" ] || \
+           { [ "${dl:-0}" -eq 0 ] && [ "${up:-0}" -eq 0 ]; }; then
+            # VIP: upload DSCP=0 (already cleared by global rule → Q0)
+            #      download DSCP=32 → Q32
+            iptables -t mangle -D eqos -d "$ip" -j DSCP --set-dscp 32 2>/dev/null
+            iptables -t mangle -A eqos -d "$ip" -j DSCP --set-dscp 32
+        else
+            # Per-user: get hash slot 2-30 (or 31 if full)
+            id=$(find_available_index "$ip")
+            idpair=$((id + 32))
+
+            # Clean up any previous rules for this IP
+            iptables -t mangle -D eqos -s "$ip" -j DSCP --set-dscp "$id"     2>/dev/null
+            iptables -t mangle -D eqos -d "$ip" -j DSCP --set-dscp "$idpair" 2>/dev/null
+
+            if [ "${up:-0}" -ne 0 ]; then
+                # Upload: Q${id} on sch2 with rate limit
+                # Use -I 1 (insert at head) so static VIP range rules
+                # appended in init can still override at the end of chain
+                echo 2 0 0 1 "${up}" 4 1 > /sys/kernel/debug/hnat/qdma_txq"${id}"
+                iptables -t mangle -I eqos 1 -s "$ip" -j DSCP --set-dscp "$id"
+            fi
+            if [ "${dl:-0}" -ne 0 ]; then
+                # Download: Q${idpair} on sch3 with rate limit
+                echo 3 0 0 1 "${dl}" 4 1 > /sys/kernel/debug/hnat/qdma_txq"${idpair}"
+                iptables -t mangle -I eqos 1 -d "$ip" -j DSCP --set-dscp "$idpair"
+            fi
+
+            # IPv6 MAC-based marking (same slots)
+            ip6tables -t mangle -D eqos -m mac --mac-source "$macaddr" \
+                -j MARK --set-mark "$id" 2>/dev/null
+            ip6tables -t mangle -I eqos 1 -m mac --mac-source "$macaddr" \
+                -j MARK --set-mark "$id"
+            ebtables -t nat -D eqos -p ipv6 -d "$macaddr" \
+                -j mark --mark-set "$idpair" 2>/dev/null
+            ebtables -t nat -A eqos -p ipv6 -d "$macaddr" \
+                -j mark --mark-set "$idpair"
+        fi
+
+        # Multi-WAN load balance interface binding
+        if [ "$interface" ]; then
+            iptables -t mangle -D PREROUTING -s "$ip" \
+                -m conntrack --ctstate NEW -j MARK --set-mark 2"$interface" 2>/dev/null
+            iptables -t mangle -A PREROUTING -s "$ip" \
+                -m conntrack --ctstate NEW -j MARK --set-mark 2"$interface"
+            iptables -t mangle -D PREROUTING -i br-lan \
+                -m conntrack --ctstate ESTABLISHED,RELATED \
+                -j CONNMARK --restore-mark 2>/dev/null
+            iptables -t mangle -A PREROUTING -i br-lan \
+                -m conntrack --ctstate ESTABLISHED,RELATED \
+                -j CONNMARK --restore-mark
+        fi
+        ;;
+
+    *)
+        echo "Usage: $0 <command> [options]"
+        echo "Commands:"
+        echo "  start dl_rate up_rate"
+        echo "  stop"
+        echo "  add ip dl_kbps up_kbps [64|vip] [mac] [iface]"
+        echo ""
+        echo "Queue layout:"
+        echo "  Q0/Q32  : VIP          (comment=64 or rates=0)"
+        echo "  Q1/Q33  : 109.x game UDP<=300B (automatic)"
+        echo "  Q2-Q30/Q34-Q62: per-user hash WRR"
+        echo "  Q31/Q63 : overflow"
+        ;;
 esac
