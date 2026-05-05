@@ -1883,9 +1883,9 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 		 * fqos==1 guards LAN→WAN direction only (FROM_EXT packets
 		 * already set fqos=0, so WAN→LAN downloads are never touched).
 		 *
-		 * qid  0-1  : VIP / game UDP≤300B → EF  (DSCP 46, 0xB8)
-		 * qid  2-30 : per-user hash       → AF41 (DSCP 34, 0x88)
-		 * qid  31   : rate-limited        → BE   (DSCP  0, 0x00)
+		 * qid  0-1  : VIP / game UDP≤300B → EF   (DSCP 46, 0xB8)
+		 * qid  2-30 : per-user hash       → AF41  (DSCP 34, 0x88)
+		 * qid  31   : rate-limited        → BE    (DSCP  0, 0x00)
 		 *
 		 * iblk2.qid  = hardware scheduling queue (unchanged)
 		 * iblk2.dscp = TOS byte written by HW into the outgoing packet
@@ -1897,6 +1897,27 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 			else if (qid >= 2 && qid <= 30)
 				entry.ipv4_hnapt.iblk2.dscp = 0x88; /* AF41 = 34<<2 */
 			else if (qid == 31)
+				entry.ipv4_hnapt.iblk2.dscp = 0x00; /* BE   = 0     */
+		}
+
+		/* [LAN-EGRESS-MARK] LAN egress DSCP re-marking for download.
+		 * Applies when qid is in the download range (32-63), meaning
+		 * the device was managed by eqos and got a proper download qid.
+		 * Overrides whatever DSCP the internet server originally set,
+		 * giving consistent, predictable marking to LAN clients and
+		 * DSCP-aware WiFi APs (DSCP→WMM mapping).
+		 *
+		 * qid  32-33 : VIP / game download → EF   (DSCP 46, 0xB8)
+		 * qid  34-62 : per-user download   → AF41  (DSCP 34, 0x88)
+		 * qid  63    : rate-limited dl     → BE    (DSCP  0, 0x00)
+		 */
+		if (IS_HQOS_MODE && hnat_priv->dscp_en &&
+		    qid >= 32 && qid <= 63) {
+			if (qid == 32 || qid == 33)
+				entry.ipv4_hnapt.iblk2.dscp = 0xB8; /* EF   = 46<<2 */
+			else if (qid >= 34 && qid <= 62)
+				entry.ipv4_hnapt.iblk2.dscp = 0x88; /* AF41 = 34<<2 */
+			else if (qid == 63)
 				entry.ipv4_hnapt.iblk2.dscp = 0x00; /* BE   = 0     */
 		}
 	} else {
