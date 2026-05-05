@@ -50,7 +50,9 @@
 #   Q63 (DSCP=63) : 限速下载 WRR BE sch3
 #   触发条件：eqos add 时 dl>0 OR up>0（任一非零均走限速队列）
 #   注意：限速设备强制使用 -I eqos 1（插入 eqos 链头），最优先匹配
-#   tc HTB 在软件层执行实际带宽上限，Q31/Q63 在硬件层实现 WRR 隔离
+#   限速完全由硬件实现：Q31/Q63 使用 WRR BE 调度器（最低优先级），
+#   拥塞时 VIP/WRR 流量优先发送，限速设备只获得剩余带宽。
+#   无软件 tc HTB，无 IFB 设备，零 CPU 开销。
 #
 # ═══════════════════════════════════════════════════════════════
 #  IPv6 队列分配规则（2 类，按 MAC 识别，无 u32 IP 匹配）
@@ -74,6 +76,7 @@
 
 dev=br-lan
 hash_file="/tmp/hash_records.txt"
+rl_max_file="/tmp/rl_max_rates"  # 格式: "<max_dl_kbps> <max_up_kbps>"
 
 # Returns hash slot 2-30 (29 per-user slots)
 generate_index() {
@@ -108,26 +111,41 @@ stop_qos() {
     tc qdisc del dev $dev ingress 2>/dev/null
     tc qdisc del dev ${dev}-ifb root 2>/dev/null
     ip link del dev ${dev}-ifb 2>/dev/null
+    rm -f "$rl_max_file"
 }
 
-start_qos() {
-    local dl=$1
-    local up=$2
-    rm -f "$hash_file"
-    touch "$hash_file"
-    tc qdisc add dev $dev root handle 1: htb
-    tc class add dev $dev parent 1: classid 1:1 htb rate ${dl}mbit
+# 更新 Q31/Q63 的硬件 max_rate shaper。
+# 取本次调用的 dl/up 与历史最大值比较，写入较大值到 qdma_txq31/txq63。
+# 参数：$1=dl_kbps（下载速率，0表示不限）  $2=up_kbps（上传速率，0表示不限）
+# Q31 格式：sch=2(sch2) min_en=0 min_rate=0 max_en=1 max_rate=<kbps> weight=4 resv=4
+# Q63 格式：sch=3(sch3) min_en=0 min_rate=0 max_en=1 max_rate=<kbps> weight=4 resv=4
+update_rl_hw_rate() {
+    local cur_dl=${1:-0}
+    local cur_up=${2:-0}
+    local max_dl max_up
+    read max_dl max_up < "$rl_max_file" 2>/dev/null || { max_dl=0; max_up=0; }
 
-    ip link add dev ${dev}-ifb name ${dev}-ifb type ifb
-    ip link set dev ${dev}-ifb up
+    [ "$cur_dl" -gt "$max_dl" ] && max_dl=$cur_dl
+    [ "$cur_up" -gt "$max_up" ] && max_up=$cur_up
+    echo "$max_dl $max_up" > "$rl_max_file"
 
-    tc qdisc add dev ${dev}-ifb root handle 1: htb
-    tc class add dev ${dev}-ifb parent 1: classid 1:1 htb rate ${up}mbit
+    # Q31: 上传限速队列（sch2），配置硬件 max_rate shaper
+    if [ "$max_up" -gt 0 ]; then
+        echo 2 0 0 1 $max_up 4 4 > /sys/kernel/debug/hnat/qdma_txq31
+    else
+        echo 2 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq31
+    fi
 
-    tc qdisc add dev $dev ingress
-    tc filter add dev $dev parent ffff: protocol ip u32 match u32 0 0 flowid 1:1 \
-        action mirred egress redirect dev ${dev}-ifb
+    # Q63: 下载限速队列（sch3），配置硬件 max_rate shaper
+    if [ "$max_dl" -gt 0 ]; then
+        echo 3 0 0 1 $max_dl 4 4 > /sys/kernel/debug/hnat/qdma_txq63
+    else
+        echo 3 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq63
+    fi
 }
+
+# start_qos() 已移除：不使用软件限速（tc HTB/IFB）。
+# 限速完全由硬件 Q31/Q63 WRR BE 队列承担。
 
 # Helper: remove game+VIP rules from FORWARD chain (called by stop and before re-init)
 remove_static_forward_rules() {
@@ -258,13 +276,12 @@ case "$1" in
         ;;
 
     "start")
-        stop_qos
+        stop_qos                   # stop_qos 内已清理 rl_max_file
         iptables_start_prepare
-        start_qos "$2" "$3"
         iptables_start_inital
-        # sch2: WRR for upload  (Q2-Q30 per-user, Q31 rate-limited)
+        # sch2: WRR for upload  (Q2-Q30 per-user, Q31 rate-limited WRR BE)
         echo 1 wrr $(($3*1000)) > /sys/kernel/debug/hnat/qdma_sch2
-        # sch3: WRR for download (Q34-Q62 per-user, Q63 rate-limited)
+        # sch3: WRR for download (Q34-Q62 per-user, Q63 rate-limited WRR BE)
         echo 1 wrr $(($2*1000)) > /sys/kernel/debug/hnat/qdma_sch3
         ;;
 
@@ -304,29 +321,19 @@ case "$1" in
 
         elif [ "${up:-0}" -ne 0 ] || [ "${dl:-0}" -ne 0 ]; then
             # ── Branch 2: Rate-limited → Q31 upload / Q63 download (WRR BE) ──
-            # ALWAYS force BOTH directions to Q31/Q63, even if only one side has rates>0.
-            # Reason: a device with dl=5000 up=0 must NOT get Q0 SP upload.
-            # tc HTB below enforces per-device limits; QDMA WRR provides HW fairness.
+            # 硬件限速策略：
+            #   1. DSCP 标记双向打 31/63 → HNAT qid=31/63 → Q31/Q63 WRR BE
+            #   2. 取所有限速设备中 dl 的最大值配置 Q63 的硬件 max_rate shaper，
+            #      取所有限速设备中 up 的最大值配置 Q31 的硬件 max_rate shaper。
+            #      效果：所有限速设备共享 Q31/Q63，总带宽上限 = 配置中的最大值，
+            #      同时 WRR BE 确保拥塞时让位给 VIP 和普通 WRR 流量。
             iptables -t mangle -I eqos 1 -s "$ip" -j DSCP --set-dscp 31
             iptables -t mangle -I eqos 1 -d "$ip" -j DSCP --set-dscp 63
 
-            # tc HTB: per-device software rate limiting (only when rates are set)
-            local cnt
-            cnt=$(tc class show dev $dev | wc -l)
-            if [ "${dl:-0}" -ne 0 ]; then
-                tc class add dev $dev parent 1:1 classid 1:1"$cnt" htb \
-                    rate "${dl}"kbit ceil "${dl}"kbit
-                tc filter add dev $dev parent 1:0 protocol ip u32 \
-                    match ip dst "$ip" flowid 1:1"$cnt"
-            fi
-            if [ "${up:-0}" -ne 0 ]; then
-                tc class add dev ${dev}-ifb parent 1:1 classid 1:1"$cnt" htb \
-                    rate "${up}"kbit ceil "${up}"kbit
-                tc filter add dev ${dev}-ifb parent 1:0 protocol ip u32 \
-                    match ip src "$ip" flowid 1:1"$cnt"
-            fi
+            # 更新 Q31/Q63 硬件 max_rate（取历史最大值）
+            update_rl_hw_rate "${dl:-0}" "${up:-0}"
 
-            # IPv6 MAC-based marking
+            # IPv6 MAC-based marking → Q31 upload / Q63 download
             if [ -n "$macaddr" ]; then
                 ip6tables -t mangle -D eqos -m mac --mac-source "$macaddr" \
                     -j MARK --set-mark 31 2>/dev/null

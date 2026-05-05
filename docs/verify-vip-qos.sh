@@ -222,28 +222,31 @@ else
     TOTAL=$(grep -c "=>" "$HNAT_FILE" 2>/dev/null || echo 0)
     info "总 HNAT 条目: $TOTAL"
     echo ""
-    echo "  《四类队列分布》"
-    echo "  ================================================================"
-    echo "  类别           | 队列     | 用途                       | 条目数"
-    echo "  ----------------|---------|----------------------------|-------"
+    echo "  ╔══════════════════════════════════════════════════════════════════╗"
+    echo "  ║                《四类队列分布总览》                               ║"
+    echo "  ╠══════════════════╦═══════════╦══════════════════════════╦══════╣"
+    echo "  ║ 类别             ║ 队列      ║ 用途                     ║ 条目 ║"
+    echo "  ╠══════════════════╬═══════════╬══════════════════════════╬══════╣"
 
     # VIP Q0 / Q32
     C0=$(grep  -c "qid=0[^0-9]"  "$HNAT_FILE" 2>/dev/null || echo 0)
     C0=$(echo "$C0"  | tr -d '\n\r'); C0=${C0:-0}
     C32=$(grep -c "qid=32[^0-9]" "$HNAT_FILE" 2>/dev/null || echo 0)
     C32=$(echo "$C32" | tr -d '\n\r'); C32=${C32:-0}
-    printf "  %-15s | Q0      | VIP 上传 SP EF              | %d\n" "VIP" "$C0"
-    printf "  %-15s | Q32     | VIP 下载 SP EF              | %d\n" "" "$C32"
+    printf "  ║ %-16s ║ %-9s ║ %-24s ║ %4d ║\n" "VIP" "Q0"  "VIP 上传 SP EF"  "$C0"
+    printf "  ║ %-16s ║ %-9s ║ %-24s ║ %4d ║\n" ""   "Q32" "VIP 下载 SP EF"  "$C32"
+    echo "  ╠══════════════════╬═══════════╬══════════════════════════╬══════╣"
 
     # 游戏 Q1 / Q33
     C1=$(grep  -c "qid=1[^0-9]"  "$HNAT_FILE" 2>/dev/null || echo 0)
     C1=$(echo "$C1"  | tr -d '\n\r'); C1=${C1:-0}
     C33=$(grep -c "qid=33[^0-9]" "$HNAT_FILE" 2>/dev/null || echo 0)
     C33=$(echo "$C33" | tr -d '\n\r'); C33=${C33:-0}
-    printf "  %-15s | Q1      | 游戏上传 UDP≤300B SP EF    | %d\n" "游戏(109.x)" "$C1"
-    printf "  %-15s | Q33     | 游戏下载 UDP≤300B SP EF    | %d\n" "" "$C33"
+    printf "  ║ %-16s ║ %-9s ║ %-24s ║ %4d ║\n" "游戏(109.x)" "Q1"  "游戏上传 UDP≤300B"  "$C1"
+    printf "  ║ %-16s ║ %-9s ║ %-24s ║ %4d ║\n" ""             "Q33" "游戏下载 UDP≤300B"  "$C33"
+    echo "  ╠══════════════════╬═══════════╬══════════════════════════╬══════╣"
 
-    # WRR 普通 Q2-30 / Q34-62
+    # WRR 普通 Q2-30 / Q34-62 — 总计
     CNT_UP=0; CNT_DN=0
     for q in $(seq 2 30); do
         C=$(grep -c "qid=$q[^0-9]" "$HNAT_FILE" 2>/dev/null || echo 0)
@@ -255,22 +258,99 @@ else
         C=$(echo "$C" | tr -d '\n\r'); C=${C:-0}
         CNT_DN=$((CNT_DN + C))
     done
-    printf "  %-15s | Q2-30   | WRR 普通上传 AF41 (per-user) | %d\n" "WRR普通" "$CNT_UP"
-    printf "  %-15s | Q34-62  | WRR 普通下载 AF41 (per-user) | %d\n" "" "$CNT_DN"
+    printf "  ║ %-16s ║ %-9s ║ %-24s ║ %4d ║\n" "WRR普通" "Q2-30"  "WRR 普通上传 AF41" "$CNT_UP"
+    printf "  ║ %-16s ║ %-9s ║ %-24s ║ %4d ║\n" ""       "Q34-62" "WRR 普通下载 AF41" "$CNT_DN"
+    echo "  ╠══════════════════╬═══════════╬══════════════════════════╬══════╣"
 
     # 限速 Q31 / Q63
     C31=$(grep -c "qid=31[^0-9]" "$HNAT_FILE" 2>/dev/null || echo 0)
     C31=$(echo "$C31" | tr -d '\n\r'); C31=${C31:-0}
     C63=$(grep -c "qid=63[^0-9]" "$HNAT_FILE" 2>/dev/null || echo 0)
     C63=$(echo "$C63" | tr -d '\n\r'); C63=${C63:-0}
-    printf "  %-15s | Q31     | 限速上传 WRR BE (共享)      | %d\n" "限速" "$C31"
-    printf "  %-15s | Q63     | 限速下载 WRR BE (共享)      | %d\n" "" "$C63"
+    printf "  ║ %-16s ║ %-9s ║ %-24s ║ %4d ║\n" "限速" "Q31" "限速上传 WRR BE" "$C31"
+    printf "  ║ %-16s ║ %-9s ║ %-24s ║ %4d ║\n" ""     "Q63" "限速下载 WRR BE" "$C63"
+    echo "  ╠══════════════════╬═══════════╬══════════════════════════╬══════╣"
 
-    echo "  ================================================================"
     VIP_T=$((C0  + C32)); GAME_T=$((C1 + C33))
     WRR_T=$((CNT_UP + CNT_DN)); RATE_T=$((C31 + C63))
-    printf "  分类合计: VIP=%-4d 游戏=%-4d WRR=%-5d 限速=%-4d 总=%d\n" \
-        "$VIP_T" "$GAME_T" "$WRR_T" "$RATE_T" "$TOTAL"
+    CLASSIFIED=$((VIP_T + GAME_T + WRR_T + RATE_T))
+    UNCLASSIFIED=$((TOTAL - CLASSIFIED))
+    printf "  ║ %-16s ║ %-9s ║ VIP=%-4d 游戏=%-4d WRR=%-4d 限速=%-4d ║\n" \
+        "分类合计" "总=$TOTAL" "$VIP_T" "$GAME_T" "$WRR_T" "$RATE_T"
+    if [ "$UNCLASSIFIED" -ne 0 ]; then
+        printf "  ║ %-16s ║ %-9s ║ %-24s ║ %4d ║\n" "⚠️ 未分类" "(其他qid)" "qid不在0-1/31-33/63范围" "$UNCLASSIFIED"
+    fi
+    echo "  ╚══════════════════╩═══════════╩══════════════════════════╩══════╝"
+
+    # ── 分项展开：WRR per-slot 分布 ──
+    echo ""
+    echo "  ┌── WRR 普通上传槽位分布（Q2-Q30，per-user）"
+    SLOT_MAX=0
+    for q in $(seq 2 30); do
+        C=$(grep -c "qid=$q[^0-9]" "$HNAT_FILE" 2>/dev/null || echo 0)
+        C=$(echo "$C" | tr -d '\n\r'); C=${C:-0}
+        [ "$C" -gt "$SLOT_MAX" ] && SLOT_MAX=$C
+        if [ "$C" -gt 0 ]; then
+            BAR=$(printf '%0.s#' $(seq 1 $C) 2>/dev/null || echo "#")
+            printf "  │  Q%-2d: %3d  %s\n" "$q" "$C" "$BAR"
+        fi
+    done
+    [ "$SLOT_MAX" -eq 0 ] && echo "  │  (无上传条目)"
+    echo "  └──"
+
+    echo ""
+    echo "  ┌── WRR 普通下载槽位分布（Q34-Q62，per-user）"
+    SLOT_MAX=0
+    for q in $(seq 34 62); do
+        C=$(grep -c "qid=$q[^0-9]" "$HNAT_FILE" 2>/dev/null || echo 0)
+        C=$(echo "$C" | tr -d '\n\r'); C=${C:-0}
+        [ "$C" -gt "$SLOT_MAX" ] && SLOT_MAX=$C
+        if [ "$C" -gt 0 ]; then
+            BAR=$(printf '%0.s#' $(seq 1 $C) 2>/dev/null || echo "#")
+            printf "  │  Q%-2d: %3d  %s\n" "$q" "$C" "$BAR"
+        fi
+    done
+    [ "$SLOT_MAX" -eq 0 ] && echo "  │  (无下载条目)"
+    echo "  └──"
+
+    # ── 限速逻辑健康检查 ──
+    echo ""
+    sep
+    echo "  《限速队列健康检查》"
+    sep
+    # 检查：Q31/Q63 应只有限速设备，不应有 VIP/游戏流量
+    # VIP 流量 = qid=0/32，游戏流量 = qid=1/33，任何进入 Q31/Q63 的都应是限速设备
+    [ "$C31" -gt 0 ] || [ "$C63" -gt 0 ] \
+        && info "Q31/Q63 有条目（$((C31+C63)) 条），验证是否全为限速设备……" \
+        || info "Q31/Q63 当前无条目（无限速设备在线或 HNAT 未建表）"
+
+    # 检查 Q31 中是否混入了 game 的 qid（理论上不可能，但做二次验证）
+    # 因为游戏是 DSCP=1/33 → qid=(4>>2)=1 和 (132>>2)=33，不会等于 31
+    # 检查 eqos 链中有无 DSCP=31 被 Branch 3 错误分配的情况
+    BAD_WRR_TO_RL=$(iptables -t mangle -L eqos -n 2>/dev/null | grep 'DSCP set 0x1f' | wc -l)
+    BAD_WRR_TO_RL=$(echo "$BAD_WRR_TO_RL" | tr -d '\n\r'); BAD_WRR_TO_RL=${BAD_WRR_TO_RL:-0}
+    [ "$BAD_WRR_TO_RL" -gt 0 ] \
+        && ok "eqos 链有 $BAD_WRR_TO_RL 条 DSCP=31 规则（限速设备，期望值）" \
+        || info "eqos 链中无 DSCP=31 规则（无配置限速设备，或设备未添加）"
+
+    BAD_WRR_TO_RL63=$(iptables -t mangle -L eqos -n 2>/dev/null | grep 'DSCP set 0x3f' | wc -l)
+    BAD_WRR_TO_RL63=$(echo "$BAD_WRR_TO_RL63" | tr -d '\n\r'); BAD_WRR_TO_RL63=${BAD_WRR_TO_RL63:-0}
+    [ "$BAD_WRR_TO_RL63" -gt 0 ] \
+        && ok "eqos 链有 $BAD_WRR_TO_RL63 条 DSCP=63 规则（限速设备下行，期望值）" \
+        || info "eqos 链中无 DSCP=63 规则（无配置限速设备）"
+
+    # 检查：Q31/Q63 应对称 —— 同一设备上传/下载都进入限速队列
+    # 如果 C31 和 C63 严重不对称，说明存在只有单向限速规则的问题
+    if [ "$C31" -gt 0 ] && [ "$C63" -gt 0 ]; then
+        DIFF=$(( C31 - C63 ))
+        [ "$DIFF" -lt 0 ] && DIFF=$(( 0 - DIFF ))
+        RATIO_THRESHOLD=5  # 允许最多 5 条差距（同一 IP 的不同 5-tuple 连接数差异）
+        if [ "$DIFF" -le "$RATIO_THRESHOLD" ]; then
+            ok "Q31/Q63 条目数基本对称（上传=$C31 下载=$C63 差值=$DIFF ≤ $RATIO_THRESHOLD）"
+        else
+            fail "Q31/Q63 条目不对称（上传=$C31 下载=$C63 差值=$DIFF）— 限速规则可能不完整"
+        fi
+    fi
 fi
 
 # ─────────────────────────────────────────────────────
