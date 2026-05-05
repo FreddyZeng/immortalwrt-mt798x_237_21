@@ -120,10 +120,14 @@ iptables_start_inital() {
     echo 0 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq0
     # Q1:  Game upload SP → sch0, no rate limit
     echo 0 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq1
+    # Q31: Rate-limited upload WRR → sch2 (lower priority than VIP/game)
+    echo 2 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq31
     # Q32: VIP download  SP → sch1, no rate limit
     echo 1 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq32
     # Q33: Game download SP → sch1, no rate limit
     echo 1 0 0 0 0 0 0 > /sys/kernel/debug/hnat/qdma_txq33
+    # Q63: Rate-limited download WRR → sch3 (lower priority than VIP/game)
+    echo 3 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq63
 
     # 109.x game acceleration: UDP<=300B upload→Q1(DSCP=1), download→Q33(DSCP=33)
     # Appended AFTER per-IP rules so they override per-user DSCP for game packets
@@ -182,9 +186,10 @@ case "$1" in
         macaddr="$6"
         interface="$7"
 
-        # VIP detection: comment=="64"/"vip" OR both rates == 0
-        if [ "$comment" = "64" ] || [ "$comment" = "vip" ] || \
-           { [ "${dl:-0}" -eq 0 ] && [ "${up:-0}" -eq 0 ]; }; then
+        # VIP detection: ONLY via explicit comment="64" or "vip".
+        # Do NOT use rates==0 as VIP indicator: smarthqos auto-assigns devices
+        # with rates=0 to WRR slots Q2-Q30, which would conflict with VIP.
+        if [ "$comment" = "64" ] || [ "$comment" = "vip" ]; then
             # VIP: upload → Q0 (explicit DSCP=0 clears any stale rate-limit rule)
             #      download → Q32 (DSCP=32)
             iptables -t mangle -D eqos -s "$ip" -j DSCP --set-dscp 0  2>/dev/null
@@ -242,6 +247,7 @@ case "$1" in
                 ebtables -t nat -A eqos -p ipv6 -d "$macaddr" \
                     -j mark --mark-set 63
             fi
+        fi  # end of VIP/rate-limited if/else
 
         # Multi-WAN load balance interface binding
         if [ "$interface" ]; then
