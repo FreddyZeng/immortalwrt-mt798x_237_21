@@ -73,8 +73,12 @@
 #    · ebtables -p ipv6 -d MAC → mark=63
 #    · 进入 Q31/Q63 限速队列（与 IPv4 限速设备共用）
 #
-# IPv6 VIP 注：当前架构不对 IPv6 设置 SP 队列（无 DSCP=0/32），
-#   IPv6 VIP 设备通过 IPv4 地址的 u32/eqos-chain 规则获得优先级。
+# IPv6 VIP 注：当前架构不对 IPv6 VIP 设备设置 SP 队列。
+#   未知 IPv6 设备（无 MAC 规则）→ eqos 链尾部 --mark 0 兜底规则 → Q2/Q34 WRR
+#   WRR 普通设备 → ip6tables MAC MARK → wrr_id/wrr_dl
+#   限速设备   → ip6tables MAC MARK → 31/63
+#   IPv6 的 ip6tables FORWARD set-dscp 0 是故意设置的（dscp=0 让 HNAT 从
+#   skb->mark 读 QID，dscp≠0 会覆盖 skb->mark，破坏 per-device MAC 隔离）。
 #
 # ═══════════════════════════════════════════════════════
 #  硬件队列 ID → 调度器映射

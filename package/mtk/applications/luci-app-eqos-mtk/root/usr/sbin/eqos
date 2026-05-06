@@ -280,6 +280,19 @@ iptables_start_inital() {
     iptables -t mangle -F eqos
     iptables -t mangle -D FORWARD -j eqos 2>/dev/null
     iptables -t mangle -A FORWARD -j eqos
+
+    # IPv6 fallback queue assignment (appended at eqos chain TAIL so per-device
+    # MAC MARK rules inserted at HEAD with -I eqos 1 take priority).
+    # --mark 0 guard: only fire if no per-device rule has already set the mark,
+    # preventing override of wrr_id/31 assigned by MAC-based MARK rules.
+    # Upload  fallback → Q2 WRR AF41 (mirrors IPv4 default DSCP=2)
+    # Download fallback → Q34 WRR AF41 (mirrors IPv4 default DSCP=34)
+    # Note: ip6tables FORWARD uses set-dscp 0 intentionally so HNAT reads
+    # qid from skb->mark (dscp=0 disables the dscp-override path in hnat).
+    ip6tables -t mangle -A eqos \
+        -m mark --mark 0 -j MARK --set-mark 2
+    ebtables -t nat -A eqos -p ipv6 \
+        -m mark --mark 0 -j mark --mark-set 34
     echo 1 > /sys/kernel/debug/hnat/qos_toggle
 
     # sch0: Strict Priority for upload  (Q0=VIP, Q1=game → absolute priority)
