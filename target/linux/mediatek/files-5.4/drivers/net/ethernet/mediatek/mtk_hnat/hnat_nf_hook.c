@@ -2007,7 +2007,7 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 				entry.ipv4_hnapt.iblk2.dscp = 0xB8; /* EF = 46<<2 */
 				pr_debug("[HNAT-WAN-UP] VIP-Q0 src=%pI4 dst=%pI4 proto=%u "
 					 "mark=0x%x→EF(0xB8) foe=%u\n",
-					 &_sip, &_dip, foe->ipv4_hnapt.prot,
+					 &_sip, &_dip, iph->protocol,
 					 skb->mark, skb_hnat_entry(skb));
 			} else if (qid == 1) {
 				entry.ipv4_hnapt.iblk2.dscp = 0xB8; /* EF = 46<<2 */
