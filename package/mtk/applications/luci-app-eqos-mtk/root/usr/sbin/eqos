@@ -265,12 +265,15 @@ iptables_start_prepare() {
     # This ensures ANY unconfigured device (static IP / unknown / 109.x non-game)
     # lands in WRR instead of accidentally hitting Q0 (VIP SP).
     # Per-device rules in the eqos chain override this default for known devices.
-    iptables  -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 2  2>/dev/null
-    iptables  -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 34 2>/dev/null
+    #
+    # Use while loops instead of single -D to flush ALL duplicate instances that
+    # accumulate if eqos start is called multiple times without stop in between.
+    while iptables  -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 2  2>/dev/null; do :; done
+    while iptables  -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 34 2>/dev/null; do :; done
     iptables  -t mangle -A FORWARD -i br-lan -j DSCP --set-dscp 2
     iptables  -t mangle -A FORWARD -o br-lan -j DSCP --set-dscp 34
-    ip6tables -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 0 2>/dev/null
-    ip6tables -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 0 2>/dev/null
+    while ip6tables -t mangle -D FORWARD -i br-lan -j DSCP --set-dscp 0 2>/dev/null; do :; done
+    while ip6tables -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 0 2>/dev/null; do :; done
     ip6tables -t mangle -A FORWARD -i br-lan -j DSCP --set-dscp 0
     ip6tables -t mangle -A FORWARD -o br-lan -j DSCP --set-dscp 0
 }
