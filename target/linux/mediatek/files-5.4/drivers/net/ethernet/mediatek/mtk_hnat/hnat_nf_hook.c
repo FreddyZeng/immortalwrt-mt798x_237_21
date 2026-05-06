@@ -26,6 +26,7 @@
 #include <net/udp.h>
 #include <net/netfilter/nf_conntrack.h>
 #include <net/netfilter/nf_conntrack_acct.h>
+#include <net/netfilter/nf_conntrack_core.h>
 
 #include "nf_hnat_mtk.h"
 #include "hnat.h"
