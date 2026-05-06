@@ -20,7 +20,7 @@ contains() {
 }
 
 absent() {
-    if grep -Fq "$1" "$2"; then
+    if grep -Fq -- "$1" "$2"; then
         fail "$3"
     fi
 }
@@ -116,10 +116,12 @@ contains '0x8000/0x8000' "$EQOS" \
     "eqos add WAN interface binding must guard against overwriting SSR Plus TProxy mark 0x8000"
 absent '0x01/0x01' "$EQOS" \
     "eqos must not reference old SSR Plus TProxy mark 0x01/0x01"
-contains 'mark --mark 0 -j MARK --set-mark 2' "$EQOS" \
+contains 'mark --mark 0 -j MARK --set-mark 2' "$INITD" \
     "ip6tables eqos must have fallback mark=2 for unknown IPv6 upload (prevents Q0 VIP mis-assignment)"
-contains 'mark --mark 0 -j mark --mark-set 34' "$EQOS" \
+contains 'mark --mark 0 -j mark --mark-set 34' "$INITD" \
     "ebtables eqos must have fallback mark=34 for unknown IPv6 download (mirrors IPv4 default Q34)"
+contains '[EQOS-B014-13] IPv6 fallback mark rules installed' "$INITD" \
+    "IPv6 fallback rule installation must have traceable diagnostic logging"
 
 contains 'hnat_hqos_ipv4_qid' "$HNAT_HOOK" \
     "HNAT must reconstruct stored HQOS qid for DSCP update checks"

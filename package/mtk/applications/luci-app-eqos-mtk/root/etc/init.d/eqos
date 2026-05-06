@@ -175,6 +175,20 @@ start_service() {
 		bash /usr/sbin/loadbalance "$interface"
 	        fi
         config_foreach parse_device "device"
+
+        # IPv6 fallback queue assignment — MUST be appended AFTER config_foreach
+        # so all per-device MAC MARK rules (inserted at HEAD with -I eqos 1) are
+        # already in place.  The --mark 0 guard fires ONLY for packets whose mark
+        # was not set by any per-device rule, routing them to Q2/Q34 WRR AF41
+        # instead of Q0 VIP SP (which would happen with mark=0 in HQOS mode).
+        # ip6tables FORWARD uses set-dscp 0 intentionally: dscp=0 lets HNAT read
+        # qid from skb->mark; dscp≠0 would override skb->mark and break isolation.
+        ip6tables -t mangle -A eqos \
+                -m mark --mark 0 -j MARK --set-mark 2
+        ebtables -t nat -A eqos -p ipv6 \
+                -m mark --mark 0 -j mark --mark-set 34
+        log_debug "[EQOS-B014-13] IPv6 fallback mark rules installed: upload=Q2 download=Q34"
+
         if [ "$smarthqos" -eq "1" ]; then
         install_dhcp_hotplug
         /etc/init.d/dhcp_mark.sh eqos init
