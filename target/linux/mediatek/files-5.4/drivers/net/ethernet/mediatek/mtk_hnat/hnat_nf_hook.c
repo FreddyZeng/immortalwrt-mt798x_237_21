@@ -2709,18 +2709,21 @@ static unsigned int mtk_hnat_tproxy_protection_v4(
 	if (!(skb->mark & 0x8000))
 		return NF_ACCEPT;
 
-	/* tproxy has intercepted this UDP flow: zero the FOE entry so
-	 * HNAT hardware never transitions it to BIND state and never
-	 * hardware-offloads it, keeping every packet in the Linux
-	 * network stack where xt_TPROXY can intercept it.
+	/* tproxy has intercepted this UDP flow: unconditionally zero the FOE
+	 * entry regardless of its current state (UNBIND or BIND).
+	 *
+	 * Why unconditional (no entry_state check):
+	 *   BIND-state packets are occasionally sent back to CPU by HNAT
+	 *   hardware for re-validation ("sample" path).  If we skip zeroing
+	 *   for BIND entries, those flows stay hardware-offloaded indefinitely
+	 *   and tproxy never sees them again.  Zeroing always guarantees the
+	 *   hardware cannot keep offloading tproxy-intercepted flows.
 	 */
 	entry = &hnat_priv->foe_table_cpu[skb_hnat_entry(skb)];
-	if (entry_state(entry) != BIND) {
-		pr_debug("[HNAT-tproxy] UDP foe idx=%u zeroed (mark=0x%x)\n",
-			 skb_hnat_entry(skb), skb->mark);
-		memset(entry, 0, sizeof(struct foe_entry));
-		hnat_cache_ebl(1);
-	}
+	pr_debug("[HNAT-tproxy] UDP foe idx=%u state=%u zeroed (mark=0x%x)\n",
+		 skb_hnat_entry(skb), entry_state(entry), skb->mark);
+	memset(entry, 0, sizeof(struct foe_entry));
+	hnat_cache_ebl(1);
 
 	return NF_ACCEPT;
 }
