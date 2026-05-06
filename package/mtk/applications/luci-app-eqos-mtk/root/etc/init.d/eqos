@@ -11,7 +11,7 @@ log_debug() {
 cleanup_loadbalance_rules() {
 	local interfaces="$1"
 	local count i var ipaddr
-	local tproxy_mark_guard="-m mark ! --mark 0x01/0x01"
+	local tproxy_mark_guard="-m mark ! --mark 0x8000/0x8000"
 
 	[ -n "$interfaces" ] || {
 		log_debug "[EQOS-B014-01] skip loadbalance cleanup: empty interface list"

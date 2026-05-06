@@ -1,7 +1,7 @@
 interface=$1
 array=(${interface//,/ })
         PPP_NUM=0
-        TPROXY_MARK_GUARD="-m mark ! --mark 0x01/0x01"
+        TPROXY_MARK_GUARD="-m mark ! --mark 0x8000/0x8000"
 
         log_debug() {
         logger -p daemon.debug -t eqos-loadbalance "$*" 2>/dev/null || true
