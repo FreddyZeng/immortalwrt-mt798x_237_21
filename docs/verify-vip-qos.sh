@@ -225,9 +225,38 @@ sep
 
 check_forward_rule() {
     local desc="$1"; shift
-    iptables -t mangle -C FORWARD "$@" 2>/dev/null \
-        && ok "FORWARD: $desc" \
-        || fail "FORWARD 缺失: $desc"
+    # Use iptables -C first; if it fails, fall back to -S FORWARD grep.
+    # Reason: OpenWrt iptables -C normalises u32 hex expressions internally
+    # (e.g. 0x0000FF00 → 0xff00) but does NOT reverse-normalise the argument
+    # before comparison, so -C returns 1 even when the rule exists.
+    # iptables -S outputs the saved (normalised) form which grep can match.
+    if iptables -t mangle -C FORWARD "$@" 2>/dev/null; then
+        ok "FORWARD: $desc"
+        return
+    fi
+    # Build a grep pattern from the key distinguishing fields.
+    # For each argument pair we emit the part that survives normalisation.
+    local pat=""
+    local prev=""
+    for arg in "$@"; do
+        case "$prev" in
+            -s) pat="${pat}.*-s ${arg}" ;;
+            -d) pat="${pat}.*-d ${arg}" ;;
+            -p) pat="${pat}.*-p ${arg}" ;;
+            --set-dscp) pat="${pat}.*--set-dscp ${arg}" ;;
+            --length)
+                # :300 → iptables -S shows "0:300"
+                local lval
+                lval=$(echo "$arg" | sed 's/^:/0:/')
+                pat="${pat}.*--length ${lval}" ;;
+        esac
+        prev="$arg"
+    done
+    if [ -n "$pat" ] && iptables -t mangle -S FORWARD 2>/dev/null | grep -qE "$pat"; then
+        ok "FORWARD: $desc"
+    else
+        fail "FORWARD 缺失: $desc"
+    fi
 }
 
 check_forward_rule "109.x 游戏上传 UDP≤300B → DSCP=1" \
