@@ -15,6 +15,8 @@ MAX_MARK=30
 hash_mac() {
     local MAC=$1
     local MAC_HEX
+    # 防御空 MAC（DHCP lease 文件格式误吧导致空字段）
+    [ -z "$MAC" ] && echo "$MIN_MARK" && return
     MAC_HEX=$(echo "$MAC" | sed 's/://g')
     echo $(( 0x$MAC_HEX % 29 + MIN_MARK ))  # 29 slots: 2-30
 }
@@ -60,6 +62,12 @@ process_existing_leases() {
 if [ "$ACTION" = "init" ]; then
     # 清理遗留的状态文件（旧版本线性探针架构遗留，当前纯哈希无需持久化）
     rm -f /tmp/dhcp_mac_mark_mapping
+
+    # 如果 lease 文件不存在（dnsmasq 未启动或无客户端），直接退出，不安装任何规则。
+    [ -f "$LEASE_FILE" ] || {
+        logger -p daemon.debug -t eqos-dhcp_mark "[DHCP-MARK] lease file not found: $LEASE_FILE, skip" 2>/dev/null
+        exit 0
+    }
 
     # 从 eqos UCI 获取已显式配置的设备 IP 和 MAC 列表（VIP/限速）。
     # dhcp_mark 不得为这些设备分配 WRR slot，以免覆盖其已有的 SP/限速规则。

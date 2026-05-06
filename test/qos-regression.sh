@@ -83,6 +83,10 @@ contains 'if echo "$eqos_macs" | grep -qxF "$MAC_LC"; then' "$DHCP_MARK" \
     "dhcp_mark must skip explicit VIP/rate-limit devices by MAC"
 contains 'idpair=$((MARK_VALUE' "$DHCP_MARK" \
     "dhcp_mark must compute idpair for download queue mapping (wrr_id+32)"
+contains '[ -f "$LEASE_FILE" ] ||' "$DHCP_MARK" \
+    "dhcp_mark must guard against missing lease file (dnsmasq not started yet)"
+contains '[ -z "$MAC" ] && echo "$MIN_MARK" && return' "$DHCP_MARK" \
+    "hash_mac must guard against empty MAC to prevent arithmetic syntax error"
 
 contains 'cleanup_ipv6_mac_rules()' "$EQOS" \
     "eqos must define a full IPv6 MAC cleanup helper"

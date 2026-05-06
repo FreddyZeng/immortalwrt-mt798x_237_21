@@ -7,52 +7,77 @@
 - 引入物理方向判定 `get_hqos_direction` 以替代废弃的内网猜测代码。
 - 保证 `PPPQ_MODE` 和无 QoS 模式的原始行为隔离，彻底防堵状态机溢出风险。
 
-## 2. ct_mark 位域定义（唯一准绳）
-<!-- CID: C-FQOS01-04 | commit: pending | 日期: 2026-05-02 -->
+## 2. 确定性 DSCP-to-QID 映射（唯一准绳）
+<!-- CID: C-FQOS01-10 | commit: pending | 日期: 2026-05-06 -->
 
-| 位域 | 掩码 | 含义 | 写入点 | 使用点 |
-|------|------|------|--------|--------|
-| `bits[5:0]` | `0x3F` | QoS 优先级（0x2E=VIP） | `eqos start` CONNMARK --set-xmark | HNAT: qos_mark==46→Q0/Q32 |
-| `bit6` | `0x40` | 上行限速标记 | `eqos add` CONNMARK --set-xmark 0x40/0xC0 | HNAT: (qos_mark&0x40)&&UPLOAD→Q31 |
-| `bit7` | `0x80` | 下行限速标记 | `eqos add` CONNMARK --set-xmark 0x80/0xC0 | HNAT: (qos_mark&0x80)&&DOWNLOAD→Q63 |
-| `bits[7:6]` | `0xC0` | 双向限速（bit6+bit7）| `eqos add` CONNMARK --set-xmark 0xC0/0xC0 | 上行Q31 + 下行Q63 |
-| `bits[15:8]` | `0xFF00` | 路由标记（多 WAN 出口） | `loadbalance` CONNMARK --set-xmark ${FW_MARK}/0xFF00 | `ip rule fwmark` 路由表选择 |
+HNAT 内核通过 `iph->tos >> 2`（6-bit DSCP）确定硬件 QID，QoS 标记完全在 FORWARD 链完成：
 
-**隔离保证**：`0xFF00 & 0xFF = 0`，路由标记与 QoS 标记零重叠。VIP(0x2E) 的 bit6/bit7 均为 0，不会命中任何限速判断。
+| DSCP | iptables 规则 | QID | 调度器 | 触发路径 |
+|------|--------------|-----|--------|---------|
+| 0    | `static_vip_upload_q0` u32 / eqos chain -I HEAD | Q0 | sch0 SP | 110-119.10-39 或 comment=64/vip |
+| 1    | `game_upload_109_q1` | Q1 | sch0 SP | 109.x UDP≤300B 上传 |
+| 2-30 | eqos chain WRR per-user | Q2-Q30 | sch2 WRR | 哈希槽 `MD5(ip) % 29 + 2` |
+| 31   | eqos chain -I HEAD + FORWARD -A tail | Q31 | sch2 WRR BE | 显式限速设备上传 |
+| 32   | `static_vip_download_q32` u32 / eqos chain -I HEAD | Q32 | sch1 SP | VIP 下载 |
+| 33   | `game_download_109_q33` | Q33 | sch1 SP | 109.x UDP≤300B 下载 |
+| 34-62| eqos chain WRR per-user | Q34-Q62 | sch3 WRR | 哈希槽 `wrr_id + 32` |
+| 63   | eqos chain -I HEAD + FORWARD -A tail | Q63 | sch3 WRR BE | 显式限速设备下载 |
 
-## 3. 回归修复设计
-<!-- CID: C-FQOS01-02 | BID: B-001 | commit: pending | 日期: 2026-05-02 -->
-- `eqos add` 在进入数值比较前统一归一化 QoS mode，非数字旧备注进入硬件限速模式。
-- 方向感知 DSCP 同步：`eqos_apply` 中 `-i br-lan -m mark 0x40/0x40 → DSCP=2`（上行限速），`! -i br-lan -m mark 0x80/0x80 → DSCP=2`（下行限速），VIP mark=46 → DSCP=46 覆盖。HNAT 读取 `qos_mark = skb->mark & 0xFF` 进行方向感知队列分配，彻底消除旧 DSCP2/MARK2 单值的双向降级回归。
-- `eqos add` 在安装限速分类前统一归一化上传/下载速度；上传为 0 时不安装 bit6，下载为 0 时不安装 bit7。
-- CAKE 修复通过 `9999995-fix-cake-highest-tin-guard.patch` 叠加在既有 CAKE 补丁之后，将 `highest_priority_tin` 初始化为 0，限制 VIP/109 直达最高 tin 仅在多 tin 模式生效，并移除 `TC_PRIO_MAX` 对最高 tin 的直接绕过。
-- `docs/verify-vip-qos.sh` 直接呈现 HNAT 映射后的 Q0-Q31/Q32-Q63 含义，普通流量展示为 hash 队列范围，可信 VIP 下行展示为 DSCP46/MARK46 到 Q32，限速设备展示为 MARK0xC0 到 Q63。
+**IPv4 默认（无 per-device 规则）**：DSCP=2（上传 Q2） / DSCP=34（下载 Q34）
 
-## 4. CONNMARK 首包还原设计
-<!-- CID: C-FQOS01-05 | BID: B-008 | commit: pending | 日期: 2026-05-02 -->
-**问题**：`CONNMARK --set-xmark` 仅写入 `ct->mark`，不修改当前包的 `skb->mark`（Linux 5.4 xt_connmark.c XT_CONNMARK_SET 分支无 nfmask 写回）。若 `eqos_apply` 的 restore-mark 仅覆盖 `ESTABLISHED,RELATED`，则 NEW 首包携带 mark=0 进入 HNAT 建表，VIP/限速队列漏判。
+**隔离保证**：
+- Q0/Q1 和 Q32/Q33 为 SP（Strict Priority），任何情况下抢占 WRR 流量
+- Q31/Q63 的 FORWARD 链末尾覆盖规则（`-A FORWARD`）保证限速设备不被游戏/VIP 规则旁路
+- HNAT DSCP 读取路径：`hnat_hqos_ipv4_qid()` 从 `iblk2.qid` 读取绑定时的 QID，与 `iph->tos` 推导的期望 QID 对比，不一致则重新绑定
 
-**修复**：`eqos_apply` 的 `CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF` 覆盖 `NEW,ESTABLISHED,RELATED` 三态。执行顺序保证：FORWARD chain 中 eqos 链先于 eqos_apply 链，set-xmark 写入 ct_mark 后，同一包在 eqos_apply 阶段被 restore-mark(NEW) 正确还原到 skb->mark。
+## 3. QDMA 调度器配置
+<!-- CID: C-FQOS01-10 | commit: pending | 日期: 2026-05-06 -->
 
-## 5. 多 WAN 兼容设计
-<!-- CID: C-FQOS02-01 | BID: B-009 | commit: pending | 日期: 2026-05-02 -->
-- `loadbalance` 完全重写为 POSIX sh，移除 bash 专有数组语法 `array=()`、`${//}` 字符串替换和 `let` 算术，改用 `tr ','  ' '`、`$(())`，添加 `#!/bin/sh` shebang。
-- `init.d/eqos` 直接执行 `/usr/sbin/loadbalance`，不再通过 `bash` 调用。
-- 路由 mark 格式 `printf "0x%02x00" $((0x20 + i))`，确保 bits[15:8] 非零且各 WAN 接口互不重叠，掩码 `/0xFF00` 全程携带。
+| 调度器 | 模式 | 队列 | 说明 |
+|--------|------|------|------|
+| sch0 | SP (Strict Priority) | Q0-Q1 | 上传 VIP+Game |
+| sch1 | SP | Q32-Q33 | 下载 VIP+Game |
+| sch2 | WRR | Q2-Q30, Q31 | 上传普通+限速 |
+| sch3 | WRR | Q34-Q62, Q63 | 下载普通+限速 |
+
+smarthqos=1 时：Q2-Q30 和 Q34-Q62 每个队列配置 min/max rate shaper（per-user 带宽隔离）。
+
+## 4. IPv6 QoS 设计
+<!-- CID: C-FQOS01-10 | commit: pending | 日期: 2026-05-06 -->
+
+IPv6 无 DSCP 标记路径（故意 DSCP=0），HNAT 从 `skb->mark` 读 QID：
+
+- **ip6tables eqos chain**（HEAD 插入）: MAC → `MARK --set-mark <wrr_id|31>`（上传）
+- **ebtables nat eqos chain**: MAC → `mark --mark-set <wrr_dl|63>`（下载）
+- **IPv6 fallback**（TAIL 追加，在 config_foreach 之后）: `--mark 0 → mark=2/34`（未知设备）
+- eqos chain 的 per-device MAC 规则在 HEAD 插入，fallback 在 TAIL，确保 per-device 优先
+
+## 5. TProxy/SSR Plus 兼容设计
+<!-- CID: C-FQOS01-11 | BID: B-014 | commit: pending | 日期: 2026-05-06 -->
+
+| 组件 | 保护机制 |
+|------|---------|
+| `loadbalance` PREROUTING NEW | `-m mark ! --mark 0x8000/0x8000` 全程携带 |
+| `eqos add` WAN 接口绑定 PREROUTING | `-m mark ! --mark 0x8000/0x8000` 全程携带 |
+| 内核 `mtk_hnat_tproxy_protection_v4` | NF_IP_PRI_MANGLE+1，UDP+0x8000 → `memset(FOE)` + `ct->mark |= 0x8000` |
+| 内核 `mtk_hnat_tproxy_connmark_check_v4` | INT_MIN+1，检测 `ct->mark & 0x8000` → 提前 memset，消除 UNBIND 窗口 |
+| `CONNMARK --restore-mark` | 携带 `$TPROXY_MARK_GUARD` 避免覆盖 TProxy fwmark |
+
+**bit 15 (0x8000) 独占**：eqos 路由标记使用 20/21/22（bits 0-4），QoS DSCP 使用 bits 0-5，均不触碰 bit 15。
 
 ## 6. 链生命周期单一所有者
 <!-- CID: C-FQOS01-07 | BID: B-010 | commit: pending | 日期: 2026-05-03 -->
-- IPv6 `eqos`/`eqos_apply` 链只由 `/usr/sbin/eqos` 管理，init.d 不再二次 flush 或追加 IPv6 FORWARD jump，保证首包路径固定为 `eqos -> eqos_apply`。
-- Software tc 与 HNAT 语义 mark 隔离：软件限速只安装 tc class/filter，不再追加旧 `MARK 0x99`；历史 MARK 残留只做循环清理。
+- IPv6 `eqos` 链只由 `/usr/sbin/eqos` 管理（无 eqos_apply 链），init.d 不得二次 flush 或追加 FORWARD jump。
+- Software tc 与 HNAT 语义 mark 隔离：软件限速只安装 tc class/filter，不追加旧 `MARK 0x99`。
 - LuCI 包安装树只保留当前运行脚本，旧 `eqos_origin` 不进入 `root/usr/sbin`。
 
 ## 7. 构建配置与预安装脚本边界
 <!-- CID: C-FQOS01-08 | BID: B-011 | commit: pending | 日期: 2026-05-03 -->
-- `config-5.4` 与 `n60_pro_config_full_new` 的新增 QoS/Netfilter 依赖使用独立注释行解释用途，配置行本身不携带行内注释，确保 Kconfig/OpenWrt `.config` 输入可被稳定解析。
-- `install_all_files` 以目录存在性和 glob 结果作为状态机入口：目录不存在直接成功退出，目录为空只清理空目录，存在 ipk 时执行 `opkg install "$@" --force-depends`，安装失败立即保留现场并返回非零。
+- `config-5.4` 与 `n60_pro_config_full_new` 的新增 QoS/Netfilter 依赖使用独立注释行解释用途，配置行本身不携带行内注释。
+- `install_all_files` 以目录存在性和 glob 结果作为状态机入口，安装失败立即保留现场并返回非零。
 
 ## 8. 多 WAN 生命周期触发器
 <!-- CID: C-FQOS01-09 | BID: B-012 | commit: pending | 日期: 2026-05-03 -->
 - `service_triggers()` 从 `eqos.config.interface` 派生接口列表，和 `loadbalance` 使用的配置来源保持一致。
-- 未配置接口列表时使用 `wan wan2 wan3 wan4 wan5 wan6 wan7 wan8` 兜底，覆盖全部 `0x20..0x27` route mark/table。
-- 每个接口注册 eqos restart trigger；sqm restart trigger 仅在 `/etc/init.d/sqm` 可执行时注册。
+- 未配置接口列表时使用 `wan wan2..wan8` 兜底。
+- sqm restart trigger 仅在 `/etc/init.d/sqm` 可执行时注册。
