@@ -168,7 +168,19 @@ ensure_forward_rule() {
         return 0
     fi
 
-    log_debug "[EQOS-B013-07] static FORWARD rule install failed: label=$label"
+    # First attempt failed (typical cause: xt_DSCP/xt_u32 transiently unloaded
+    # during a concurrent firewall flush).  Force-load modules then retry once.
+    log_debug "[EQOS-B013-07] static FORWARD rule install failed, retrying after modprobe: label=$label"
+    modprobe xt_DSCP  2>/dev/null || true
+    modprobe xt_u32   2>/dev/null || true
+    modprobe xt_length 2>/dev/null || true
+    sleep 0.2
+    if iptables -t mangle -A FORWARD "$@"; then
+        log_debug "[EQOS-B013-06r] static FORWARD rule installed after modprobe: label=$label"
+        return 0
+    fi
+
+    log_debug "[EQOS-B013-08] static FORWARD rule install failed permanently: label=$label"
     return 1
 }
 
@@ -279,6 +291,16 @@ iptables_start_prepare() {
 }
 
 iptables_start_inital() {
+    # Pre-load all iptables extension modules required by this function.
+    # During a firewall restart the kernel may transiently unload modules
+    # whose refcount dropped to 0 (e.g. xt_DSCP when FORWARD was flushed).
+    # Explicitly loading them here prevents 'No chain/target/match' errors
+    # in the ensure_forward_rule calls below.
+    modprobe xt_DSCP   2>/dev/null || true
+    modprobe xt_u32    2>/dev/null || true
+    modprobe xt_length 2>/dev/null || true
+    log_debug "[EQOS-B013-00] kernel modules pre-loaded: xt_DSCP xt_u32 xt_length"
+
     iptables -t mangle -N eqos 2>/dev/null
     iptables -t mangle -F eqos
     iptables -t mangle -D FORWARD -j eqos 2>/dev/null
