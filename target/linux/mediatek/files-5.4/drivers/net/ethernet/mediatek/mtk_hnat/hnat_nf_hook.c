@@ -28,6 +28,16 @@
 #include <net/netfilter/nf_conntrack_acct.h>
 #include <net/netfilter/nf_conntrack_core.h>
 
+/* nf_conntrack_find_get is EXPORT_SYMBOL_GPL in nf_conntrack_core.c.
+ * Its declaration lives in nf_conntrack_core.h but may not be visible
+ * to out-of-tree modules depending on kernel config guards.  Declare it
+ * explicitly so the compiler sees the correct prototype.
+ */
+extern struct nf_conntrack_tuple_hash *
+nf_conntrack_find_get(struct net *net,
+		      const struct nf_conntrack_zone *zone,
+		      const struct nf_conntrack_tuple *tuple);
+
 #include "nf_hnat_mtk.h"
 #include "hnat.h"
 
@@ -1059,54 +1069,83 @@ drop:
 	return NF_DROP;
 }
 
-/* mtk_hnat_tproxy_connmark_check_v4 - called from mtk_hnat_br_nf_local_in
- * (bridge LOCAL_IN hook) AFTER the FOE entry has been written as UNBIND.
+/* mtk_hnat_tproxy_connmark_check_v4 - called from mtk_hnat_br_nf_local_in.
  *
- * At this hook point, nf_conntrack has already attached the ct to the skb
- * (that happens at NF_IP_PRI_CONNTRACK=-200, we run at LOCAL_IN).  We use
- * nf_ct_get() directly on the skb — no tuple hash lookup needed.
+ * This hook is registered at NF_BR_PRI_FIRST (INT_MIN), which runs
+ * BEFORE bridge conntrack (INT_MIN+1).  The ct is NOT yet attached to
+ * the current skb, so nf_ct_get() would always return NULL here.
  *
- * For established tproxy flows (second packet onward), ct->mark has 0x8000
- * set (by the -149 prerouting hook on the first packet).  We detect this and
- * immediately zero the FOE UNBIND entry, collapsing the ASIC-observable
- * window to zero.
+ * Instead we use nf_conntrack_find_get() to look up the hash table for
+ * a ct entry established by the *previous* packet.  If that entry has
+ * ct->mark & 0x8000 (set by the tproxy prerouting hook at -149 on the
+ * first packet), we zero the FOE UNBIND entry immediately, closing the
+ * ASIC-observable window to zero.
  *
- * First-packet path: nf_ct_get() returns NULL → falls through.
+ * First-packet path: find_get returns NULL → no ct yet → falls through.
+ * Reference: nf_conntrack_find_get is EXPORT_SYMBOL_GPL in
+ *            net/netfilter/nf_conntrack_core.c, declared extern above.
  */
 static void mtk_hnat_tproxy_connmark_check_v4(struct sk_buff *skb,
 					      const struct nf_hook_state *state)
 {
+	struct iphdr *iph;
+	struct udphdr *uh;
+	struct nf_conntrack_tuple tuple;
+	struct nf_conntrack_tuple_hash *h;
 	struct nf_conn *ct;
-	enum ip_conntrack_info ctinfo;
 	struct foe_entry *entry;
 
 	if (!is_magic_tag_valid(skb) || !skb_hnat_is_hashed(skb))
 		return;
 
-	if (ip_hdr(skb)->protocol != IPPROTO_UDP)
+	iph = ip_hdr(skb);
+	if (iph->protocol != IPPROTO_UDP)
 		return;
 
-	/*
-	 * nf_ct_get() retrieves the ct already attached to this skb by the
-	 * conntrack module.  No extra reference is taken; no nf_ct_put() needed.
-	 * Returns NULL for the very first packet (ct not yet established).
-	 */
-	ct = nf_ct_get(skb, &ctinfo);
-	if (!ct)
-		return; /* first packet: ct not yet established */
+	if (!skb_transport_header_was_set(skb))
+		return;
 
+	uh = udp_hdr(skb);
+
+	/* Build original-direction 5-tuple for conntrack hash lookup. */
+	memset(&tuple, 0, sizeof(tuple));
+	tuple.src.l3num      = AF_INET;
+	tuple.dst.protonum   = IPPROTO_UDP;
+	tuple.src.u3.ip      = iph->saddr;
+	tuple.dst.u3.ip      = iph->daddr;
+	tuple.src.u.udp.port = uh->source;
+	tuple.dst.u.udp.port = uh->dest;
+
+	/*
+	 * nf_conntrack_find_get() searches the global conntrack hash table.
+	 * It takes a reference; we must call nf_ct_put() when done.
+	 * [HNAT-B014-①] hash lookup: src=%pI4:%u dst=%pI4:%u
+	 */
+	pr_debug("[HNAT-B014-①] tproxy find_get src=%pI4:%u dst=%pI4:%u\n",
+		 &tuple.src.u3.ip, ntohs(tuple.src.u.udp.port),
+		 &tuple.dst.u3.ip, ntohs(tuple.dst.u.udp.port));
+
+	h = nf_conntrack_find_get(state->net, &nf_ct_zone_dflt, &tuple);
+	if (!h) {
+		pr_debug("[HNAT-B014-②] tproxy find_get: no ct, first packet\n");
+		return;
+	}
+
+	ct = nf_ct_tuplehash_to_ctrack(h);
 	if (READ_ONCE(ct->mark) & 0x8000) {
 		/*
-		 * Established tproxy flow: zero the UNBIND FOE entry immediately
-		 * so the HNAT ASIC never observes the UNBIND state.
-		 * [HNAT-B014-①] tproxy connmark 0x8000 detected, zeroing FOE.
+		 * Established tproxy flow: zero the FOE UNBIND entry now so
+		 * the HNAT ASIC never sees the UNBIND state.
+		 * [HNAT-B014-③] connmark 0x8000 hit, zeroing FOE idx=%u
 		 */
 		entry = &hnat_priv->foe_table_cpu[skb_hnat_ppe(skb)][skb_hnat_entry(skb)];
-		pr_debug("[HNAT-B014-①] tproxy UDP foe idx=%u zeroed via connmark ct=%p mark=0x%x\n",
+		pr_debug("[HNAT-B014-③] tproxy UDP foe idx=%u zeroed, ct=%p mark=0x%x\n",
 			 skb_hnat_entry(skb), ct, READ_ONCE(ct->mark));
 		memset(entry, 0, sizeof(struct foe_entry));
 		hnat_cache_ebl(1);
 	}
+
+	nf_ct_put(ct); /* release reference taken by nf_conntrack_find_get */
 }
 
 static unsigned int
