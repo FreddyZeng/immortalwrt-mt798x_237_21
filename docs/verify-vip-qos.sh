@@ -243,7 +243,15 @@ check_forward_rule() {
             -s) pat="${pat}.*-s ${arg}" ;;
             -d) pat="${pat}.*-d ${arg}" ;;
             -p) pat="${pat}.*-p ${arg}" ;;
-            --set-dscp) pat="${pat}.*--set-dscp ${arg}" ;;
+            --set-dscp)
+                # iptables -S may show DSCP as decimal (0) or zero-padded hex (0x00).
+                # Build an OR pattern covering both representations.
+                # Append [^0-9a-fA-Fx] to prevent partial match (e.g. "0" vs "0x20").
+                local dscp_dec dscp_hex
+                dscp_dec=$((arg + 0))
+                dscp_hex=$(printf "0x%02x" "$dscp_dec")
+                pat="${pat}.*(--set-dscp ${dscp_dec}[^0-9a-fA-Fx]|--set-dscp ${dscp_hex}[^0-9a-fA-F]|--set-dscp ${dscp_dec}$|--set-dscp ${dscp_hex}$)" ;;
+
             --length)
                 # :300 → iptables -S shows "0:300"
                 local lval
