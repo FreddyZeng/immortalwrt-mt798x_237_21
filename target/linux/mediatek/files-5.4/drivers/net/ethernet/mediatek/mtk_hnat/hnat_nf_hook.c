@@ -2121,22 +2121,38 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 		 * fqos=0 means WAN→LAN download or external packet.
 		 */
 		if (IS_HQOS_MODE && hnat_priv->dscp_en && qos_toggle) {
-			u8 _fqos = entry.ipv6_5t_route.iblk2.fqos;
+			/* Reconstruct IPv6 src/dst addresses from FOE u32 fields.
+			 * FOE stores them in host byte order; htonl() converts to
+			 * network byte order required by %pI6c.
+			 */
+			struct in6_addr _sip6 = {}, _dip6 = {};
+			u8 _fqos;
+
+			_sip6.in6_u.u6_addr32[0] = htonl(foe->ipv6_5t_route.ipv6_sip0);
+			_sip6.in6_u.u6_addr32[1] = htonl(foe->ipv6_5t_route.ipv6_sip1);
+			_sip6.in6_u.u6_addr32[2] = htonl(foe->ipv6_5t_route.ipv6_sip2);
+			_sip6.in6_u.u6_addr32[3] = htonl(foe->ipv6_5t_route.ipv6_sip3);
+			_dip6.in6_u.u6_addr32[0] = htonl(foe->ipv6_5t_route.ipv6_dip0);
+			_dip6.in6_u.u6_addr32[1] = htonl(foe->ipv6_5t_route.ipv6_dip1);
+			_dip6.in6_u.u6_addr32[2] = htonl(foe->ipv6_5t_route.ipv6_dip2);
+			_dip6.in6_u.u6_addr32[3] = htonl(foe->ipv6_5t_route.ipv6_dip3);
+			_fqos = entry.ipv6_5t_route.iblk2.fqos;
+
 			if (qid == 2) {
-				pr_debug("[HNAT-V6-UP] DEFAULT-Q2 mark=0x%x fqos=%u foe=%u\n",
-					 skb->mark, _fqos, skb_hnat_entry(skb));
+				pr_debug("[HNAT-V6-UP] DEFAULT-Q2 src=%pI6c dst=%pI6c mark=0x%x fqos=%u foe=%u\n",
+					 &_sip6, &_dip6, skb->mark, _fqos, skb_hnat_entry(skb));
 			} else if (qid == 31) {
-				pr_debug("[HNAT-V6-UP] RATE-LIM-Q31 mark=0x%x fqos=%u foe=%u\n",
-					 skb->mark, _fqos, skb_hnat_entry(skb));
+				pr_debug("[HNAT-V6-UP] RATE-LIM-Q31 src=%pI6c dst=%pI6c mark=0x%x fqos=%u foe=%u\n",
+					 &_sip6, &_dip6, skb->mark, _fqos, skb_hnat_entry(skb));
 			} else if (qid == 34) {
-				pr_debug("[HNAT-V6-DN] DEFAULT-Q34 mark=0x%x fqos=%u foe=%u\n",
-					 skb->mark, _fqos, skb_hnat_entry(skb));
+				pr_debug("[HNAT-V6-DN] DEFAULT-Q34 src=%pI6c dst=%pI6c mark=0x%x fqos=%u foe=%u\n",
+					 &_sip6, &_dip6, skb->mark, _fqos, skb_hnat_entry(skb));
 			} else if (qid == 63) {
-				pr_debug("[HNAT-V6-DN] RATE-LIM-Q63 mark=0x%x fqos=%u foe=%u\n",
-					 skb->mark, _fqos, skb_hnat_entry(skb));
+				pr_debug("[HNAT-V6-DN] RATE-LIM-Q63 src=%pI6c dst=%pI6c mark=0x%x fqos=%u foe=%u\n",
+					 &_sip6, &_dip6, skb->mark, _fqos, skb_hnat_entry(skb));
 			} else {
-				pr_debug("[HNAT-V6] Q%u mark=0x%x fqos=%u foe=%u\n",
-					 qid, skb->mark, _fqos, skb_hnat_entry(skb));
+				pr_debug("[HNAT-V6] Q%u src=%pI6c dst=%pI6c mark=0x%x fqos=%u foe=%u\n",
+					 qid, &_sip6, &_dip6, skb->mark, _fqos, skb_hnat_entry(skb));
 			}
 		}
 	}
