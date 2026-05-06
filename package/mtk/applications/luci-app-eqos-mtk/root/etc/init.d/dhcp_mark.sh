@@ -37,7 +37,7 @@ allocate_mark() {
     MAC=$1
     MARK=$(hash_mac $MAC)
     retries=0
-    max_retries=28  # 29 slots (2-30), max 28 linear probes
+    max_retries=29  # 29 slots (2-30), probe all before overflow
 
     while is_mark_in_use $MARK; do
         MARK=$((MARK + 1))
@@ -78,7 +78,7 @@ process_existing_leases() {
         # 跳过已在 eqos UCI 中显式配置的设备（VIP/限速）。
         # 这些设备由 'eqos add' 管理自己的 iptables 规则，
         # dhcp_mark 不得覆盖它们。
-        if echo "$eqos_ips" | grep -qF "$IP"; then
+        if echo "$eqos_ips" | grep -qxF "$IP"; then
             continue
         fi
 
