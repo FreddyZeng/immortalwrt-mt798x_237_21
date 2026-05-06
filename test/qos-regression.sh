@@ -72,6 +72,10 @@ contains 'ip route show default dev $var' "$LOADBALANCE" \
     "loadbalance must use exact dev-specific route lookup to avoid pppoe-wan prefix-matching pppoe-wan2"
 absent 'grep default | grep $var' "$LOADBALANCE" \
     "loadbalance must not use grep substring match for interface routes (prefix collision bug)"
+contains 'ip route show default dev "$var"' "$INITD" \
+    "init.d/eqos cleanup_loadbalance_rules must use exact dev-specific route lookup (B-016)"
+absent 'grep default | grep' "$INITD" \
+    "init.d/eqos must not use grep substring match for interface routes (B-016 same root cause as B-015)"
 
 contains 'hash_mac' "$DHCP_MARK" \
     "DHCP ordinary WRR mark allocation must stay in hash range Q2-Q30"
