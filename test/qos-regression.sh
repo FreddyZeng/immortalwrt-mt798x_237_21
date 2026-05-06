@@ -28,6 +28,13 @@ sh -n "$DHCP_MARK"
 sh -n "$INITD"
 sh -n "$VERIFY_QOS"
 
+absent 'iptables -t mangle -F PREROUTING' "$INITD" \
+    "eqos init script must not flush full PREROUTING chain and break SSR Plus/TProxy rules"
+contains 'cleanup_loadbalance_rules()' "$INITD" \
+    "eqos init script must cleanup only its own loadbalance PREROUTING rules"
+contains '[EQOS-B014-03] cleanup loadbalance rules' "$INITD" \
+    "loadbalance cleanup must have traceable diagnostic logging"
+
 contains 'hash_mac $MAC' "$DHCP_MARK" \
     "DHCP ordinary WRR mark allocation must stay in hash range Q2-Q30"
 absent 'MARK=31' "$DHCP_MARK" \

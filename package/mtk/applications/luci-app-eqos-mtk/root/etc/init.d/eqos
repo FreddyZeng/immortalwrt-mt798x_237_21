@@ -4,6 +4,58 @@
 START=50
 USE_PROCD=1
 
+log_debug() {
+	logger -p daemon.debug -t eqos-init "$*" 2>/dev/null || true
+}
+
+cleanup_loadbalance_rules() {
+	local interfaces="$1"
+	local count i var ipaddr
+
+	[ -n "$interfaces" ] || {
+		log_debug "[EQOS-B014-01] skip loadbalance cleanup: empty interface list"
+		return 0
+	}
+
+	count=$(echo "$interfaces" | tr ',' ' ' | wc -w | tr -d ' ')
+	[ "${count:-0}" -gt 0 ] || {
+		log_debug "[EQOS-B014-02] skip loadbalance cleanup: interface_count=$count"
+		return 0
+	}
+
+	log_debug "[EQOS-B014-03] cleanup loadbalance rules: interfaces=$interfaces count=$count"
+	i=0
+	for var in $(echo "$interfaces" | tr ',' ' '); do
+		ipaddr=$(ip route show | grep default | grep "$var" | awk '{print $3}' | head -1)
+		while iptables -t mangle -D PREROUTING -i br-lan \
+			-m conntrack --ctstate NEW \
+			-m statistic --mode nth --every "$count" --packet "$i" \
+			-j CONNMARK --set-mark 2"$i" 2>/dev/null; do :; done
+		while iptables -t mangle -D PREROUTING -i br-lan \
+			-m connmark --mark 2"$i" -j MARK --set-mark 2"$i" 2>/dev/null; do :; done
+		if [ -n "$ipaddr" ]; then
+			while iptables -t mangle -D PREROUTING \
+				-m conntrack --ctstate NEW -d "$ipaddr/24" \
+				-j MARK --set-mark 2"$i" 2>/dev/null; do :; done
+		fi
+		ip route del default table 2"$i"0 2>/dev/null
+		ip rule del fwmark 2"$i" table 2"$i"0 2>/dev/null
+		i=$((i + 1))
+	done
+
+	while iptables -t mangle -D PREROUTING -p tcp --dport 443 \
+		-m conntrack --ctstate NEW -j MARK --set-mark 20 2>/dev/null; do :; done
+	while iptables -t mangle -D PREROUTING -p udp --dport 443 \
+		-m conntrack --ctstate NEW -j MARK --set-mark 20 2>/dev/null; do :; done
+	while iptables -t mangle -D POSTROUTING \
+		-m conntrack --ctstate NEW -j CONNMARK --save-mark 2>/dev/null; do :; done
+	while iptables -t mangle -D PREROUTING -i br-lan \
+		-m conntrack --ctstate ESTABLISHED,RELATED \
+		-j CONNMARK --restore-mark 2>/dev/null; do :; done
+	ip route flush cache
+	log_debug "[EQOS-B014-04] cleanup loadbalance rules done: interfaces=$interfaces"
+}
+
 parse_device() {
 	local cfg="$1"
 
@@ -70,10 +122,10 @@ start_service() {
         done
         fi
 
-        iptables -t mangle -F PREROUTING
-        if [ $interface ]; then
-	bash /usr/sbin/loadbalance "$interface"
-        fi
+	        if [ -n "$interface" ]; then
+		cleanup_loadbalance_rules "$interface"
+		bash /usr/sbin/loadbalance "$interface"
+	        fi
         config_foreach parse_device "device"
         if [ "$smarthqos" -eq "1" ]; then
         rm /etc/hotplug.d/dhcp/99-eqos
@@ -95,9 +147,12 @@ EOF
 }
 
 stop_service() {
+	config_load "eqos"
+	local interface
+	config_get interface "config" "interface"
+	cleanup_loadbalance_rules "$interface"
 	eqos stop
-	iptables -t mangle -F PREROUTING
-	rm /etc/hotplug.d/dhcp/99-eqos
+	rm -f /etc/hotplug.d/dhcp/99-eqos
 }
 
 reload_service() {

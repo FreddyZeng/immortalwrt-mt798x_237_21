@@ -43,6 +43,12 @@
 - MAC-only 设备必须用 MAC 作为 WRR hash key，IPv4 DSCP 规则必须在 IP 非空时才安装。
 - HNAT 允许上传和下载出口 DSCP 重标记为 EF/AF41/BE，但 `mtk_hnat_dscp_update()` 在 HQOS 模式下必须比较队列 qid 是否变化，不能把合法出口重标记误判为原始 skb TOS 变化。
 
+## 9. SSR Plus/TProxy 兼容回归测试
+<!-- CID: C-FQOS01-11 | BID: B-014 | commit: pending | 日期: 2026-05-06 -->
+- `init.d/eqos` 禁止执行 `iptables -t mangle -F PREROUTING`，避免清空 SSR Plus、PassWall、OpenClash 等透明代理/TProxy 规则。
+- eqos 多 WAN 负载均衡重建时只能删除自己安装的精确 PREROUTING/POSTROUTING 规则，再调用 `loadbalance` 重建。
+- 诊断日志必须包含 `[EQOS-B014-*]`，用于在路由器上通过 `logread` 追踪清理过程。
+
 ## 3. CONNMARK 首包还原测试
 <!-- CID: C-FQOS01-05 | BID: B-008 | commit: pending | 日期: 2026-05-02 -->
 - `eqos_apply` 的 `CONNMARK --restore-mark` 必须覆盖 `NEW,ESTABLISHED,RELATED` 三态。
