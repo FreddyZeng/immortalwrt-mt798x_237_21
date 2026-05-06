@@ -50,8 +50,8 @@ contains '[EQOS-B014-07] install DHCP hotplug hook without dnsmasq restart' "$IN
     "DHCP hotplug install must log that dnsmasq is not restarted"
 absent '/etc/init.d/dnsmasq restart' "$INITD" \
     "eqos init script must not restart dnsmasq and race SSR Plus dnsmasq conf-dir rebuilds"
-contains 'tproxy_mark_guard="-m mark ! --mark 0x01/0x01"' "$INITD" \
-    "loadbalance cleanup must preserve SSR Plus TProxy fwmark bit"
+contains 'tproxy_mark_guard="-m mark ! --mark 0x8000/0x8000"' "$INITD" \
+    "loadbalance cleanup must preserve SSR Plus TProxy fwmark bit 0x8000"
 
 contains '. /lib/functions.sh 2>/dev/null || exit 0' "$IFACE_HOTPLUG" \
     "iface hotplug must source OpenWrt UCI helper functions"
@@ -62,8 +62,8 @@ contains '[EQOS-B014-09] run iface hotplug' "$IFACE_HOTPLUG" \
 contains '[EQOS-B014-10] skip iface hotplug' "$IFACE_HOTPLUG" \
     "iface hotplug must log non-target interface skips"
 
-contains 'TPROXY_MARK_GUARD="-m mark ! --mark 0x01/0x01"' "$LOADBALANCE" \
-    "loadbalance must not overwrite SSR Plus TProxy fwmark bit"
+contains 'TPROXY_MARK_GUARD="-m mark ! --mark 0x8000/0x8000"' "$LOADBALANCE" \
+    "loadbalance must not overwrite SSR Plus TProxy fwmark bit 0x8000"
 contains '[EQOS-B014-11] rebuild loadbalance rules' "$LOADBALANCE" \
     "loadbalance rebuild must have traceable diagnostic logging"
 contains '[EQOS-B014-12] rebuild loadbalance rules done' "$LOADBALANCE" \
@@ -112,6 +112,10 @@ contains 'eqos add: skip device without ip/mac' "$EQOS" \
     "eqos add must reject empty device identity"
 contains 'if [ -n "$ip" ]; then' "$EQOS" \
     "IPv4 DSCP rules must be guarded for MAC-only IPv6 devices"
+contains '0x8000/0x8000' "$EQOS" \
+    "eqos add WAN interface binding must guard against overwriting SSR Plus TProxy mark 0x8000"
+absent '0x01/0x01' "$EQOS" \
+    "eqos must not reference old SSR Plus TProxy mark 0x01/0x01"
 
 contains 'hnat_hqos_ipv4_qid' "$HNAT_HOOK" \
     "HNAT must reconstruct stored HQOS qid for DSCP update checks"
