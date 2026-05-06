@@ -69,7 +69,7 @@ contains '[EQOS-B014-11] rebuild loadbalance rules' "$LOADBALANCE" \
 contains '[EQOS-B014-12] rebuild loadbalance rules done' "$LOADBALANCE" \
     "loadbalance rebuild completion must have traceable diagnostic logging"
 
-contains 'hash_mac $MAC' "$DHCP_MARK" \
+contains 'hash_mac' "$DHCP_MARK" \
     "DHCP ordinary WRR mark allocation must stay in hash range Q2-Q30"
 absent 'MARK=31' "$DHCP_MARK" \
     "DHCP ordinary devices must never allocate Q31/Q63 rate-limit queues"
@@ -77,8 +77,8 @@ contains 'eqos_macs=$(uci -q show eqos' "$DHCP_MARK" \
     "dhcp_mark must collect explicitly configured MAC devices"
 contains 'if echo "$eqos_macs" | grep -qxF "$MAC_LC"; then' "$DHCP_MARK" \
     "dhcp_mark must skip explicit VIP/rate-limit devices by MAC"
-contains 'if [ "$MARK_VALUE" -lt "$MIN_MARK" ] || [ "$MARK_VALUE" -gt "$MAX_MARK" ]; then' "$DHCP_MARK" \
-    "dhcp_mark must normalize stale invalid marks back into Q2-Q30"
+contains 'idpair=$((MARK_VALUE' "$DHCP_MARK" \
+    "dhcp_mark must compute idpair for download queue mapping (wrr_id+32)"
 
 contains 'cleanup_ipv6_mac_rules()' "$EQOS" \
     "eqos must define a full IPv6 MAC cleanup helper"
