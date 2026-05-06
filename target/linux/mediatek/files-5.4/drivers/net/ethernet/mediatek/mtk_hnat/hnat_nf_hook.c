@@ -1059,6 +1059,76 @@ drop:
 }
 
 static unsigned int
+/* mtk_hnat_tproxy_connmark_check_v4 - called from mtk_hnat_ipv4_nf_pre_routing
+ * (NF_IP_PRI_FIRST+1) AFTER the FOE entry has been written as UNBIND.
+ *
+ * For established tproxy flows (second packet onward), the conntrack entry
+ * already has ct->mark & 0x8000 (set by mtk_hnat_tproxy_protection_v4 on the
+ * first packet).  We use nf_conntrack_find_get() to detect this early and
+ * immediately zero the FOE entry, collapsing the UNBIND-visible window to 0.
+ *
+ * First-packet path: no ct entry yet → find_get returns NULL → falls through
+ * to the -149 hook which handles it.
+ */
+static void mtk_hnat_tproxy_connmark_check_v4(struct sk_buff *skb,
+					      const struct nf_hook_state *state)
+{
+	struct iphdr *iph;
+	struct udphdr *uh;
+	struct nf_conntrack_tuple tuple;
+	struct nf_conntrack_tuple_hash *h;
+	struct nf_conn *ct;
+	struct foe_entry *entry;
+
+	if (!is_magic_tag_valid(skb) || !skb_hnat_is_hashed(skb))
+		return;
+
+	iph = ip_hdr(skb);
+	if (iph->protocol != IPPROTO_UDP)
+		return;
+
+	if (!skb_transport_header_was_set(skb))
+		return;
+
+	uh = udp_hdr(skb);
+
+	/* Build original-direction 5-tuple for conntrack hash lookup */
+	memset(&tuple, 0, sizeof(tuple));
+	tuple.src.l3num     = AF_INET;
+	tuple.dst.protonum  = IPPROTO_UDP;
+	tuple.src.u3.ip     = iph->saddr;
+	tuple.dst.u3.ip     = iph->daddr;
+	tuple.src.u.udp.port = uh->source;
+	tuple.dst.u.udp.port = uh->dest;
+
+	/*
+	 * nf_conntrack_find_get() looks up the conntrack hash table for an
+	 * existing entry matching this 5-tuple.  At NF_IP_PRI_FIRST+1,
+	 * conntrack hasn't linked this skb yet (that happens at -200), but
+	 * the hash entry from the *previous* packet already exists.
+	 */
+	h = nf_conntrack_find_get(state->net, &nf_ct_zone_dflt, &tuple);
+	if (!h)
+		return; /* first packet: no ct entry yet */
+
+	ct = nf_ct_tuplehash_to_ctrack(h);
+	if (READ_ONCE(ct->mark) & 0x8000) {
+		/*
+		 * Established tproxy flow: zero the UNBIND FOE entry right now,
+		 * before any concurrent packet can observe the UNBIND state.
+		 * This closes the ASIC-observable window to zero.
+		 */
+		entry = &hnat_priv->foe_table_cpu[skb_hnat_entry(skb)];
+		pr_debug("[HNAT-tproxy] INT_MIN+1 UDP foe idx=%u zeroed via connmark\n",
+			 skb_hnat_entry(skb));
+		memset(entry, 0, sizeof(struct foe_entry));
+		hnat_cache_ebl(1);
+	}
+
+	nf_ct_put(ct);
+}
+
+static unsigned int
 mtk_hnat_ipv4_nf_pre_routing(void *priv, struct sk_buff *skb,
 			     const struct nf_hook_state *state)
 {
@@ -1205,6 +1275,13 @@ mtk_hnat_br_nf_local_in(void *priv, struct sk_buff *skb,
 		else
 			return NF_ACCEPT;
 	}
+
+	/*
+	 * For established tproxy flows (SSR Plus UDP proxy), zero the FOE entry
+	 * immediately if conntrack mark 0x8000 is set, so the HNAT ASIC never
+	 * observes the UNBIND state on this or any subsequent packet.
+	 */
+	mtk_hnat_tproxy_connmark_check_v4(skb, state);
 
 	return NF_ACCEPT;
 drop:
@@ -2313,12 +2390,14 @@ static void mtk_hnat_dscp_update(struct sk_buff *skb, struct foe_entry *entry)
 		if (IS_IPV4_GRP(entry)) {
 			if (IS_HQOS_MODE && hnat_priv->dscp_en) {
 				/* Stable QID comparison for both TCP and UDP.
-				 * SSR Plus tproxy-intercepted UDP is protected by
-				 * mtk_hnat_tproxy_protection_v4 (NF_IP_PRI_MANGLE+1)
-				 * which fires after xt_TPROXY sets skb->mark=0x01,
-				 * zeroing the FOE entry for those flows so HNAT never
-				 * stably binds them.  Non-SSR UDP flows (gaming, DNS,
-				 * etc.) are fully hardware-accelerated as intended.
+				 * SSR Plus tproxy-intercepted UDP is protected by the
+				 * connmark double-lock (mtk_hnat_tproxy_connmark_check_v4
+				 * at INT_MIN+1 and mtk_hnat_tproxy_protection_v4 at
+				 * NF_IP_PRI_MANGLE+1), which fires after xt_TPROXY sets
+				 * skb->mark=0x8000, zeroing the FOE entry for those flows
+				 * so HNAT never stably binds them.  Non-SSR UDP flows
+				 * (gaming, DNS, etc.) reach BIND normally and are
+				 * hardware-accelerated with correct QID assignment.
 				 */
 				if (!hnat_hqos_ipv4_queue_matches(skb, entry, iph))
 					flag = true;
@@ -2724,6 +2803,21 @@ static unsigned int mtk_hnat_tproxy_protection_v4(
 		 skb_hnat_entry(skb), entry_state(entry), skb->mark);
 	memset(entry, 0, sizeof(struct foe_entry));
 	hnat_cache_ebl(1);
+
+	/*
+	 * Persist the tproxy status in conntrack mark so that the
+	 * mtk_hnat_tproxy_connmark_check_v4 hook (called from INT_MIN+1)
+	 * can detect this flow on the next packet and zero the FOE entry
+	 * BEFORE the ASIC has any chance to observe the UNBIND state.
+	 * This eliminates the theoretical UNBIND-visible race window.
+	 */
+	{
+		enum ip_conntrack_info ctinfo;
+		struct nf_conn *ct = nf_ct_get(skb, &ctinfo);
+
+		if (ct)
+			WRITE_ONCE(ct->mark, ct->mark | 0x8000);
+	}
 
 	return NF_ACCEPT;
 }
