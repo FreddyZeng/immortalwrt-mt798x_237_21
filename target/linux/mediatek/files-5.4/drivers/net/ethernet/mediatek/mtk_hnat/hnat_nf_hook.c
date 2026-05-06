@@ -2312,6 +2312,14 @@ static void mtk_hnat_dscp_update(struct sk_buff *skb, struct foe_entry *entry)
 		iph = ip_hdr(skb);
 		if (IS_IPV4_GRP(entry)) {
 			if (IS_HQOS_MODE && hnat_priv->dscp_en) {
+				/* Stable QID comparison for both TCP and UDP.
+				 * SSR Plus tproxy-intercepted UDP is protected by
+				 * mtk_hnat_tproxy_protection_v4 (NF_IP_PRI_MANGLE+1)
+				 * which fires after xt_TPROXY sets skb->mark=0x01,
+				 * zeroing the FOE entry for those flows so HNAT never
+				 * stably binds them.  Non-SSR UDP flows (gaming, DNS,
+				 * etc.) are fully hardware-accelerated as intended.
+				 */
 				if (!hnat_hqos_ipv4_queue_matches(skb, entry, iph))
 					flag = true;
 			} else if (entry->ipv4_hnapt.iblk2.dscp != iph->tos) {
@@ -2669,6 +2677,54 @@ static unsigned int mtk_hnat_br_nf_forward(void *priv,
 	return NF_ACCEPT;
 }
 
+/* mtk_hnat_tproxy_protection_v4 - fired at NF_IP_PRI_MANGLE+1 (-149),
+ * AFTER iptables mangle PREROUTING (-150) where xt_TPROXY sets
+ * skb->mark |= 0x8000 (SSR Plus tproxy-mark 0x8000/0x8000).
+ *
+ * Mark bit 15 (0x8000) is chosen to avoid collisions with:
+ *   - eqos QoS marks  : 2-31     (bits 0-4)
+ *   - DSCP/QID range  : 0-63     (bits 0-5)
+ *   - mwan3 interface : 1-255    (bits 0-7)
+ *
+ * Goal: prevent HNAT from stably binding UDP flows that SSR's tproxy
+ * has intercepted, so hardware offload never bypasses tproxy.
+ * Non-SSR UDP flows (mark & 0x8000 == 0) are fully hardware-accelerated.
+ */
+static unsigned int mtk_hnat_tproxy_protection_v4(
+	void *priv, struct sk_buff *skb,
+	const struct nf_hook_state *state)
+{
+	struct foe_entry *entry;
+	struct iphdr *iph;
+
+	/* Only act on packets that HNAT has already tagged */
+	if (!is_magic_tag_valid(skb) || !skb_hnat_is_hashed(skb))
+		return NF_ACCEPT;
+
+	/* Only care about IPv4 UDP with tproxy mark (bit 15 set) */
+	iph = ip_hdr(skb);
+	if (iph->protocol != IPPROTO_UDP)
+		return NF_ACCEPT;
+
+	if (!(skb->mark & 0x8000))
+		return NF_ACCEPT;
+
+	/* tproxy has intercepted this UDP flow: zero the FOE entry so
+	 * HNAT hardware never transitions it to BIND state and never
+	 * hardware-offloads it, keeping every packet in the Linux
+	 * network stack where xt_TPROXY can intercept it.
+	 */
+	entry = &hnat_priv->foe_table_cpu[skb_hnat_entry(skb)];
+	if (entry_state(entry) != BIND) {
+		pr_debug("[HNAT-tproxy] UDP foe idx=%u zeroed (mark=0x%x)\n",
+			 skb_hnat_entry(skb), skb->mark);
+		memset(entry, 0, sizeof(struct foe_entry));
+		hnat_cache_ebl(1);
+	}
+
+	return NF_ACCEPT;
+}
+
 static struct nf_hook_ops mtk_hnat_nf_ops[] __read_mostly = {
 	{
 		.hook = mtk_hnat_nf_conntrack,
@@ -2717,6 +2773,13 @@ static struct nf_hook_ops mtk_hnat_nf_ops[] __read_mostly = {
 		.pf = NFPROTO_IPV4,
 		.hooknum = NF_INET_LOCAL_OUT,
 		.priority = NF_IP_PRI_LAST,
+	},
+	{
+		/* Fire AFTER iptables mangle (-150) so tproxy mark is set */
+		.hook = mtk_hnat_tproxy_protection_v4,
+		.pf = NFPROTO_IPV4,
+		.hooknum = NF_INET_PRE_ROUTING,
+		.priority = NF_IP_PRI_MANGLE + 1,
 	},
 	{
 		.hook = mtk_hnat_br_nf_local_in,
