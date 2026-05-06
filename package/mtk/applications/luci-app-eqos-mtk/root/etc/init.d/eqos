@@ -11,6 +11,7 @@ log_debug() {
 cleanup_loadbalance_rules() {
 	local interfaces="$1"
 	local count i var ipaddr
+	local tproxy_mark_guard="-m mark ! --mark 0x01/0x01"
 
 	[ -n "$interfaces" ] || {
 		log_debug "[EQOS-B014-01] skip loadbalance cleanup: empty interface list"
@@ -28,12 +29,24 @@ cleanup_loadbalance_rules() {
 	for var in $(echo "$interfaces" | tr ',' ' '); do
 		ipaddr=$(ip route show | grep default | grep "$var" | awk '{print $3}' | head -1)
 		while iptables -t mangle -D PREROUTING -i br-lan \
+			$tproxy_mark_guard \
 			-m conntrack --ctstate NEW \
 			-m statistic --mode nth --every "$count" --packet "$i" \
 			-j CONNMARK --set-mark 2"$i" 2>/dev/null; do :; done
 		while iptables -t mangle -D PREROUTING -i br-lan \
+			-m conntrack --ctstate NEW \
+			-m statistic --mode nth --every "$count" --packet "$i" \
+			-j CONNMARK --set-mark 2"$i" 2>/dev/null; do :; done
+		while iptables -t mangle -D PREROUTING -i br-lan \
+			$tproxy_mark_guard \
+			-m connmark --mark 2"$i" -j MARK --set-mark 2"$i" 2>/dev/null; do :; done
+		while iptables -t mangle -D PREROUTING -i br-lan \
 			-m connmark --mark 2"$i" -j MARK --set-mark 2"$i" 2>/dev/null; do :; done
 		if [ -n "$ipaddr" ]; then
+			while iptables -t mangle -D PREROUTING \
+				$tproxy_mark_guard \
+				-m conntrack --ctstate NEW -d "$ipaddr/24" \
+				-j MARK --set-mark 2"$i" 2>/dev/null; do :; done
 			while iptables -t mangle -D PREROUTING \
 				-m conntrack --ctstate NEW -d "$ipaddr/24" \
 				-j MARK --set-mark 2"$i" 2>/dev/null; do :; done
@@ -44,16 +57,50 @@ cleanup_loadbalance_rules() {
 	done
 
 	while iptables -t mangle -D PREROUTING -p tcp --dport 443 \
+		$tproxy_mark_guard \
+		-m conntrack --ctstate NEW -j MARK --set-mark 20 2>/dev/null; do :; done
+	while iptables -t mangle -D PREROUTING -p tcp --dport 443 \
+		-m conntrack --ctstate NEW -j MARK --set-mark 20 2>/dev/null; do :; done
+	while iptables -t mangle -D PREROUTING -p udp --dport 443 \
+		$tproxy_mark_guard \
 		-m conntrack --ctstate NEW -j MARK --set-mark 20 2>/dev/null; do :; done
 	while iptables -t mangle -D PREROUTING -p udp --dport 443 \
 		-m conntrack --ctstate NEW -j MARK --set-mark 20 2>/dev/null; do :; done
 	while iptables -t mangle -D POSTROUTING \
 		-m conntrack --ctstate NEW -j CONNMARK --save-mark 2>/dev/null; do :; done
 	while iptables -t mangle -D PREROUTING -i br-lan \
+		$tproxy_mark_guard \
+		-m conntrack --ctstate ESTABLISHED,RELATED \
+		-j CONNMARK --restore-mark 2>/dev/null; do :; done
+	while iptables -t mangle -D PREROUTING -i br-lan \
 		-m conntrack --ctstate ESTABLISHED,RELATED \
 		-j CONNMARK --restore-mark 2>/dev/null; do :; done
 	ip route flush cache
 	log_debug "[EQOS-B014-04] cleanup loadbalance rules done: interfaces=$interfaces"
+}
+
+install_dhcp_hotplug() {
+	local hook="/etc/hotplug.d/dhcp/99-eqos"
+	local tmp="/tmp/99-eqos.$$"
+
+	cat << 'EOF' > "$tmp"
+#!/bin/sh
+
+# 只有在新增 DHCP 租约时才执行操作
+if [ "$ACTION" = "add" ]; then
+    /etc/init.d/dhcp_mark.sh eqos init
+fi
+EOF
+
+	if [ -f "$hook" ] && cmp -s "$tmp" "$hook"; then
+		rm -f "$tmp"
+		log_debug "[EQOS-B014-06] keep DHCP hotplug hook unchanged: hook=$hook"
+		return 0
+	fi
+
+	mv "$tmp" "$hook"
+	chmod +x "$hook"
+	log_debug "[EQOS-B014-07] install DHCP hotplug hook without dnsmasq restart: hook=$hook"
 }
 
 parse_device() {
@@ -82,10 +129,10 @@ start_service() {
 	[ "$enabled" -eq "1" ] || return 1
 	
 	local download upload comment
-	config_get download "config" "download"
-	config_get upload "config" "upload"
+	config_get download "config" "download" "0"
+	config_get upload "config" "upload" "0"
 	config_get comment "config" "comment"
-	config_get smarthqos "config" "smarthqos"
+	config_get_bool smarthqos "config" "smarthqos" "0"
 	config_get interface "config" "interface"
 	eqos start "$download" "$upload" "$comment" 
 	
@@ -129,20 +176,7 @@ start_service() {
 	        fi
         config_foreach parse_device "device"
         if [ "$smarthqos" -eq "1" ]; then
-        rm /etc/hotplug.d/dhcp/99-eqos
-	cat << 'EOF' > /etc/hotplug.d/dhcp/99-eqos
-#!/bin/sh
-
-# 只有在新增 DHCP 租约时才执行操作
-if [ "$ACTION" = "add" ]; then
-
-    # 执行指定的命令
-    /etc/init.d/dhcp_mark.sh eqos init
-fi
-EOF
-
-        chmod +x /etc/hotplug.d/dhcp/99-eqos
-        /etc/init.d/dnsmasq restart
+        install_dhcp_hotplug
         /etc/init.d/dhcp_mark.sh eqos init
         fi   
 }

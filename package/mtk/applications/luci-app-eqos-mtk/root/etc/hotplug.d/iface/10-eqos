@@ -1,7 +1,33 @@
 #!/bin/sh
 
-# Only restart eqos when an interface comes UP (e.g. WAN reconnect).
-# Firing on ifdown/ifupdate causes unnecessary rule flushes and rebuilds.
+# Only rebuild eqos when the configured WAN/loadbalance interface comes UP.
+# Firing on lan/iptv/zerotier ifup causes unnecessary rule rebuilds and can
+# race SSR Plus dnsmasq/TProxy rule generation during boot.
 [ "$ACTION" = "ifup" ] || exit 0
 
-/etc/init.d/eqos start
+. /lib/functions.sh 2>/dev/null || exit 0
+
+log_debug() {
+    logger -p daemon.debug -t eqos-hotplug "$*" 2>/dev/null || true
+}
+
+config_load eqos
+config_get_bool enabled config enabled 0
+[ "$enabled" -eq 1 ] || {
+    log_debug "[EQOS-B014-08] skip iface hotplug: eqos disabled action=$ACTION interface=$INTERFACE device=$DEVICE"
+    exit 0
+}
+
+config_get interfaces config interface
+[ -n "$interfaces" ] || interfaces="wan"
+
+for iface in $(echo "$interfaces" | tr ',' ' '); do
+    if [ "$INTERFACE" = "$iface" ] || [ "$DEVICE" = "$iface" ]; then
+        log_debug "[EQOS-B014-09] run iface hotplug: action=$ACTION interface=$INTERFACE device=$DEVICE matched=$iface"
+        /etc/init.d/eqos start
+        exit 0
+    fi
+done
+
+log_debug "[EQOS-B014-10] skip iface hotplug: action=$ACTION interface=$INTERFACE device=$DEVICE configured=$interfaces"
+exit 0

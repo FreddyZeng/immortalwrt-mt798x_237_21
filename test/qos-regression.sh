@@ -5,6 +5,8 @@ ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 EQOS="$ROOT/package/mtk/applications/luci-app-eqos-mtk/root/usr/sbin/eqos"
 DHCP_MARK="$ROOT/package/mtk/applications/luci-app-eqos-mtk/root/etc/init.d/dhcp_mark.sh"
 INITD="$ROOT/package/mtk/applications/luci-app-eqos-mtk/root/etc/init.d/eqos"
+IFACE_HOTPLUG="$ROOT/package/mtk/applications/luci-app-eqos-mtk/root/etc/hotplug.d/iface/10-eqos"
+LOADBALANCE="$ROOT/package/mtk/applications/luci-app-eqos-mtk/root/usr/sbin/loadbalance"
 VERIFY_QOS="$ROOT/docs/verify-vip-qos.sh"
 HNAT_HOOK="$ROOT/target/linux/mediatek/files-5.4/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c"
 
@@ -26,6 +28,8 @@ absent() {
 sh -n "$EQOS"
 sh -n "$DHCP_MARK"
 sh -n "$INITD"
+sh -n "$IFACE_HOTPLUG"
+bash -n "$LOADBALANCE"
 sh -n "$VERIFY_QOS"
 
 absent 'iptables -t mangle -F PREROUTING' "$INITD" \
@@ -40,6 +44,30 @@ contains 'while ip6tables -t mangle -D FORWARD -j eqos 2>/dev/null; do :; done' 
     "IPv6 FORWARD jump rebuild must remove duplicate eqos jumps"
 contains '[EQOS-B014-05] rebuild IPv6 eqos jumps' "$INITD" \
     "IPv6 jump rebuild must have traceable diagnostic logging"
+contains 'install_dhcp_hotplug()' "$INITD" \
+    "eqos init script must install DHCP hotplug idempotently"
+contains '[EQOS-B014-07] install DHCP hotplug hook without dnsmasq restart' "$INITD" \
+    "DHCP hotplug install must log that dnsmasq is not restarted"
+absent '/etc/init.d/dnsmasq restart' "$INITD" \
+    "eqos init script must not restart dnsmasq and race SSR Plus dnsmasq conf-dir rebuilds"
+contains 'tproxy_mark_guard="-m mark ! --mark 0x01/0x01"' "$INITD" \
+    "loadbalance cleanup must preserve SSR Plus TProxy fwmark bit"
+
+contains '. /lib/functions.sh 2>/dev/null || exit 0' "$IFACE_HOTPLUG" \
+    "iface hotplug must source OpenWrt UCI helper functions"
+contains 'config_get interfaces config interface' "$IFACE_HOTPLUG" \
+    "iface hotplug must read the configured eqos interface list"
+contains '[EQOS-B014-09] run iface hotplug' "$IFACE_HOTPLUG" \
+    "iface hotplug must log matched interface rebuilds"
+contains '[EQOS-B014-10] skip iface hotplug' "$IFACE_HOTPLUG" \
+    "iface hotplug must log non-target interface skips"
+
+contains 'TPROXY_MARK_GUARD="-m mark ! --mark 0x01/0x01"' "$LOADBALANCE" \
+    "loadbalance must not overwrite SSR Plus TProxy fwmark bit"
+contains '[EQOS-B014-11] rebuild loadbalance rules' "$LOADBALANCE" \
+    "loadbalance rebuild must have traceable diagnostic logging"
+contains '[EQOS-B014-12] rebuild loadbalance rules done' "$LOADBALANCE" \
+    "loadbalance rebuild completion must have traceable diagnostic logging"
 
 contains 'hash_mac $MAC' "$DHCP_MARK" \
     "DHCP ordinary WRR mark allocation must stay in hash range Q2-Q30"

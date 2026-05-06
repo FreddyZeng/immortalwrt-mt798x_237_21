@@ -47,6 +47,9 @@
 <!-- CID: C-FQOS01-11 | BID: B-014 | commit: pending | 日期: 2026-05-06 -->
 - `init.d/eqos` 禁止执行 `iptables -t mangle -F PREROUTING`，避免清空 SSR Plus、PassWall、OpenClash 等透明代理/TProxy 规则。
 - eqos 多 WAN 负载均衡重建时只能删除自己安装的精确 PREROUTING/POSTROUTING 规则，再调用 `loadbalance` 重建。
+- `loadbalance` 的 PREROUTING mark/CONNMARK 规则必须带 `-m mark ! --mark 0x01/0x01`，不能覆盖 SSR Plus UDP TProxy 的 `fwmark 0x01/0x01`。
+- `init.d/eqos` 安装 `/etc/hotplug.d/dhcp/99-eqos` 时不得重启 dnsmasq，避免 SSR Plus 正在重建 `/tmp/dnsmasq.d/dnsmasq-ssrplus.d` 时被 dnsmasq 扫到 `sed -i` 临时文件。
+- `iface/10-eqos` 只能在配置的 eqos WAN/loadbalance 接口 `ifup` 时触发 `/etc/init.d/eqos start`，不得因 `lan/iptv/zerotier/loopback` 等接口事件反复重建 mangle 规则。
 - 诊断日志必须包含 `[EQOS-B014-*]`，用于在路由器上通过 `logread` 追踪清理过程。
 - IPv6 `eqos` 链创建和 `FORWARD`/`POSTROUTING` jump 重建必须幂等，不能在启动日志里产生 chain already exists 噪声或重复 jump。
 
