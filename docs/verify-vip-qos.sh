@@ -584,22 +584,28 @@ sep
 echo "【8】dhcp_mark.sh 兼容性检查"
 sep
 
-MARK_FILE="/tmp/dhcp_mac_mark_mapping"
-if [ -f "$MARK_FILE" ]; then
-    TOTAL_MAP=$(wc -l < "$MARK_FILE")
-    BAD_MARKS=$(awk '$2==1 || $2>=31' "$MARK_FILE" | wc -l)
-    info "dhcp_mark 映射条目: $TOTAL_MAP"
-    [ "$BAD_MARKS" -eq 0 ] \
-        && ok "所有 mark 值在 2-30 范围内（无 Q1/Q31 冲突）" \
-        || fail "发现 $BAD_MARKS 条 mark=1 或 >=31 的异常映射（应为 2-30）"
-    if [ "$TOTAL_MAP" -gt 29 ]; then
-        OVERFLOW=$((TOTAL_MAP - 29))
-        info "dhcp_mark 设备超过 29 个（共 ${TOTAL_MAP} 条），多出 ${OVERFLOW} 条映射。"
-        info "注：dhcp_mark 哈希会复用普通 WRR 槽位（>29 设备共享取模 29 个槽位），不会占用 Q31/Q63。"
-    fi
+# dhcp_mark.sh 现在使用纯确定性哈希（MAC % 29 + 2），无持久化状态文件。
+# 验证 iptables eqos 链中 WRR DSCP 标记是否全部在合法范围 2-30/34-62。
+WRR_RULES=$(iptables -t mangle -L eqos -n 2>/dev/null | grep "DSCP set 0x" | \
+    grep -oE 'set 0x[0-9a-f]+' | awk '{val=strtonum($2); print val}' 2>/dev/null)
+
+if [ -n "$WRR_RULES" ]; then
+    BAD_WRR=$(echo "$WRR_RULES" | awk '
+        $1 != 0 && $1 != 31 && $1 != 32 && $1 != 63 &&
+        !($1 >= 2 && $1 <= 30) && !($1 >= 34 && $1 <= 62) {bad++}
+        END{print bad+0}')
+    GOOD_WRR=$(echo "$WRR_RULES" | awk '$1>=2 && $1<=30 {u++} $1>=34 && $1<=62 {d++} END{print u+0, d+0}')
+    WRR_UP=$(echo "$GOOD_WRR" | awk '{print $1}')
+    WRR_DN=$(echo "$GOOD_WRR" | awk '{print $2}')
+    info "eqos 链 WRR 规则：上传 Q2-30 共 ${WRR_UP} 条，下载 Q34-62 共 ${WRR_DN} 条"
+    [ "${BAD_WRR:-0}" -eq 0 ] \
+        && ok "eqos 链所有 WRR DSCP 标记在合法范围（2-30 上传 / 34-62 下载）" \
+        || fail "eqos 链发现 $BAD_WRR 条非法 DSCP 标记（不在 2-30/34-62/VIP/限速范围）"
+    info "（dhcp_mark.sh 使用确定性哈希 MAC%%29+2，同一设备 MAC 永远映射到同一 WRR 槽位）"
 else
-    info "dhcp_mark 映射文件不存在（smarthqos=OFF 或尚未初始化）"
+    info "eqos 链无 WRR 标记规则（smarthqos=OFF 或无 DHCP 设备已连接）"
 fi
+
 
 # 检查 eqos 链中是否有 DSCP=1 或 DSCP=33 规则（应在 FORWARD 不在 eqos）
 BAD1=$(iptables -t mangle -L eqos -n 2>/dev/null | grep -c "DSCP set 0x01")

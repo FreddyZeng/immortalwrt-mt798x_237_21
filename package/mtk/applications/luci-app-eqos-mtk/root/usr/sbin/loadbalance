@@ -25,7 +25,11 @@ array=(${interface//,/ })
         ip rule del fwmark 2"$i" table 2"$i"0 2>/dev/null
         ip rule add fwmark 2"$i" table 2"$i"0
         ip route del default table 2"$i"0 2>/dev/null
-        ip route add default via $ipaddr dev $var table 2"$i"0
+        if [ -n "$ipaddr" ]; then
+            ip route add default via $ipaddr dev $var table 2"$i"0
+        else
+            log_debug "[EQOS-B014-14] skip route add: WAN $var has no default gateway yet"
+        fi
         let i=i+1
         done
         
@@ -34,8 +38,10 @@ array=(${interface//,/ })
         for var in ${array[@]}
         do
         ipaddr=$(ip route show |grep default | grep $var | awk '{print $3 }')
-        iptables -t mangle -D PREROUTING $TPROXY_MARK_GUARD -m conntrack --ctstate NEW -d $ipaddr/24 -j MARK --set-mark 2"$i"
-        iptables -t mangle -A PREROUTING $TPROXY_MARK_GUARD -m conntrack --ctstate NEW -d $ipaddr/24 -j MARK --set-mark 2"$i"
+        if [ -n "$ipaddr" ]; then
+            iptables -t mangle -D PREROUTING $TPROXY_MARK_GUARD -m conntrack --ctstate NEW -d $ipaddr/24 -j MARK --set-mark 2"$i"
+            iptables -t mangle -A PREROUTING $TPROXY_MARK_GUARD -m conntrack --ctstate NEW -d $ipaddr/24 -j MARK --set-mark 2"$i"
+        fi
         let i=i+1
         done
         

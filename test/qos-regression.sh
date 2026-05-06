@@ -138,10 +138,10 @@ absent 'skb_qid = skb->mark & MTK_QDMA_TX_MASK' "$HNAT_HOOK" \
 absent 'if (IS_IPV4_GRP(entry) && entry->ipv4_hnapt.iblk2.dscp != iph->tos)' "$HNAT_HOOK" \
     "HNAT must not unconditionally compare rewritten egress DSCP with skb TOS"
 
-contains '不会占用 Q31/Q63' "$VERIFY_QOS" \
-    "verification script must document that DHCP overflow never uses rate-limit queues"
-contains 'awk '\''$2==1 || $2>=31'\''' "$VERIFY_QOS" \
-    "verification script must fail any DHCP mark that enters Q1/Q31+"
+contains 'BAD_WRR' "$VERIFY_QOS" \
+    "verification script must check eqos chain for out-of-range WRR DSCP marks"
+contains 'MAC%%29+2' "$VERIFY_QOS" \
+    "verification script must document deterministic hash prevents Q31/Q63 allocation"
 contains '限速最终覆盖 上传 ${ip} → DSCP=31' "$VERIFY_QOS" \
     "verification script must check final rate-limit upload override rules"
 contains '限速最终覆盖 下载 ${ip} → DSCP=63' "$VERIFY_QOS" \
