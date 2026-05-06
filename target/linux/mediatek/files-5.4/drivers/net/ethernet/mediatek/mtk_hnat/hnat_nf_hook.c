@@ -2369,19 +2369,18 @@ static bool hnat_hqos_ipv4_queue_matches(struct sk_buff *skb,
 	u32 skb_qid;
 
 	/*
-	 * In the KEEPALIVE_DUP_OLD_HDR path the skb carries the ORIGINAL
-	 * incoming packet header – before the iptables mangle DSCP target
-	 * rewrites iph->tos.  For most applications iph->tos is 0 (DSCP=0),
-	 * while entry->iblk2.qid was correctly set from the iptables-remarked
-	 * DSCP on the first CPU-path packet.  Using skb->mark as a fallback
-	 * (which is also 0 in the keepalive context) causes a spurious
-	 * entry_qid != 0 mismatch and zeros the FOE entry, preventing stable
-	 * BIND for all WRR/rate-limit/VIP-download flows.
+	 * In the KEEPALIVE_DUP_OLD_HDR path the skb has gone through iptables
+	 * mangle FORWARD, so the DSCP rules have rewritten iph->tos to our
+	 * internal QoS value (e.g. DSCP=5 → tos=0x14 for Q5 WRR).  For most
+	 * flows the comparison (iph->tos >> 2) == entry_qid is correct.
 	 *
-	 * When tos==0 we cannot determine the intended QID from the keepalive
-	 * packet; return true (match) to avoid the false invalidation.
-	 * QoS-policy changes are handled by eqos clearing FOE entries via the
-	 * tproxy hooks and natural expiry.
+	 * Exception: VIP Q0 uses DSCP=0 → tos=0 after FORWARD.  The original
+	 * fallback "skb_qid = skb->mark & mask" works when skb->mark=0, but
+	 * CONNMARK --restore-mark in PREROUTING could restore a non-zero
+	 * ct->mark into skb->mark, causing a spurious mismatch for Q0 entries.
+	 *
+	 * Fast-return true when tos==0: entry_qid must also be 0 (DSCP=0 only
+	 * maps to Q0), so the result is always "match" — no false invalidation.
 	 */
 	if (!iph->tos)
 		return true;
