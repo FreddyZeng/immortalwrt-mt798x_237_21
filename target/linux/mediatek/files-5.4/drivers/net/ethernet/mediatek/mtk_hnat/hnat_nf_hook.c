@@ -1058,7 +1058,6 @@ drop:
 	return NF_DROP;
 }
 
-static unsigned int
 /* mtk_hnat_tproxy_connmark_check_v4 - called from mtk_hnat_ipv4_nf_pre_routing
  * (NF_IP_PRI_FIRST+1) AFTER the FOE entry has been written as UNBIND.
  *
