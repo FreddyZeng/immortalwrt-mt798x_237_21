@@ -27,7 +27,7 @@ cleanup_loadbalance_rules() {
 	log_debug "[EQOS-B014-03] cleanup loadbalance rules: interfaces=$interfaces count=$count"
 	i=0
 	for var in $(echo "$interfaces" | tr ',' ' '); do
-		ipaddr=$(ip route show default dev "$var" 2>/dev/null | awk '{print $3}' | head -1)
+		ipaddr=$(ip route show default dev "$var" 2>/dev/null | awk 'NR==1 {print $3}')
 		log_debug "[EQOS-B016-01] cleanup_loadbalance_rules: iface=$var gateway=$ipaddr"
 		while iptables -t mangle -D PREROUTING -i br-lan \
 			$tproxy_mark_guard \
