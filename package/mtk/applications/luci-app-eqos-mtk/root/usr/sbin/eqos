@@ -154,6 +154,24 @@ remove_static_forward_rules() {
         -j DSCP --set-dscp 32 2>/dev/null
 }
 
+ensure_forward_rule() {
+    local label="$1"
+    shift
+
+    if iptables -t mangle -C FORWARD "$@" 2>/dev/null; then
+        log_debug "[EQOS-B013-05] static FORWARD rule exists: label=$label"
+        return 0
+    fi
+
+    if iptables -t mangle -A FORWARD "$@"; then
+        log_debug "[EQOS-B013-06] static FORWARD rule installed: label=$label"
+        return 0
+    fi
+
+    log_debug "[EQOS-B013-07] static FORWARD rule install failed: label=$label"
+    return 1
+}
+
 delete_ipv4_forward_device_rules() {
     local ip="$1"
     local d
@@ -302,10 +320,10 @@ iptables_start_inital() {
     remove_static_forward_rules  # idempotent: remove before re-adding
 
     # 109.x game acceleration: UDP<=300B → Q1(DSCP=1) upload / Q33(DSCP=33) download
-    iptables -t mangle -A FORWARD \
+    ensure_forward_rule "game_upload_109_q1" \
         -p udp -m length --length :300 \
         -s 192.168.109.0/24 -j DSCP --set-dscp 1
-    iptables -t mangle -A FORWARD \
+    ensure_forward_rule "game_download_109_q33" \
         -p udp -m length --length :300 \
         -d 192.168.109.0/24 -j DSCP --set-dscp 33
 
@@ -314,11 +332,11 @@ iptables_start_inital() {
     # 3rd octet 0x6E-0x77=110-119, 4th octet 0x0A-0x27=10-39
     # Appended after eqos/game rules; explicit rate-limit devices get a later
     # per-IP override so every limited device still lands in Q31/Q63.
-    iptables -t mangle -A FORWARD -s 192.168.0.0/16 \
+    ensure_forward_rule "static_vip_upload_q0" -s 192.168.0.0/16 \
         -m u32 --u32 "0xc&0x0000FF00=0x00006E00:0x00007700" \
         -m u32 --u32 "0xc&0x000000FF=0x0000000A:0x00000027" \
         -j DSCP --set-dscp 0
-    iptables -t mangle -A FORWARD -d 192.168.0.0/16 \
+    ensure_forward_rule "static_vip_download_q32" -d 192.168.0.0/16 \
         -m u32 --u32 "0x10&0x0000FF00=0x00006E00:0x00007700" \
         -m u32 --u32 "0x10&0x000000FF=0x0000000A:0x00000027" \
         -j DSCP --set-dscp 32

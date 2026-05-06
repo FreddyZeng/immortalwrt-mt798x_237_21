@@ -47,6 +47,12 @@ contains 'for d in $(seq 34 63); do' "$EQOS" \
     "IPv6 download cleanup must cover WRR and rate-limit marks"
 contains 'cleanup_ipv6_mac_rules "$macaddr"' "$EQOS" \
     "eqos add must cleanup old IPv6 MAC state before installing a new state"
+contains 'ensure_forward_rule()' "$EQOS" \
+    "static FORWARD rules must be installed through an idempotent checked helper"
+contains 'ensure_forward_rule "game_download_109_q33"' "$EQOS" \
+    "109.x UDP download acceleration rule must be explicitly installed"
+contains '[EQOS-B013-07] static FORWARD rule install failed' "$EQOS" \
+    "static FORWARD rule installation failures must be logged"
 contains 'rl_forward_file="/tmp/rl_forward_ips"' "$EQOS" \
     "eqos must track rate-limit FORWARD override IPs for start/stop cleanup"
 contains 'cleanup_recorded_ipv4_forward_rules' "$EQOS" \
