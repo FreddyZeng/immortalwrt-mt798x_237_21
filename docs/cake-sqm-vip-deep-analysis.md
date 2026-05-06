@@ -163,10 +163,12 @@ u64 rate = q->rate_bps * 9 / 10;  // 只使用 90% 带宽
   走内核协议栈
         │
         ▼
-┌─ iptables mangle ─┐
-│  VIP IP → DSCP=46  │
-│  其他 → DSCP=0     │
-└────────┬───────────┘
+┌─ iptables mangle (FORWARD) ──────────────────────┐
+│  VIP 上传 (src 110-119.x)  → DSCP=0  (HNAT→Q0)  │
+│  VIP 下载 (dst 110-119.x)  → DSCP=32 (HNAT→Q32) │
+│  WRR 设备                  → DSCP=2-30/34-62     │
+│  注：CAKE 分类独立使用 IP 范围检查，不依赖 DSCP 值 │
+└────────┬──────────────────────────────────────────┘
          ▼
 ┌─ CAKE qdisc ─────────────────┐
 │  is_nat_target_ip_ipv4_k()   │
@@ -188,7 +190,38 @@ CAKE 只处理新连接的前几个包（HNAT offload 前）和无法 offload �
 
 在以上基础上，9999992 补丁新增了 192.168.109.0/24 网段的精细化控制：
 
-- **仅 UDP 且包长 ≤ 300 字节** 的小包走 tin=7 最高优先级
+- **仅 UDP 且包长 ≤ 300 字节** 的小包走 tin=7 最高优先级（初始实现）
 - 大 UDP 和所有 TCP 走标准 CAKE 分类
 - 通过通用函数指针架构 `ip_range_check_fn` 消除代码重复
-- 与 iptables HNAT 规则保持完全一致
+
+## 后续修正补丁 (9999993~9999996)
+
+**9999993** — `diffserv8[5]` 从 5→4，修正 LE PHB DSCP 的 tin 分配。
+
+**9999994** — 修复 9999992 中 `nf_ct_put` 引用计数泄漏等多个小 Bug。
+
+**9999995** — 为 `highest_priority_tin` 增加初始化（`= 0`）和 `tin_cnt > 1` 边界保护，
+防止 besteffort 单 tin 模式下访问越界 tin 数组。
+
+**9999996** — 109 网段游戏加速降为**第二优先级 (tin=6)**，避免与 VIP (tin=7) 争抢最高 tin：
+
+```c
+// 9999992 旧实现（已被取代）:
+return &q->tins[highest_priority_tin];    // tin=7，与 VIP 同级
+
+// 9999996 修正：
+if (highest_priority_tin > 0)
+    return &q->tins[highest_priority_tin - 1];  // tin=6，低于 VIP
+else
+    return &q->tins[highest_priority_tin];
+```
+
+**最终 tin 优先级层次（diffserv8 模式）：**
+
+| tin | 用途 | 优先级 |
+|-----|------|--------|
+| 7 | 192.168.110-119.x VIP 专属（直通，不可伪造）| 最高 |
+| 6 | 192.168.109.x 游戏小 UDP (≤300B)，第二优先 | 次高 |
+| 5 | 标准 CAKE 高优先级流量 | 第三 |
+| 2 | 默认/普通流量 (CS0，quantum=65535) | 大权重 WRR |
+| 0 | 背景流量 (CS1 LE) | 最低 |
