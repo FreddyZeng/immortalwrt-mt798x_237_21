@@ -125,6 +125,10 @@ contains 'skb_qid = (iph->tos >> 2) & MTK_QDMA_TX_MASK;' "$HNAT_HOOK" \
     "HNAT HQOS update must derive current queue from skb DSCP"
 contains 'if (!hnat_hqos_ipv4_queue_matches(skb, entry, iph))' "$HNAT_HOOK" \
     "HNAT HQOS update must only invalidate when queue identity changes"
+contains 'if (!iph->tos)' "$HNAT_HOOK" \
+    "HNAT HQOS queue_matches must fast-return true when tos=0 to avoid keepalive false-invalidation"
+absent 'skb_qid = skb->mark & MTK_QDMA_TX_MASK' "$HNAT_HOOK" \
+    "HNAT must not use skb->mark as QID fallback in HQOS+dscp_en mode (mark is 0 in keepalive context)"
 absent 'if (IS_IPV4_GRP(entry) && entry->ipv4_hnapt.iblk2.dscp != iph->tos)' "$HNAT_HOOK" \
     "HNAT must not unconditionally compare rewritten egress DSCP with skb TOS"
 

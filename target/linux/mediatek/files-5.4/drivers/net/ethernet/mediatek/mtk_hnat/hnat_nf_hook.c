@@ -2368,11 +2368,25 @@ static bool hnat_hqos_ipv4_queue_matches(struct sk_buff *skb,
 	u32 entry_qid = hnat_hqos_ipv4_qid(entry);
 	u32 skb_qid;
 
-	if (iph->tos)
-		skb_qid = (iph->tos >> 2) & MTK_QDMA_TX_MASK;
-	else
-		skb_qid = skb->mark & MTK_QDMA_TX_MASK;
+	/*
+	 * In the KEEPALIVE_DUP_OLD_HDR path the skb carries the ORIGINAL
+	 * incoming packet header – before the iptables mangle DSCP target
+	 * rewrites iph->tos.  For most applications iph->tos is 0 (DSCP=0),
+	 * while entry->iblk2.qid was correctly set from the iptables-remarked
+	 * DSCP on the first CPU-path packet.  Using skb->mark as a fallback
+	 * (which is also 0 in the keepalive context) causes a spurious
+	 * entry_qid != 0 mismatch and zeros the FOE entry, preventing stable
+	 * BIND for all WRR/rate-limit/VIP-download flows.
+	 *
+	 * When tos==0 we cannot determine the intended QID from the keepalive
+	 * packet; return true (match) to avoid the false invalidation.
+	 * QoS-policy changes are handled by eqos clearing FOE entries via the
+	 * tproxy hooks and natural expiry.
+	 */
+	if (!iph->tos)
+		return true;
 
+	skb_qid = (iph->tos >> 2) & MTK_QDMA_TX_MASK;
 	return entry_qid == skb_qid;
 }
 
