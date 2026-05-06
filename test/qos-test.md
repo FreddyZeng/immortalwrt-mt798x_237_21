@@ -15,7 +15,7 @@
 ```sh
 sh -n package/mtk/applications/luci-app-eqos-mtk/root/usr/sbin/eqos
 sh -n package/mtk/applications/luci-app-eqos-mtk/root/etc/init.d/eqos
-sh -n package/mtk/applications/luci-app-eqos-mtk/root/usr/sbin/loadbalance
+bash -n package/mtk/applications/luci-app-eqos-mtk/root/usr/sbin/loadbalance
 sh -n package/mtk/applications/luci-app-eqos-mtk/root/etc/init.d/dhcp_mark.sh
 sh test/qos-regression.sh
 ```
@@ -68,8 +68,8 @@ sh test/qos-regression.sh
 
 ## 4. loadbalance POSIX 兼容性测试
 <!-- CID: C-FQOS01-05 | BID: B-009 | commit: pending | 日期: 2026-05-02 -->
-- `sh -n /usr/sbin/loadbalance` 必须通过（POSIX sh 语法检查）。
-- 在 busybox ash 环境下执行 `sh /usr/sbin/loadbalance pppoe-wan,pppoe-wan2` 不得报错。
+- `bash -n /usr/sbin/loadbalance` 必须通过（bash 语法检查；loadbalance 使用 bash 数组和 let，不兼容 POSIX sh）。
+- 在 busybox ash 环境下通过 `bash /usr/sbin/loadbalance pppoe-wan,pppoe-wan2` 不得报错。
 
 ## 5. 宽基线链顺序与遗留脚本回归测试
 <!-- CID: C-FQOS01-07 | BID: B-010 | commit: pending | 日期: 2026-05-03 -->
