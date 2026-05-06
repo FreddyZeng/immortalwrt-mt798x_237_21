@@ -34,6 +34,12 @@ contains 'cleanup_loadbalance_rules()' "$INITD" \
     "eqos init script must cleanup only its own loadbalance PREROUTING rules"
 contains '[EQOS-B014-03] cleanup loadbalance rules' "$INITD" \
     "loadbalance cleanup must have traceable diagnostic logging"
+contains 'ip6tables -t mangle -N eqos 2>/dev/null' "$INITD" \
+    "IPv6 eqos chain creation must be quiet and idempotent"
+contains 'while ip6tables -t mangle -D FORWARD -j eqos 2>/dev/null; do :; done' "$INITD" \
+    "IPv6 FORWARD jump rebuild must remove duplicate eqos jumps"
+contains '[EQOS-B014-05] rebuild IPv6 eqos jumps' "$INITD" \
+    "IPv6 jump rebuild must have traceable diagnostic logging"
 
 contains 'hash_mac $MAC' "$DHCP_MARK" \
     "DHCP ordinary WRR mark allocation must stay in hash range Q2-Q30"

@@ -48,6 +48,7 @@
 - `init.d/eqos` 禁止执行 `iptables -t mangle -F PREROUTING`，避免清空 SSR Plus、PassWall、OpenClash 等透明代理/TProxy 规则。
 - eqos 多 WAN 负载均衡重建时只能删除自己安装的精确 PREROUTING/POSTROUTING 规则，再调用 `loadbalance` 重建。
 - 诊断日志必须包含 `[EQOS-B014-*]`，用于在路由器上通过 `logread` 追踪清理过程。
+- IPv6 `eqos` 链创建和 `FORWARD`/`POSTROUTING` jump 重建必须幂等，不能在启动日志里产生 chain already exists 噪声或重复 jump。
 
 ## 3. CONNMARK 首包还原测试
 <!-- CID: C-FQOS01-05 | BID: B-008 | commit: pending | 日期: 2026-05-02 -->
