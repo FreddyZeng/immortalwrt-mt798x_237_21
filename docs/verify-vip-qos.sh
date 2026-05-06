@@ -225,47 +225,55 @@ sep
 
 check_forward_rule() {
     local desc="$1"; shift
-    # Use iptables -C first; if it fails, fall back to -S FORWARD grep.
-    # Reason: OpenWrt iptables -C normalises u32 hex expressions internally
-    # (e.g. 0x0000FF00 → 0xff00) but does NOT reverse-normalise the argument
-    # before comparison, so -C returns 1 even when the rule exists.
-    # iptables -S outputs the saved (normalised) form which grep can match.
+
+    # Level 1: iptables -C (fast exact match)
     if iptables -t mangle -C FORWARD "$@" 2>/dev/null; then
         ok "FORWARD: $desc"
         return
     fi
-    # Build a grep pattern from the key distinguishing fields.
-    # For each argument pair we emit the part that survives normalisation.
-    local pat=""
+
+    # Level 2: iptables -L FORWARD -n grep (most stable format).
+    # iptables -L always renders DSCP as "DSCP set 0xNN" and src/dst
+    # as CIDR strings. We pipe through two grep passes so we never
+    # need complex extended-regex OR patterns which may trip busybox.
+    local src="" dst="" dscp_hex="" proto_pat="" len_pat=""
     local prev=""
     for arg in "$@"; do
         case "$prev" in
-            -s) pat="${pat}.*-s ${arg}" ;;
-            -d) pat="${pat}.*-d ${arg}" ;;
-            -p) pat="${pat}.*-p ${arg}" ;;
+            -s)        src="$arg" ;;
+            -d)        dst="$arg" ;;
+            -p)        proto_pat="$arg" ;;
             --set-dscp)
-                # iptables -S may show DSCP as decimal (0) or zero-padded hex (0x00).
-                # Build an OR pattern covering both representations.
-                # Append [^0-9a-fA-Fx] to prevent partial match (e.g. "0" vs "0x20").
-                local dscp_dec dscp_hex
-                dscp_dec=$((arg + 0))
-                dscp_hex=$(printf "0x%02x" "$dscp_dec")
-                pat="${pat}.*(--set-dscp ${dscp_dec}[^0-9a-fA-Fx]|--set-dscp ${dscp_hex}[^0-9a-fA-F]|--set-dscp ${dscp_dec}$|--set-dscp ${dscp_hex}$)" ;;
-
+                dscp_hex=$(printf "0x%02x" "$((arg + 0))" 2>/dev/null || echo "0x00")
+                ;;
             --length)
-                # :300 → iptables -S shows "0:300"
-                local lval
-                lval=$(echo "$arg" | sed 's/^:/0:/')
-                pat="${pat}.*--length ${lval}" ;;
+                len_pat=$(echo "$arg" | sed 's/^:/0:/')
+                ;;
         esac
         prev="$arg"
     done
-    if [ -n "$pat" ] && iptables -t mangle -S FORWARD 2>/dev/null | grep -qE "$pat"; then
+
+    # Build a pipeline of greps on the -L output.
+    # Each pass narrows down; final check uses DSCP hex which is always stable.
+    local ipt_out
+    ipt_out=$(iptables -t mangle -L FORWARD -n 2>/dev/null)
+
+    # Filter by source if specified
+    [ -n "$src" ] && ipt_out=$(echo "$ipt_out" | grep -F "$src")
+    # Filter by destination if specified
+    [ -n "$dst" ] && ipt_out=$(echo "$ipt_out" | grep -F "$dst")
+    # Filter by protocol if specified
+    [ -n "$proto_pat" ] && ipt_out=$(echo "$ipt_out" | grep -w "$proto_pat")
+    # Filter by length if specified (e.g. 0:300)
+    [ -n "$len_pat" ] && ipt_out=$(echo "$ipt_out" | grep -F "length $len_pat")
+    # Final check: DSCP hex must appear (e.g. "DSCP set 0x00")
+    if [ -n "$dscp_hex" ] && echo "$ipt_out" | grep -qF "DSCP set $dscp_hex"; then
         ok "FORWARD: $desc"
     else
         fail "FORWARD 缺失: $desc"
     fi
 }
+
 
 check_forward_rule "109.x 游戏上传 UDP≤300B → DSCP=1" \
     -p udp -m length --length :300 -s 192.168.109.0/24 -j DSCP --set-dscp 1
