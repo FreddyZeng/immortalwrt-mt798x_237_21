@@ -12,7 +12,7 @@
 #   Q33 (DSCP=33) : 游戏下载 SP EF  — 109.x 子网 UDP≤300B
 #
 # VIP 设备判定（满足任一条件即为 VIP → Q0/Q32）：
-#   ① 静态 u32 规则（FORWARD 链追加到末尾，覆盖 eqos chain）：
+#   ① 静态 u32 规则（FORWARD 链静态规则；显式限速设备有最终覆盖规则）：
 #        条件：-s/-d 192.168.0.0/16（只适用于 192.168.x.x 地址段）
 #             AND 第三段 0x6E-0x77 = 110-119
 #             AND 第四段 0x0A-0x27 = 10-39
@@ -38,6 +38,7 @@
 #
 # 109.x 子网的完整流量路径：
 #   UDP ≤300B → FORWARD 链静态规则 → DSCP=1/33 → Q1/Q33 (SP EF)
+#     （若该 IP 被显式配置为限速设备，最终覆盖规则会改回 Q31/Q63）
 #   其余（TCP / UDP>300B）→ 兜底默认 DSCP=2/34 → Q2/Q34 WRR
 #     （若该设备已配置 eqos add 或 dhcp_mark.sh 处理，则用精确 hash 槽）
 #
@@ -49,7 +50,8 @@
 #   Q31 (DSCP=31) : 限速上传 WRR BE sch2
 #   Q63 (DSCP=63) : 限速下载 WRR BE sch3
 #   触发条件：eqos add 时 dl>0 OR up>0（任一非零均走限速队列）
-#   注意：限速设备强制使用 -I eqos 1（插入 eqos 链头），最优先匹配
+#   注意：限速设备同时使用 eqos 链头规则和 FORWARD 链最终覆盖规则，
+#   即使命中 109 小包或静态 VIP 规则，最后仍进入 Q31/Q63。
 #   限速完全由硬件实现：Q31/Q63 使用 WRR BE 调度器（最低优先级），
 #   拥塞时 VIP/WRR 流量优先发送，限速设备只获得剩余带宽。
 #   无软件 tc HTB，无 IFB 设备，零 CPU 开销。
@@ -76,6 +78,7 @@
 
 dev=br-lan
 rl_max_file="/tmp/rl_max_rates"  # 格式: "<max_dl_kbps> <max_up_kbps>"
+rl_forward_file="/tmp/rl_forward_ips"
 
 # Returns hash slot 2-30 (29 per-user slots)
 generate_index() {
@@ -86,6 +89,9 @@ generate_index() {
     echo $index
 }
 
+log_debug() {
+    logger -p daemon.debug -t eqos "$*" 2>/dev/null || true
+}
 
 stop_qos() {
     tc qdisc del dev $dev root 2>/dev/null
@@ -148,6 +154,51 @@ remove_static_forward_rules() {
         -j DSCP --set-dscp 32 2>/dev/null
 }
 
+delete_ipv4_forward_device_rules() {
+    local ip="$1"
+    local d
+    [ -n "$ip" ] || return 0
+
+    for d in $(seq 0 63); do
+        while iptables -t mangle -D FORWARD -s "$ip" \
+            -j DSCP --set-dscp $d 2>/dev/null; do :; done
+        while iptables -t mangle -D FORWARD -d "$ip" \
+            -j DSCP --set-dscp $d 2>/dev/null; do :; done
+    done
+}
+
+cleanup_ipv4_forward_device_rules() {
+    local ip="$1"
+    [ -n "$ip" ] || return 0
+
+    log_debug "[EQOS-B013-01] cleanup IPv4 FORWARD device override: ip=$ip"
+    delete_ipv4_forward_device_rules "$ip"
+    if [ -f "$rl_forward_file" ]; then
+        grep -vxF "$ip" "$rl_forward_file" > "${rl_forward_file}.tmp" 2>/dev/null || true
+        mv "${rl_forward_file}.tmp" "$rl_forward_file"
+    fi
+}
+
+cleanup_recorded_ipv4_forward_rules() {
+    local ip
+
+    [ -f "$rl_forward_file" ] || return 0
+    log_debug "[EQOS-B013-02] cleanup recorded IPv4 FORWARD overrides: file=$rl_forward_file"
+    while read -r ip; do
+        delete_ipv4_forward_device_rules "$ip"
+    done < "$rl_forward_file"
+    : > "$rl_forward_file"
+}
+
+record_rate_limit_forward_ip() {
+    local ip="$1"
+    [ -n "$ip" ] || return 0
+
+    touch "$rl_forward_file"
+    grep -qxF "$ip" "$rl_forward_file" 2>/dev/null || echo "$ip" >> "$rl_forward_file"
+    log_debug "[EQOS-B013-03] record rate-limit FORWARD override: ip=$ip"
+}
+
 cleanup_ipv6_mac_rules() {
     local mac="$1"
     local d
@@ -176,6 +227,7 @@ iptables_stop() {
     ip6tables -t mangle -D FORWARD -o br-lan -j DSCP --set-dscp 0 2>/dev/null
     echo "10 0" > /sys/kernel/debug/hnat/hnat_setting
     echo "11 30" > /sys/kernel/debug/hnat/hnat_setting
+    cleanup_recorded_ipv4_forward_rules
     for i in $(seq 0 31); do
         echo 0 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq$i
     done
@@ -243,8 +295,10 @@ iptables_start_inital() {
     echo 3 0 0 0 0 4 4 > /sys/kernel/debug/hnat/qdma_txq63
 
     # ── Static rules in FORWARD chain (survives dhcp_mark.sh eqos flush) ──
-    # FORWARD chain order: global-clear → -j eqos → game → VIP
-    # Last matching DSCP rule wins; game/VIP always execute AFTER eqos per-device rules.
+    # FORWARD chain order: global-clear → -j eqos → game → VIP → rate-limit override
+    # Last matching DSCP rule wins. The final per-IP rate-limit override is
+    # installed by 'eqos add' for limited devices so Q31/Q63 remain authoritative.
+    cleanup_recorded_ipv4_forward_rules
     remove_static_forward_rules  # idempotent: remove before re-adding
 
     # 109.x game acceleration: UDP<=300B → Q1(DSCP=1) upload / Q33(DSCP=33) download
@@ -258,7 +312,8 @@ iptables_start_inital() {
     # Static VIP range: 192.168.110-119.10-39 → Q0 upload / Q32 download
     # u32 bitfield: 0xc=src IP, 0x10=dst IP
     # 3rd octet 0x6E-0x77=110-119, 4th octet 0x0A-0x27=10-39
-    # Appended LAST in FORWARD → overrides all per-device DSCP from eqos chain
+    # Appended after eqos/game rules; explicit rate-limit devices get a later
+    # per-IP override so every limited device still lands in Q31/Q63.
     iptables -t mangle -A FORWARD -s 192.168.0.0/16 \
         -m u32 --u32 "0xc&0x0000FF00=0x00006E00:0x00007700" \
         -m u32 --u32 "0xc&0x000000FF=0x0000000A:0x00000027" \
@@ -323,6 +378,7 @@ case "$1" in
             for d in $(seq 32 63); do
                 while iptables -t mangle -D eqos -d "$ip" -j DSCP --set-dscp $d 2>/dev/null; do :; done
             done
+            cleanup_ipv4_forward_device_rules "$ip"
         fi
         cleanup_ipv6_mac_rules "$macaddr"
 
@@ -347,6 +403,10 @@ case "$1" in
             if [ -n "$ip" ]; then
                 iptables -t mangle -I eqos 1 -s "$ip" -j DSCP --set-dscp 31
                 iptables -t mangle -I eqos 1 -d "$ip" -j DSCP --set-dscp 63
+                iptables -t mangle -A FORWARD -s "$ip" -j DSCP --set-dscp 31
+                iptables -t mangle -A FORWARD -d "$ip" -j DSCP --set-dscp 63
+                record_rate_limit_forward_ip "$ip"
+                log_debug "[EQOS-B013-04] install rate-limit final override: ip=$ip dl=${dl:-0} up=${up:-0} upload_qid=31 download_qid=63"
             fi
 
             # 更新 Q31/Q63 硬件 max_rate（取历史最大值）

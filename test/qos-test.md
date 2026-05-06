@@ -39,6 +39,7 @@
 - DHCP 自动 WRR 只能分配 `2-30`，下载映射只能为 `34-62`；超过 29 个设备时共享普通 WRR 槽位，禁止使用 `31/63`。
 - `dhcp_mark.sh` 必须同时按 IP 和 MAC 跳过 UCI 中显式配置的 VIP/限速设备，避免覆盖 `eqos add` 管理的规则。
 - `eqos add` 在状态切换前必须清理同一 MAC 的所有 IPv6 WRR/限速旧规则，再安装新状态规则。
+- 显式限速设备必须拥有精确 IP 的 FORWARD 最终覆盖规则，保证即使命中 109 小包或静态 VIP 规则，最终仍进入 `Q31/Q63`；状态切换和 stop/start 必须清理旧覆盖规则。
 - MAC-only 设备必须用 MAC 作为 WRR hash key，IPv4 DSCP 规则必须在 IP 非空时才安装。
 - HNAT 允许上传和下载出口 DSCP 重标记为 EF/AF41/BE，但 `mtk_hnat_dscp_update()` 在 HQOS 模式下必须比较队列 qid 是否变化，不能把合法出口重标记误判为原始 skb TOS 变化。
 

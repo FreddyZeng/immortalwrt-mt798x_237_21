@@ -16,7 +16,7 @@
 # └──────┴──────────────────────────────────────────────┘
 #
 # VIP 设备的判定方式（两种，任一满足即为 VIP）：
-#   ① 静态 IP 范围（FORWARD 链 u32 规则，最终覆盖）：
+#   ① 静态 IP 范围（FORWARD 链 u32 规则，限速设备有最终覆盖规则）：
 #        192.168.11x.10-39（第三段 110-119，第四段 10-39）
 #        第四段 10-39 = VIP，即 .10-.39 → Q0/Q32
 #        第四段  1-9  = WRR 普通流量（不在 VIP 范围）
@@ -48,11 +48,13 @@
 # │ 纯硬件实现：Q31/Q63 的 max_rate shaper 设置为       │
 # │   所有限速设备中 up/dl 的最大值（kbps）。           │
 # │ 状态文件：/tmp/rl_max_rates "<max_dl> <max_up>"     │
+# │          /tmp/rl_forward_ips 记录 FORWARD 覆盖 IP   │
 # │ 无 tc HTB，无 IFB，零 CPU 开销。                    │
 # └─────────────────────────────────────────────────────┘
 #
 # 109.x 子网游戏加速（FORWARD 链静态规则）：
 #   UDP ≤300B 的小包（游戏心跳/实时帧）→ Q1/Q33 SP EF
+#   显式限速设备会被后续精确 IP 规则最终覆盖回 Q31/Q63
 #   其余 109.x 流量（TCP、大 UDP）→ WRR 普通槽 Q2-30/Q34-62
 #
 # ═══════════════════════════════════════════════════════
@@ -206,7 +208,7 @@ done
 
 SMART_ENABLED=$(uci -q get eqos.config.smarthqos 2>/dev/null)
 if [ "${SMART_ENABLED:-0}" = "1" ]; then
-    info "smarthqos=ON：dhcp_mark.sh 为每个 DHCP 设备调用 eqos add，HNAT 条目应分布在 Q2-30/Q34-62"
+    info "smarthqos=ON：dhcp_mark.sh 为 DHCP 普通设备直接安装 DSCP/MAC mark 规则，HNAT 条目应分布在 Q2-30/Q34-62"
 else
     info "smarthqos=OFF：无 per-device HNAT 条目，但队列调度器已正确初始化"
 fi
@@ -238,6 +240,35 @@ check_forward_rule "静态VIP 下载 u32 → DSCP=32" \
     -m u32 --u32 "0x10&0x0000FF00=0x00006E00:0x00007700" \
     -m u32 --u32 "0x10&0x000000FF=0x0000000A:0x00000027" \
     -j DSCP --set-dscp 32
+
+RL_FORWARD_COUNT=0
+check_rate_limit_forward_override() {
+    local cfg="$1"
+    local ip dl up
+
+    config_get ip "$cfg" ip
+    config_get dl "$cfg" download 0
+    config_get up "$cfg" upload 0
+    [ -n "$ip" ] || return 0
+    [ "${dl:-0}" -ne 0 ] || [ "${up:-0}" -ne 0 ] || return 0
+
+    RL_FORWARD_COUNT=$((RL_FORWARD_COUNT + 1))
+    check_forward_rule "限速最终覆盖 上传 ${ip} → DSCP=31" \
+        -s "$ip" -j DSCP --set-dscp 31
+    check_forward_rule "限速最终覆盖 下载 ${ip} → DSCP=63" \
+        -d "$ip" -j DSCP --set-dscp 63
+}
+
+if [ -r /lib/functions.sh ]; then
+    . /lib/functions.sh
+    config_load eqos
+    config_foreach check_rate_limit_forward_override device
+    [ "$RL_FORWARD_COUNT" -gt 0 ] \
+        && ok "限速设备 FORWARD 最终覆盖规则已检查：${RL_FORWARD_COUNT} 个设备" \
+        || info "未配置限速设备，跳过 FORWARD 最终覆盖检查"
+else
+    info "/lib/functions.sh 不存在，跳过限速设备 FORWARD 最终覆盖检查"
+fi
 
 # ─────────────────────────────────────────────────────
 sep

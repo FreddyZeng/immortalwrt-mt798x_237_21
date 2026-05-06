@@ -47,6 +47,18 @@ contains 'for d in $(seq 34 63); do' "$EQOS" \
     "IPv6 download cleanup must cover WRR and rate-limit marks"
 contains 'cleanup_ipv6_mac_rules "$macaddr"' "$EQOS" \
     "eqos add must cleanup old IPv6 MAC state before installing a new state"
+contains 'rl_forward_file="/tmp/rl_forward_ips"' "$EQOS" \
+    "eqos must track rate-limit FORWARD override IPs for start/stop cleanup"
+contains 'cleanup_recorded_ipv4_forward_rules' "$EQOS" \
+    "eqos start/stop must remove stale rate-limit FORWARD overrides"
+contains 'cleanup_ipv4_forward_device_rules "$ip"' "$EQOS" \
+    "eqos state transitions must cleanup exact IPv4 FORWARD override rules"
+contains 'iptables -t mangle -A FORWARD -s "$ip" -j DSCP --set-dscp 31' "$EQOS" \
+    "rate-limited upload must get final FORWARD override after static game/VIP rules"
+contains 'iptables -t mangle -A FORWARD -d "$ip" -j DSCP --set-dscp 63' "$EQOS" \
+    "rate-limited download must get final FORWARD override after static game/VIP rules"
+contains '[EQOS-B013-04] install rate-limit final override' "$EQOS" \
+    "rate-limit final override must have traceable diagnostic logging"
 contains 'hash_key="${ip:-$macaddr}"' "$EQOS" \
     "MAC-only devices must use MAC as deterministic WRR hash key"
 contains 'eqos add: skip device without ip/mac' "$EQOS" \
@@ -69,5 +81,11 @@ contains '不会占用 Q31/Q63' "$VERIFY_QOS" \
     "verification script must document that DHCP overflow never uses rate-limit queues"
 contains 'awk '\''$2==1 || $2>=31'\''' "$VERIFY_QOS" \
     "verification script must fail any DHCP mark that enters Q1/Q31+"
+contains '限速最终覆盖 上传 ${ip} → DSCP=31' "$VERIFY_QOS" \
+    "verification script must check final rate-limit upload override rules"
+contains '限速最终覆盖 下载 ${ip} → DSCP=63' "$VERIFY_QOS" \
+    "verification script must check final rate-limit download override rules"
+absent 'dhcp_mark.sh 为每个 DHCP 设备调用 eqos add' "$VERIFY_QOS" \
+    "verification text must not claim dhcp_mark calls eqos add"
 
 echo "PASS: QoS regression checks"
