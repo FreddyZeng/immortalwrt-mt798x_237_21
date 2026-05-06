@@ -4,8 +4,8 @@
 > 格式参考: smart-commit SKILL.md §5.3
 
 <!-- 下一个 FID 编号: F-002 -->
-<!-- 下一个 BID 编号: B-013 -->
-<!-- 下一个 CID 编号: C-FQOS01-10 -->
+<!-- 下一个 BID 编号: B-016 -->
+<!-- 下一个 CID 编号: C-FQOS01-13 -->
 
 ---
 
@@ -29,6 +29,9 @@
   | C-FQOS01-07 | pending | - | 2026-05-03 | Fix wide-baseline QoS audit regressions: single-owner IPv6 chain lifecycle, remove software tc legacy MARK writes, delete shipped eqos_origin backup script | ✅ 已完成 |
   | C-FQOS01-08 | pending | - | 2026-05-03 | Fix wide-baseline build hygiene regressions: remove Kconfig inline value comments and make pre-install ipk script fail-safe | ✅ 已完成 |
   | C-FQOS01-09 | pending | - | 2026-05-03 | Fix multi-WAN interface lifecycle triggers to cover configured interfaces and wan..wan8 fallback | ✅ 已完成 |
+  | C-FQOS01-10 | pending | - | 2026-05-06 | 确定性 DSCP 架构终态：纯 DSCP 标记（不用 CONNMARK 做 QoS）；eqos add 三路分支（VIP/限速/WRR）；Branch 2 FORWARD 最终覆盖规则 Q31/Q63 防游戏/VIP 旁路；/tmp/rl_forward_ips 幂等清理；smarthqos Q2-30 shaper | ✅ 已完成 |
+  | C-FQOS01-11 | pending | - | 2026-05-06 | TProxy/SSR Plus bit 0x8000 全链路保护：loadbalance+eqos add PREROUTING 规则添加 TPROXY_MARK_GUARD；DHCP hotplug cmp -s 幂等安装；IPv6 fallback mark 移至 config_foreach 之后；iface trigger 仅处理配置接口 | ✅ 已完成 |
+  | C-FQOS01-12 | pending | - | 2026-05-06 | loadbalance grep 前缀匹配修复→ip route show default dev；iptables -D 静默 2>/dev/null；qos-test.md loadbalance sh→bash 修正；B-015 Bug 文档补充 | ✅ 已完成 |
 - Bugs:
   | BID | 描述 | 引入者 | 修复者 | 状态 |
   |-----|------|--------|--------|------|
@@ -44,5 +47,8 @@
 	  | B-010 | IPv6 链顺序被 init.d 二次管理破坏、Software tc 旧 MARK 污染 HNAT、eqos_origin 被安装 | C-FQOS01-06 | C-FQOS01-07 | 已修复 |
 	  | B-011 | Kconfig 行内注释可能导致依赖失效，预安装脚本失败后删除 ipk 现场 | C-FQOS01-07 | C-FQOS01-08 | 已修复 |
 	  | B-012 | 多 WAN 接口 up trigger 只覆盖 wan1-3，wan4-8 或自定义接口恢复不触发重建 | C-FQOS01-08 | C-FQOS01-09 | 已修复 |
+  | B-013 | 限速设备在命中游戏/VIP 高优先规则后 DSCP=31/63 最终覆盖缺失，Q31/Q63 限速器被旁路 | C-FQOS01-09 | C-FQOS01-10 | 已修复 |
+  | B-014 | TProxy/SSR Plus bit 0x8000 冲突、DHCP hotplug 非幂等安装、IPv6 fallback 位置错误、接口触发不过滤 | C-FQOS01-09 | C-FQOS01-11 | 已修复 |
+  | B-015 | loadbalance grep $var 前缀匹配：pppoe-wan 误匹配 pppoe-wan2，路由表 200 使用错误网关 | 初始版本 | C-FQOS01-12 | 已修复 |
 
 <!-- 新增 Feature 在此下方添加 -->

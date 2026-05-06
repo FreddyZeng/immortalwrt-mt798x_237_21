@@ -121,3 +121,42 @@
 - **PRD 同步**: ✅ PRD/qos-hardening.md
 - **方案同步**: ✅ design/qos-architecture.md
 - **测试同步**: ✅ test/qos-regression.sh, test/qos-test.md
+
+## [2026-05-06] C-FQOS01-10 | commit: pending
+
+- **FID**: F-QOS01
+- **BID**: B-013
+- **CID**: C-FQOS01-10
+- **类型**: fix, feat, test
+- **范围**: luci-app-eqos-mtk eqos sbin, init.d, dhcp_mark.sh, tests, docs
+- **描述**: 确定性 DSCP 架构终态 — 将 QoS 标记从 CONNMARK 全面迁移到纯 DSCP，实现 eqos add 三路分支（VIP Q0/Q32、限速 Q31/Q63、WRR Q2-30/Q34-62）；Branch 2 在 FORWARD 链末尾追加 DSCP=31/63 最终覆盖规则防止游戏/VIP 规则旁路；/tmp/rl_forward_ips 幂等清理；smarthqos Q2-30 per-queue shaper 配置。
+- **改动文件**: root/usr/sbin/eqos, root/etc/init.d/eqos, root/etc/init.d/dhcp_mark.sh, test/qos-regression.sh, bugs/B-013.md, task/CHANGE_INDEX.md, task/TASK_LOG.md
+- **PRD 同步**: ✅ 架构描述更新为纯 DSCP
+- **方案同步**: ✅ design/qos-architecture.md
+- **测试同步**: ✅ test/qos-regression.sh §8
+
+## [2026-05-06] C-FQOS01-11 | commit: pending
+
+- **FID**: F-QOS01
+- **BID**: B-014
+- **CID**: C-FQOS01-11
+- **类型**: fix, security, test
+- **范围**: luci-app-eqos-mtk loadbalance, eqos sbin, init.d, tests, docs
+- **描述**: TProxy/SSR Plus bit 0x8000 全链路保护 — loadbalance 和 eqos add 所有 PREROUTING NEW mark 规则添加 `-m mark ! --mark 0x8000/0x8000`；DHCP hotplug 使用 `cmp -s` 幂等安装避免 dnsmasq 竞争；IPv6 fallback `--mark 0` 规则移至 `config_foreach` 之后追加（避免 `-F eqos` 清除）；iface hotplug 仅对配置接口触发 eqos start。
+- **改动文件**: root/usr/sbin/loadbalance, root/usr/sbin/eqos, root/etc/init.d/eqos, test/qos-regression.sh, bugs/B-014.md, task/CHANGE_INDEX.md, task/TASK_LOG.md
+- **PRD 同步**: ✅ TProxy 兼容性约束章节
+- **方案同步**: ✅ design/qos-architecture.md
+- **测试同步**: ✅ test/qos-regression.sh §9
+
+## [2026-05-06] C-FQOS01-12 | commit: pending
+
+- **FID**: F-QOS01
+- **BID**: B-015
+- **CID**: C-FQOS01-12
+- **类型**: fix, test
+- **范围**: luci-app-eqos-mtk loadbalance, test/qos-test.md, bugs
+- **描述**: loadbalance grep 前缀匹配 Bug 修复 — 将 `ip route show | grep default | grep $var` 改为 `ip route show default dev $var`，防止 pppoe-wan 误匹配 pppoe-wan2；所有 iptables -D 操作补充 2>/dev/null；qos-test.md 中三处 loadbalance 语法检查改为 bash -n/bash（脚本使用 bash 数组和 let，不兼容 sh）；创建 B-015 Bug 文档；CHANGE_INDEX 补全 C-FQOS01-10/11/12 和 B-013/14/15 条目。
+- **改动文件**: root/usr/sbin/loadbalance, test/qos-test.md, test/qos-regression.sh, bugs/B-015.md, task/CHANGE_INDEX.md, task/TASK_LOG.md
+- **PRD 同步**: ✅ N/A（loadbalance 实现细节）
+- **方案同步**: ✅ N/A
+- **测试同步**: ✅ test/qos-regression.sh — `absent 'grep default | grep $var'` 断言

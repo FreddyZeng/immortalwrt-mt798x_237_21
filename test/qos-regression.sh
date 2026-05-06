@@ -68,6 +68,10 @@ contains '[EQOS-B014-11] rebuild loadbalance rules' "$LOADBALANCE" \
     "loadbalance rebuild must have traceable diagnostic logging"
 contains '[EQOS-B014-12] rebuild loadbalance rules done' "$LOADBALANCE" \
     "loadbalance rebuild completion must have traceable diagnostic logging"
+contains 'ip route show default dev $var' "$LOADBALANCE" \
+    "loadbalance must use exact dev-specific route lookup to avoid pppoe-wan prefix-matching pppoe-wan2"
+absent 'grep default | grep $var' "$LOADBALANCE" \
+    "loadbalance must not use grep substring match for interface routes (prefix collision bug)"
 
 contains 'hash_mac' "$DHCP_MARK" \
     "DHCP ordinary WRR mark allocation must stay in hash range Q2-Q30"
