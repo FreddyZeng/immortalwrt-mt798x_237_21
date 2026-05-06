@@ -24,13 +24,6 @@ load_mapping() {
     cat "$MARK_FILE"
 }
 
-# 检查mark是否被占用
-is_mark_in_use() {
-    MARK=$1
-    grep -q " $MARK$" "$MARK_FILE"
-    return $?
-}
-
 # 分配普通 WRR mark (范围 MIN_MARK-MAX_MARK = 2-30)
 # 超过 29 个 DHCP 设备时允许共享普通槽位，不能占用 Q31/Q63 限速队列。
 allocate_mark() {
