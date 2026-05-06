@@ -1095,15 +1095,22 @@ static void mtk_hnat_tproxy_connmark_check_v4(struct sk_buff *skb,
 	struct nf_conn *ct;
 	struct foe_entry *entry;
 
-	if (!is_magic_tag_valid(skb) || !skb_hnat_is_hashed(skb))
+	if (!is_magic_tag_valid(skb) || !skb_hnat_is_hashed(skb)) {
+		pr_debug("[HNAT-CMK-1] skip: magic_valid=%d hashed=%d\n",
+			 is_magic_tag_valid(skb), skb_hnat_is_hashed(skb));
 		return;
+	}
 
 	iph = ip_hdr(skb);
-	if (iph->protocol != IPPROTO_UDP)
+	if (iph->protocol != IPPROTO_UDP) {
+		pr_debug("[HNAT-CMK-2] skip: proto=%u (not UDP)\n", iph->protocol);
 		return;
+	}
 
-	if (!skb_transport_header_was_set(skb))
+	if (!skb_transport_header_was_set(skb)) {
+		pr_debug("[HNAT-CMK-3] skip: transport header not set\n");
 		return;
+	}
 
 	uh = udp_hdr(skb);
 
@@ -1116,15 +1123,25 @@ static void mtk_hnat_tproxy_connmark_check_v4(struct sk_buff *skb,
 	tuple.src.u.udp.port = uh->source;
 	tuple.dst.u.udp.port = uh->dest;
 
+	pr_debug("[HNAT-CMK-4] find_get src=%pI4:%u -> dst=%pI4:%u foe_idx=%u\n",
+		 &tuple.src.u3.ip, ntohs(tuple.src.u.udp.port),
+		 &tuple.dst.u3.ip, ntohs(tuple.dst.u.udp.port),
+		 skb_hnat_entry(skb));
+
 	/*
 	 * nf_conntrack_find_get() searches the global conntrack hash table.
 	 * It takes a reference; we must call nf_ct_put() when done.
 	 */
 	h = nf_conntrack_find_get(state->net, &nf_ct_zone_dflt, &tuple);
-	if (!h)
+	if (!h) {
+		pr_debug("[HNAT-CMK-5] find_get=NULL: first packet, no ct yet\n");
 		return; /* first packet: no ct entry yet */
+	}
 
 	ct = nf_ct_tuplehash_to_ctrack(h);
+	pr_debug("[HNAT-CMK-6] ct=%p mark=0x%x bit15=%d\n",
+		 ct, READ_ONCE(ct->mark), !!(READ_ONCE(ct->mark) & 0x8000));
+
 	if (READ_ONCE(ct->mark) & 0x8000) {
 		/*
 		 * Established tproxy flow: zero the UNBIND FOE entry right now,
@@ -1132,13 +1149,17 @@ static void mtk_hnat_tproxy_connmark_check_v4(struct sk_buff *skb,
 		 * This closes the ASIC-observable window to zero.
 		 */
 		entry = &hnat_priv->foe_table_cpu[skb_hnat_ppe(skb)][skb_hnat_entry(skb)];
-		pr_debug("[HNAT-tproxy] INT_MIN+1 UDP foe idx=%u zeroed via connmark\n",
-			 skb_hnat_entry(skb));
+		pr_debug("[HNAT-CMK-7] ZEROING foe idx=%u state=%u (tproxy connmark hit)\n",
+			 skb_hnat_entry(skb), entry_hnat_state(entry));
 		memset(entry, 0, sizeof(struct foe_entry));
 		hnat_cache_ebl(1);
+		pr_debug("[HNAT-CMK-8] FOE zeroed and cache flushed OK\n");
+	} else {
+		pr_debug("[HNAT-CMK-7] ct mark 0x8000 NOT set, no action\n");
 	}
 
 	nf_ct_put(ct); /* release reference taken by nf_conntrack_find_get */
+	pr_debug("[HNAT-CMK-9] done, ct ref released\n");
 }
 
 static unsigned int
@@ -1973,42 +1994,90 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 		 * fqos==1 guards LAN→WAN direction only (FROM_EXT packets
 		 * already set fqos=0, so WAN→LAN downloads are never touched).
 		 *
-		 * qid  0-1  : VIP / game UDP≤300B → EF   (DSCP 46, 0xB8)
-		 * qid  2-30 : per-user hash       → AF41  (DSCP 34, 0x88)
-		 * qid  31   : rate-limited        → BE    (DSCP  0, 0x00)
-		 *
-		 * iblk2.qid  = hardware scheduling queue (unchanged)
-		 * iblk2.dscp = TOS byte written by HW into the outgoing packet
+		 * qid  0    : VIP device (all proto)        → EF   (DSCP 46, 0xB8)
+		 * qid  1    : 109 UDP≤300B gaming           → EF   (DSCP 46, 0xB8)
+		 * qid  2-30 : per-user hash WRR             → AF41 (DSCP 34, 0x88)
+		 * qid  31   : rate-limited device           → BE   (DSCP  0, 0x00)
 		 */
 		if (IS_HQOS_MODE && hnat_priv->dscp_en &&
 		    entry.ipv4_hnapt.iblk2.fqos) {
-			if (qid == 0 || qid == 1)
-				entry.ipv4_hnapt.iblk2.dscp = 0xB8; /* EF   = 46<<2 */
-			else if (qid >= 2 && qid <= 30)
+			__be32 _sip = htonl(foe->ipv4_hnapt.sip);
+			__be32 _dip = htonl(foe->ipv4_hnapt.dip);
+			if (qid == 0) {
+				entry.ipv4_hnapt.iblk2.dscp = 0xB8; /* EF = 46<<2 */
+				pr_debug("[HNAT-WAN-UP] VIP-Q0 src=%pI4 dst=%pI4 proto=%u "
+					 "mark=0x%x→EF(0xB8) foe=%u\n",
+					 &_sip, &_dip, foe->ipv4_hnapt.prot,
+					 skb->mark, skb_hnat_entry(skb));
+			} else if (qid == 1) {
+				entry.ipv4_hnapt.iblk2.dscp = 0xB8; /* EF = 46<<2 */
+				pr_debug("[HNAT-WAN-UP] 109-UDP-VIP-Q1 src=%pI4 dst=%pI4 "
+					 "mark=0x%x→EF(0xB8) foe=%u\n",
+					 &_sip, &_dip,
+					 skb->mark, skb_hnat_entry(skb));
+			} else if (qid >= 2 && qid <= 30) {
 				entry.ipv4_hnapt.iblk2.dscp = 0x88; /* AF41 = 34<<2 */
-			else if (qid == 31)
-				entry.ipv4_hnapt.iblk2.dscp = 0x00; /* BE   = 0     */
+				pr_debug("[HNAT-WAN-UP] USER-WRR-Q%u src=%pI4 dst=%pI4 "
+					 "mark=0x%x→AF41(0x88) foe=%u\n",
+					 qid, &_sip, &_dip,
+					 skb->mark, skb_hnat_entry(skb));
+			} else if (qid == 31) {
+				entry.ipv4_hnapt.iblk2.dscp = 0x00; /* BE = 0 */
+				pr_debug("[HNAT-WAN-UP] RATE-LIM-Q31 src=%pI4 dst=%pI4 "
+					 "mark=0x%x→BE(0x00) foe=%u\n",
+					 &_sip, &_dip,
+					 skb->mark, skb_hnat_entry(skb));
+			} else {
+				pr_debug("[HNAT-WAN-UP] UNKNOWN-Q%u src=%pI4 dst=%pI4 "
+					 "mark=0x%x no-DSCP foe=%u\n",
+					 qid, &_sip, &_dip,
+					 skb->mark, skb_hnat_entry(skb));
+			}
 		}
 
 		/* [LAN-EGRESS-MARK] LAN egress DSCP re-marking for download.
 		 * Applies when qid is in the download range (32-63), meaning
 		 * the device was managed by eqos and got a proper download qid.
-		 * Overrides whatever DSCP the internet server originally set,
-		 * giving consistent, predictable marking to LAN clients and
-		 * DSCP-aware WiFi APs (DSCP→WMM mapping).
 		 *
-		 * qid  32-33 : VIP / game download → EF   (DSCP 46, 0xB8)
-		 * qid  34-62 : per-user download   → AF41  (DSCP 34, 0x88)
-		 * qid  63    : rate-limited dl     → BE    (DSCP  0, 0x00)
+		 * qid  32   : VIP device download           → EF   (DSCP 46, 0xB8)
+		 * qid  33   : 109 UDP≤300B gaming download  → EF   (DSCP 46, 0xB8)
+		 * qid  34-62: per-user hash WRR download    → AF41 (DSCP 34, 0x88)
+		 * qid  63   : rate-limited device download  → BE   (DSCP  0, 0x00)
 		 */
 		if (IS_HQOS_MODE && hnat_priv->dscp_en &&
 		    qid >= 32 && qid <= 63) {
-			if (qid == 32 || qid == 33)
-				entry.ipv4_hnapt.iblk2.dscp = 0xB8; /* EF   = 46<<2 */
-			else if (qid >= 34 && qid <= 62)
+			__be32 _sip = htonl(foe->ipv4_hnapt.sip);
+			__be32 _dip = htonl(foe->ipv4_hnapt.dip);
+			if (qid == 32) {
+				entry.ipv4_hnapt.iblk2.dscp = 0xB8; /* EF = 46<<2 */
+				pr_debug("[HNAT-LAN-DN] VIP-Q32 src=%pI4 dst=%pI4 "
+					 "mark=0x%x→EF(0xB8) foe=%u\n",
+					 &_sip, &_dip,
+					 skb->mark, skb_hnat_entry(skb));
+			} else if (qid == 33) {
+				entry.ipv4_hnapt.iblk2.dscp = 0xB8; /* EF = 46<<2 */
+				pr_debug("[HNAT-LAN-DN] 109-UDP-VIP-Q33 src=%pI4 dst=%pI4 "
+					 "mark=0x%x→EF(0xB8) foe=%u\n",
+					 &_sip, &_dip,
+					 skb->mark, skb_hnat_entry(skb));
+			} else if (qid >= 34 && qid <= 62) {
 				entry.ipv4_hnapt.iblk2.dscp = 0x88; /* AF41 = 34<<2 */
-			else if (qid == 63)
-				entry.ipv4_hnapt.iblk2.dscp = 0x00; /* BE   = 0     */
+				pr_debug("[HNAT-LAN-DN] USER-WRR-Q%u src=%pI4 dst=%pI4 "
+					 "mark=0x%x→AF41(0x88) foe=%u\n",
+					 qid, &_sip, &_dip,
+					 skb->mark, skb_hnat_entry(skb));
+			} else if (qid == 63) {
+				entry.ipv4_hnapt.iblk2.dscp = 0x00; /* BE = 0 */
+				pr_debug("[HNAT-LAN-DN] RATE-LIM-Q63 src=%pI4 dst=%pI4 "
+					 "mark=0x%x→BE(0x00) foe=%u\n",
+					 &_sip, &_dip,
+					 skb->mark, skb_hnat_entry(skb));
+			} else {
+				pr_debug("[HNAT-LAN-DN] UNKNOWN-Q%u src=%pI4 dst=%pI4 "
+					 "mark=0x%x no-DSCP foe=%u\n",
+					 qid, &_sip, &_dip,
+					 skb->mark, skb_hnat_entry(skb));
+			}
 		}
 	} else {
 		entry.ipv6_5t_route.iblk2.dp = gmac;
@@ -2043,6 +2112,32 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 					 (IS_DSA_1G_LAN(dev) || IS_DSA_WAN(dev))));
 		} else {
 			entry.ipv6_5t_route.iblk2.fqos = 0;
+		}
+
+		/* [IPv6 QID log] Log which queue this IPv6 flow is assigned to.
+		 * qid comes from skb->mark set by eqos/iptables before this hook.
+		 * IPv6 default    : Q2  (upload) / Q34 (download)
+		 * IPv6 rate-limit : Q31 (upload) / Q63 (download)
+		 * fqos=0 means WAN→LAN download or external packet.
+		 */
+		if (IS_HQOS_MODE && hnat_priv->dscp_en && qos_toggle) {
+			u8 _fqos = entry.ipv6_5t_route.iblk2.fqos;
+			if (qid == 2) {
+				pr_debug("[HNAT-V6-UP] DEFAULT-Q2 mark=0x%x fqos=%u foe=%u\n",
+					 skb->mark, _fqos, skb_hnat_entry(skb));
+			} else if (qid == 31) {
+				pr_debug("[HNAT-V6-UP] RATE-LIM-Q31 mark=0x%x fqos=%u foe=%u\n",
+					 skb->mark, _fqos, skb_hnat_entry(skb));
+			} else if (qid == 34) {
+				pr_debug("[HNAT-V6-DN] DEFAULT-Q34 mark=0x%x fqos=%u foe=%u\n",
+					 skb->mark, _fqos, skb_hnat_entry(skb));
+			} else if (qid == 63) {
+				pr_debug("[HNAT-V6-DN] RATE-LIM-Q63 mark=0x%x fqos=%u foe=%u\n",
+					 skb->mark, _fqos, skb_hnat_entry(skb));
+			} else {
+				pr_debug("[HNAT-V6] Q%u mark=0x%x fqos=%u foe=%u\n",
+					 qid, skb->mark, _fqos, skb_hnat_entry(skb));
+			}
 		}
 	}
 
@@ -2395,10 +2490,17 @@ static bool hnat_hqos_ipv4_queue_matches(struct sk_buff *skb,
 	 * Fast-return true when tos==0: entry_qid must also be 0 (DSCP=0 only
 	 * maps to Q0), so the result is always "match" — no false invalidation.
 	 */
-	if (!iph->tos)
+	if (!iph->tos) {
+		pr_debug("[HNAT-QM] tos=0 VIP-Q0 fast-match: entry_qid=%u foe_idx=%u\n",
+			 entry_qid, skb_hnat_entry(skb));
 		return true;
+	}
 
 	skb_qid = (iph->tos >> 2) & MTK_QDMA_TX_MASK;
+	pr_debug("[HNAT-QM] tos=0x%02x skb_qid=%u entry_qid=%u %s foe_idx=%u\n",
+		 iph->tos, skb_qid, entry_qid,
+		 (entry_qid == skb_qid) ? "MATCH" : "MISMATCH-evict",
+		 skb_hnat_entry(skb));
 	return entry_qid == skb_qid;
 }
 
@@ -2425,9 +2527,15 @@ static void mtk_hnat_dscp_update(struct sk_buff *skb, struct foe_entry *entry)
 				 * (gaming, DNS, etc.) reach BIND normally and are
 				 * hardware-accelerated with correct QID assignment.
 				 */
-				if (!hnat_hqos_ipv4_queue_matches(skb, entry, iph))
+				if (!hnat_hqos_ipv4_queue_matches(skb, entry, iph)) {
+					pr_debug("[HNAT-DSCP-V4] QID mismatch→evict foe_idx=%u tos=0x%02x\n",
+						 skb_hnat_entry(skb), iph->tos);
 					flag = true;
+				}
 			} else if (entry->ipv4_hnapt.iblk2.dscp != iph->tos) {
+				pr_debug("[HNAT-DSCP-V4] DSCP mismatch→evict foe_idx=%u entry_dscp=0x%02x iph_tos=0x%02x\n",
+					 skb_hnat_entry(skb),
+					 entry->ipv4_hnapt.iblk2.dscp, iph->tos);
 				flag = true;
 			}
 		}
@@ -2436,8 +2544,13 @@ static void mtk_hnat_dscp_update(struct sk_buff *skb, struct foe_entry *entry)
 		ip6h = ipv6_hdr(skb);
 		if ((IS_IPV6_3T_ROUTE(entry) || IS_IPV6_5T_ROUTE(entry)) &&
 			(entry->ipv6_5t_route.iblk2.dscp !=
-			(ip6h->priority << 4 | (ip6h->flow_lbl[0] >> 4))))
+			(ip6h->priority << 4 | (ip6h->flow_lbl[0] >> 4)))) {
+			pr_debug("[HNAT-DSCP-V6] DSCP mismatch→evict foe_idx=%u entry_dscp=0x%02x ip6_dscp=0x%02x\n",
+				 skb_hnat_entry(skb),
+				 entry->ipv6_5t_route.iblk2.dscp,
+				 (ip6h->priority << 4 | (ip6h->flow_lbl[0] >> 4)));
 			flag = true;
+		}
 		break;
 	default:
 		return;
@@ -2803,16 +2916,24 @@ static unsigned int mtk_hnat_tproxy_protection_v4(
 	struct iphdr *iph;
 
 	/* Only act on packets that HNAT has already tagged */
-	if (!is_magic_tag_valid(skb) || !skb_hnat_is_hashed(skb))
+	if (!is_magic_tag_valid(skb) || !skb_hnat_is_hashed(skb)) {
+		pr_debug("[HNAT-TPX-1] skip: magic_valid=%d hashed=%d\n",
+			 is_magic_tag_valid(skb), skb_hnat_is_hashed(skb));
 		return NF_ACCEPT;
+	}
 
 	/* Only care about IPv4 UDP with tproxy mark (bit 15 set) */
 	iph = ip_hdr(skb);
-	if (iph->protocol != IPPROTO_UDP)
+	if (iph->protocol != IPPROTO_UDP) {
+		pr_debug("[HNAT-TPX-2] skip: proto=%u (not UDP)\n", iph->protocol);
 		return NF_ACCEPT;
+	}
 
-	if (!(skb->mark & 0x8000))
+	if (!(skb->mark & 0x8000)) {
+		pr_debug("[HNAT-TPX-3] skip: mark=0x%x (bit15 not set, not tproxy)\n",
+			 skb->mark);
 		return NF_ACCEPT;
+	}
 
 	/* tproxy has intercepted this UDP flow: unconditionally zero the FOE
 	 * entry regardless of its current state (UNBIND or BIND).
@@ -2825,10 +2946,12 @@ static unsigned int mtk_hnat_tproxy_protection_v4(
 	 *   hardware cannot keep offloading tproxy-intercepted flows.
 	 */
 	entry = &hnat_priv->foe_table_cpu[skb_hnat_ppe(skb)][skb_hnat_entry(skb)];
-	pr_debug("[HNAT-tproxy] UDP foe idx=%u state=%u zeroed (mark=0x%x)\n",
+	pr_debug("[HNAT-TPX-4] TPROXY hit: src=%pI4 dst=%pI4 foe_idx=%u state=%u mark=0x%x\n",
+		 &iph->saddr, &iph->daddr,
 		 skb_hnat_entry(skb), entry_hnat_state(entry), skb->mark);
 	memset(entry, 0, sizeof(struct foe_entry));
 	hnat_cache_ebl(1);
+	pr_debug("[HNAT-TPX-5] FOE zeroed and cache flushed OK\n");
 
 	/*
 	 * Persist the tproxy status in conntrack mark so that the
@@ -2841,10 +2964,16 @@ static unsigned int mtk_hnat_tproxy_protection_v4(
 		enum ip_conntrack_info ctinfo;
 		struct nf_conn *ct = nf_ct_get(skb, &ctinfo);
 
-		if (ct)
+		if (ct) {
 			WRITE_ONCE(ct->mark, ct->mark | 0x8000);
+			pr_debug("[HNAT-TPX-6] ct=%p mark written: 0x%x -> 0x%x\n",
+				 ct, ct->mark & ~0x8000u, READ_ONCE(ct->mark));
+		} else {
+			pr_debug("[HNAT-TPX-6] ct=NULL (first packet), connmark not set\n");
+		}
 	}
 
+	pr_debug("[HNAT-TPX-7] done, returning NF_ACCEPT\n");
 	return NF_ACCEPT;
 }
 
