@@ -1118,7 +1118,7 @@ static void mtk_hnat_tproxy_connmark_check_v4(struct sk_buff *skb,
 		 * before any concurrent packet can observe the UNBIND state.
 		 * This closes the ASIC-observable window to zero.
 		 */
-		entry = &hnat_priv->foe_table_cpu[skb_hnat_entry(skb)];
+		entry = &hnat_priv->foe_table_cpu[skb_hnat_ppe(skb)][skb_hnat_entry(skb)];
 		pr_debug("[HNAT-tproxy] INT_MIN+1 UDP foe idx=%u zeroed via connmark\n",
 			 skb_hnat_entry(skb));
 		memset(entry, 0, sizeof(struct foe_entry));
@@ -2798,9 +2798,9 @@ static unsigned int mtk_hnat_tproxy_protection_v4(
 	 *   and tproxy never sees them again.  Zeroing always guarantees the
 	 *   hardware cannot keep offloading tproxy-intercepted flows.
 	 */
-	entry = &hnat_priv->foe_table_cpu[skb_hnat_entry(skb)];
+	entry = &hnat_priv->foe_table_cpu[skb_hnat_ppe(skb)][skb_hnat_entry(skb)];
 	pr_debug("[HNAT-tproxy] UDP foe idx=%u state=%u zeroed (mark=0x%x)\n",
-		 skb_hnat_entry(skb), entry_state(entry), skb->mark);
+		 skb_hnat_entry(skb), entry_hnat_state(entry), skb->mark);
 	memset(entry, 0, sizeof(struct foe_entry));
 	hnat_cache_ebl(1);
 
