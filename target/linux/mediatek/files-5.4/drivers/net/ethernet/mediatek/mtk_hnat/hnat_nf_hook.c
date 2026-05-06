@@ -1119,28 +1119,21 @@ static void mtk_hnat_tproxy_connmark_check_v4(struct sk_buff *skb,
 	/*
 	 * nf_conntrack_find_get() searches the global conntrack hash table.
 	 * It takes a reference; we must call nf_ct_put() when done.
-	 * [HNAT-B014-①] hash lookup: src=%pI4:%u dst=%pI4:%u
 	 */
-	pr_debug("[HNAT-B014-①] tproxy find_get src=%pI4:%u dst=%pI4:%u\n",
-		 &tuple.src.u3.ip, ntohs(tuple.src.u.udp.port),
-		 &tuple.dst.u3.ip, ntohs(tuple.dst.u.udp.port));
-
 	h = nf_conntrack_find_get(state->net, &nf_ct_zone_dflt, &tuple);
-	if (!h) {
-		pr_debug("[HNAT-B014-②] tproxy find_get: no ct, first packet\n");
-		return;
-	}
+	if (!h)
+		return; /* first packet: no ct entry yet */
 
 	ct = nf_ct_tuplehash_to_ctrack(h);
 	if (READ_ONCE(ct->mark) & 0x8000) {
 		/*
-		 * Established tproxy flow: zero the FOE UNBIND entry now so
-		 * the HNAT ASIC never sees the UNBIND state.
-		 * [HNAT-B014-③] connmark 0x8000 hit, zeroing FOE idx=%u
+		 * Established tproxy flow: zero the UNBIND FOE entry right now,
+		 * before any concurrent packet can observe the UNBIND state.
+		 * This closes the ASIC-observable window to zero.
 		 */
 		entry = &hnat_priv->foe_table_cpu[skb_hnat_ppe(skb)][skb_hnat_entry(skb)];
-		pr_debug("[HNAT-B014-③] tproxy UDP foe idx=%u zeroed, ct=%p mark=0x%x\n",
-			 skb_hnat_entry(skb), ct, READ_ONCE(ct->mark));
+		pr_debug("[HNAT-tproxy] INT_MIN+1 UDP foe idx=%u zeroed via connmark\n",
+			 skb_hnat_entry(skb));
 		memset(entry, 0, sizeof(struct foe_entry));
 		hnat_cache_ebl(1);
 	}
