@@ -22,9 +22,9 @@ array=(${interface//,/ })
         iptables -t mangle -D PREROUTING -i br-lan $TPROXY_MARK_GUARD -m connmark --mark 2"$i" -j MARK --set-mark 2"$i"
         iptables -t mangle -A PREROUTING -i br-lan $TPROXY_MARK_GUARD -m conntrack --ctstate NEW -m statistic --mode nth --every $PPP_NUM --packet $i -j CONNMARK --set-mark 2"$i"
         iptables -t mangle -A PREROUTING -i br-lan $TPROXY_MARK_GUARD -m connmark --mark 2"$i" -j MARK --set-mark 2"$i"
-        ip rule del table 2"$i"0
+        ip rule del fwmark 2"$i" table 2"$i"0 2>/dev/null
         ip rule add fwmark 2"$i" table 2"$i"0
-        ip route del default table 2"$i"0
+        ip route del default table 2"$i"0 2>/dev/null
         ip route add default via $ipaddr dev $var table 2"$i"0
         let i=i+1
         done
