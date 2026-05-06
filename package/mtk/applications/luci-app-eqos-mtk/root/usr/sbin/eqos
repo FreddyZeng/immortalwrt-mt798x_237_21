@@ -148,6 +148,21 @@ remove_static_forward_rules() {
         -j DSCP --set-dscp 32 2>/dev/null
 }
 
+cleanup_ipv6_mac_rules() {
+    local mac="$1"
+    local d
+    [ -n "$mac" ] || return 0
+
+    for d in $(seq 2 31); do
+        while ip6tables -t mangle -D eqos -m mac --mac-source "$mac" \
+            -j MARK --set-mark $d 2>/dev/null; do :; done
+    done
+    for d in $(seq 34 63); do
+        while ebtables -t nat -D eqos -p ipv6 -d "$mac" \
+            -j mark --mark-set $d 2>/dev/null; do :; done
+    done
+}
+
 iptables_stop() {
     iptables  -t mangle -D FORWARD -j eqos 2>/dev/null
     ip6tables -t mangle -D FORWARD -j eqos 2>/dev/null
@@ -286,9 +301,14 @@ case "$1" in
         interface="$7"
 
         # Pre-compute deterministic WRR slot for this IP.
-        # generate_index is pure-hash (no file state), so the same IP always
-        # maps to the same slot. Used for cross-state cleanup below.
-        wrr_id=$(generate_index "$ip")
+        # generate_index is pure-hash (no file state), so the same device key
+        # maps to the same ordinary slot. MAC-only IPv6 hosts use MAC as key.
+        hash_key="${ip:-$macaddr}"
+        if [ -z "$hash_key" ]; then
+            echo "eqos add: skip device without ip/mac" >&2
+            exit 1
+        fi
+        wrr_id=$(generate_index "$hash_key")
         wrr_dl=$((wrr_id + 32))
 
         # ── Unified cleanup: remove ALL possible previous DSCP rules for $ip ──
@@ -296,20 +316,25 @@ case "$1" in
         # and dhcp_mark.sh smarthqos range (1-31 upload, 33-63 download).
         # Exhaustive loop guarantees no stale rule survives a state transition.
         d=
-        for d in $(seq 0 31); do
-            iptables -t mangle -D eqos -s "$ip" -j DSCP --set-dscp $d 2>/dev/null
-        done
-        for d in $(seq 32 63); do
-            iptables -t mangle -D eqos -d "$ip" -j DSCP --set-dscp $d 2>/dev/null
-        done
+        if [ -n "$ip" ]; then
+            for d in $(seq 0 31); do
+                while iptables -t mangle -D eqos -s "$ip" -j DSCP --set-dscp $d 2>/dev/null; do :; done
+            done
+            for d in $(seq 32 63); do
+                while iptables -t mangle -D eqos -d "$ip" -j DSCP --set-dscp $d 2>/dev/null; do :; done
+            done
+        fi
+        cleanup_ipv6_mac_rules "$macaddr"
 
         if [ "$comment" = "64" ] || [ "$comment" = "vip" ]; then
             # ── Branch 1: VIP → Q0 upload (SP EF) / Q32 download (SP EF) ──
             # Upload DSCP=0 at chain head overrides any smarthqos WRR rule.
             # Static u32 at chain-end also sets 0 for the static range (11x.10-39);
             # this explicit rule covers dynamically-promoted DHCP devices (40-254).
-            iptables -t mangle -I eqos 1 -s "$ip" -j DSCP --set-dscp 0
-            iptables -t mangle -I eqos 1 -d "$ip" -j DSCP --set-dscp 32
+            if [ -n "$ip" ]; then
+                iptables -t mangle -I eqos 1 -s "$ip" -j DSCP --set-dscp 0
+                iptables -t mangle -I eqos 1 -d "$ip" -j DSCP --set-dscp 32
+            fi
 
         elif [ "${up:-0}" -ne 0 ] || [ "${dl:-0}" -ne 0 ]; then
             # ── Branch 2: Rate-limited → Q31 upload / Q63 download (WRR BE) ──
@@ -319,20 +344,18 @@ case "$1" in
             #      取所有限速设备中 up 的最大值配置 Q31 的硬件 max_rate shaper。
             #      效果：所有限速设备共享 Q31/Q63，总带宽上限 = 配置中的最大值，
             #      同时 WRR BE 确保拥塞时让位给 VIP 和普通 WRR 流量。
-            iptables -t mangle -I eqos 1 -s "$ip" -j DSCP --set-dscp 31
-            iptables -t mangle -I eqos 1 -d "$ip" -j DSCP --set-dscp 63
+            if [ -n "$ip" ]; then
+                iptables -t mangle -I eqos 1 -s "$ip" -j DSCP --set-dscp 31
+                iptables -t mangle -I eqos 1 -d "$ip" -j DSCP --set-dscp 63
+            fi
 
             # 更新 Q31/Q63 硬件 max_rate（取历史最大值）
             update_rl_hw_rate "${dl:-0}" "${up:-0}"
 
             # IPv6 MAC-based marking → Q31 upload / Q63 download
             if [ -n "$macaddr" ]; then
-                ip6tables -t mangle -D eqos -m mac --mac-source "$macaddr" \
-                    -j MARK --set-mark 31 2>/dev/null
                 ip6tables -t mangle -I eqos 1 -m mac --mac-source "$macaddr" \
                     -j MARK --set-mark 31
-                ebtables -t nat -D eqos -p ipv6 -d "$macaddr" \
-                    -j mark --mark-set 63 2>/dev/null
                 ebtables -t nat -A eqos -p ipv6 -d "$macaddr" \
                     -j mark --mark-set 63
             fi
@@ -344,17 +367,15 @@ case "$1" in
             # auto-assign path if dhcp_mark.sh calls eqos add with rates=0.
             # Deterministic hash: same IP always maps to same slot (2-30 range).
             # Static VIP u32 at chain-end still overrides for 11x.10-39 range.
-            iptables -t mangle -I eqos 1 -s "$ip" -j DSCP --set-dscp "$wrr_id"
-            iptables -t mangle -I eqos 1 -d "$ip" -j DSCP --set-dscp "$wrr_dl"
+            if [ -n "$ip" ]; then
+                iptables -t mangle -I eqos 1 -s "$ip" -j DSCP --set-dscp "$wrr_id"
+                iptables -t mangle -I eqos 1 -d "$ip" -j DSCP --set-dscp "$wrr_dl"
+            fi
 
             # IPv6 MAC-based marking
             if [ -n "$macaddr" ]; then
-                ip6tables -t mangle -D eqos -m mac --mac-source "$macaddr" \
-                    -j MARK --set-mark "$wrr_id" 2>/dev/null
                 ip6tables -t mangle -I eqos 1 -m mac --mac-source "$macaddr" \
                     -j MARK --set-mark "$wrr_id"
-                ebtables -t nat -D eqos -p ipv6 -d "$macaddr" \
-                    -j mark --mark-set "$wrr_dl" 2>/dev/null
                 ebtables -t nat -A eqos -p ipv6 -d "$macaddr" \
                     -j mark --mark-set "$wrr_dl"
             fi

@@ -2271,6 +2271,34 @@ static unsigned int mtk_hnat_accel_type(struct sk_buff *skb)
 	return 1;
 }
 
+static u32 hnat_hqos_ipv4_qid(struct foe_entry *entry)
+{
+#if defined(CONFIG_MEDIATEK_NETSYS_V2)
+	return entry->ipv4_hnapt.iblk2.qid & MTK_QDMA_TX_MASK;
+#else
+	if (hnat_priv->data->version == MTK_HNAT_V1)
+		return entry->ipv4_hnapt.iblk2.qid & 0xf;
+
+	return (entry->ipv4_hnapt.iblk2.qid & 0xf) |
+	       ((entry->ipv4_hnapt.iblk2.port_mg & 0x3) << 4);
+#endif
+}
+
+static bool hnat_hqos_ipv4_queue_matches(struct sk_buff *skb,
+					 struct foe_entry *entry,
+					 const struct iphdr *iph)
+{
+	u32 entry_qid = hnat_hqos_ipv4_qid(entry);
+	u32 skb_qid;
+
+	if (iph->tos)
+		skb_qid = (iph->tos >> 2) & MTK_QDMA_TX_MASK;
+	else
+		skb_qid = skb->mark & MTK_QDMA_TX_MASK;
+
+	return entry_qid == skb_qid;
+}
+
 static void mtk_hnat_dscp_update(struct sk_buff *skb, struct foe_entry *entry)
 {
 	struct iphdr *iph;
@@ -2282,8 +2310,14 @@ static void mtk_hnat_dscp_update(struct sk_buff *skb, struct foe_entry *entry)
 	switch (ntohs(eth->h_proto)) {
 	case ETH_P_IP:
 		iph = ip_hdr(skb);
-		if (IS_IPV4_GRP(entry) && entry->ipv4_hnapt.iblk2.dscp != iph->tos)
-			flag = true;
+		if (IS_IPV4_GRP(entry)) {
+			if (IS_HQOS_MODE && hnat_priv->dscp_en) {
+				if (!hnat_hqos_ipv4_queue_matches(skb, entry, iph))
+					flag = true;
+			} else if (entry->ipv4_hnapt.iblk2.dscp != iph->tos) {
+				flag = true;
+			}
+		}
 		break;
 	case ETH_P_IPV6:
 		ip6h = ipv6_hdr(skb);

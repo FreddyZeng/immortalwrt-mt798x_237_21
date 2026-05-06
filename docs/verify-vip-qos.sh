@@ -560,7 +560,7 @@ if [ -f "$MARK_FILE" ]; then
     if [ "$TOTAL_MAP" -gt 29 ]; then
         OVERFLOW=$((TOTAL_MAP - 29))
         info "dhcp_mark 设备超过 29 个（共 ${TOTAL_MAP} 条），多出 ${OVERFLOW} 条映射。"
-        info "注：dhcp_mark 哈希可能存在碌撞（>29 设备共享取模 29 个槽位），监控 HNAT Q2-30 分布确认是否均匀。"
+        info "注：dhcp_mark 哈希会复用普通 WRR 槽位（>29 设备共享取模 29 个槽位），不会占用 Q31/Q63。"
     fi
 else
     info "dhcp_mark 映射文件不存在（smarthqos=OFF 或尚未初始化）"

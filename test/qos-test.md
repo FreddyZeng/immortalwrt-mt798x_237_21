@@ -34,6 +34,14 @@
 - `init.d/eqos` 的 `service_triggers()` 必须读取 `eqos.config.interface` 并循环注册 trigger，不能只硬编码 `wan/wan2/wan3`。
 - 未配置接口列表时必须有 `wan..wan8` 兜底；sqm trigger 必须有 `/etc/init.d/sqm` 可执行检查。
 
+## 8. 新队列布局回归测试
+<!-- CID: C-FQOS01-10 | BID: B-013 | commit: pending | 日期: 2026-05-06 -->
+- DHCP 自动 WRR 只能分配 `2-30`，下载映射只能为 `34-62`；超过 29 个设备时共享普通 WRR 槽位，禁止使用 `31/63`。
+- `dhcp_mark.sh` 必须同时按 IP 和 MAC 跳过 UCI 中显式配置的 VIP/限速设备，避免覆盖 `eqos add` 管理的规则。
+- `eqos add` 在状态切换前必须清理同一 MAC 的所有 IPv6 WRR/限速旧规则，再安装新状态规则。
+- MAC-only 设备必须用 MAC 作为 WRR hash key，IPv4 DSCP 规则必须在 IP 非空时才安装。
+- HNAT 允许上传和下载出口 DSCP 重标记为 EF/AF41/BE，但 `mtk_hnat_dscp_update()` 在 HQOS 模式下必须比较队列 qid 是否变化，不能把合法出口重标记误判为原始 skb TOS 变化。
+
 ## 3. CONNMARK 首包还原测试
 <!-- CID: C-FQOS01-05 | BID: B-008 | commit: pending | 日期: 2026-05-02 -->
 - `eqos_apply` 的 `CONNMARK --restore-mark` 必须覆盖 `NEW,ESTABLISHED,RELATED` 三态。

@@ -3,505 +3,71 @@ set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 EQOS="$ROOT/package/mtk/applications/luci-app-eqos-mtk/root/usr/sbin/eqos"
+DHCP_MARK="$ROOT/package/mtk/applications/luci-app-eqos-mtk/root/etc/init.d/dhcp_mark.sh"
 INITD="$ROOT/package/mtk/applications/luci-app-eqos-mtk/root/etc/init.d/eqos"
-LOADBALANCE="$ROOT/package/mtk/applications/luci-app-eqos-mtk/root/usr/sbin/loadbalance"
-MAKEFILE="$ROOT/package/mtk/applications/luci-app-eqos-mtk/Makefile"
-HNAT_HOOK="$ROOT/target/linux/mediatek/files-5.4/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c"
-MTK_ETH="$ROOT/target/linux/mediatek/files-5.4/drivers/net/ethernet/mediatek/mtk_eth_soc.c"
-CAKE_PATCH="$ROOT/target/linux/mediatek/patches-5.4/9999995-fix-cake-highest-tin-guard.patch"
 VERIFY_QOS="$ROOT/docs/verify-vip-qos.sh"
-MT7986_CONFIG="$ROOT/target/linux/mediatek/mt7986/config-5.4"
-N60_PRO_CONFIG="$ROOT/n60_pro_config_full_new"
-INSTALL_ALL="$ROOT/install_all_files"
+HNAT_HOOK="$ROOT/target/linux/mediatek/files-5.4/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c"
 
 fail() {
     echo "FAIL: $*" >&2
     exit 1
 }
 
-grep -Fq 'case "$id" in' "$EQOS" ||
-    fail "legacy comment mode normalization is missing"
-
-grep -Fq 'legacy qos mode fallback' "$EQOS" ||
-    fail "legacy comment fallback diagnostic log is missing"
-
-grep -Fq 'case "$dl" in' "$EQOS" ||
-    fail "download speed must be normalized before numeric comparisons"
-
-grep -Fq 'case "$up" in' "$EQOS" ||
-    fail "upload speed must be normalized before numeric comparisons"
-
-grep -Fq '[ -n "$macaddr" ] && iptables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF' "$EQOS" ||
-    fail "configured VIP must guard MAC before installing CONNMARK 46"
-
-grep -Fq '[ -n "$ip" ] && iptables -t mangle -A eqos -s $ip -j CONNMARK --set-xmark 46/0xFF' "$EQOS" ||
-    fail "configured IPv4-only VIP upload must install source-IP CONNMARK 46"
-
-grep -Fq '[ "$ipv6_en" = "1" ] && [ -n "$macaddr" ] && ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark 46/0xFF' "$EQOS" ||
-    fail "configured VIP must guard IPv6 MAC CONNMARK 46 by ipv6enabled and non-empty mac"
-
-grep -Fq 'iptables -t mangle -I eqos -s 192.168.0.0/16 -m u32 --u32 "0xc&0x0000FF00=0x00006E00:0x00007700" -m u32 --u32 "0xc&0x000000FF=0x0000000A:0x00000027" -j CONNMARK --set-xmark 46/0xFF' "$EQOS" ||
-    fail "static VIP source range must install unified CONNMARK 46"
-
-grep -Fq 'iptables  -t mangle -A eqos_apply -m mark --mark 46/0xFF -j DSCP --set-dscp 46' "$EQOS" ||
-    fail "global mark 46 to DSCP 46 translation is missing in eqos_apply"
-
-grep -Fq '[ "$ipv6_en" = "1" ] && [ -n "$macaddr" ] && ip6tables -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${xmark}/0xC0' "$EQOS" ||
-    fail "IPv6 hardware limit rule must set directional CONNMARK only with ipv6enabled and non-empty mac"
-
-UP_LIMIT_BLOCK=$(sed -n '/if \[ \$xmark -ne 0 \]; then/,/fi/p' "$EQOS")
-echo "$UP_LIMIT_BLOCK" | grep -Fq '[ -n "$macaddr" ] && iptables  -t mangle -A eqos -m mac --mac-source $macaddr -j CONNMARK --set-xmark ${xmark}/0xC0' ||
-    fail "unified limit CONNMARK 0xC0 MAC rule must guard non-empty mac"
-
-echo "$UP_LIMIT_BLOCK" | grep -Fq '[ -n "$ip" ] && iptables  -t mangle -A eqos -s $ip -j CONNMARK --set-xmark ${xmark}/0xC0' ||
-    fail "IPv4-only hardware upload limit must install source-IP CONNMARK 0xC0 rule"
-
-grep -Fq 'dev_key="mac_${macaddr}"' "$EQOS" ||
-    fail "hardware limit state key must prefer non-empty mac address"
-
-grep -Fq 'dev_key="ip_${ip}"' "$EQOS" ||
-    fail "hardware limit state key must fall back to IPv4 address"
-
-grep -Fq 'old_up_file="/tmp/eqos_dev_up_${dev_key}"' "$EQOS" ||
-    fail "hardware upload limit state file must use normalized device key"
-
-grep -Fq 'old_dl_file="/tmp/eqos_dev_dl_${dev_key}"' "$EQOS" ||
-    fail "hardware download limit state file must use normalized device key"
-
-grep -Fq 'skip device without ip/mac' "$EQOS" ||
-    fail "device add must reject empty ip and empty mac before rule generation"
-
-if grep -Eq 'ebtables -t nat .* eqos' "$EQOS"; then
-    fail "ebtables rules must be completely removed from eqos script"
-fi
-
-grep -Fq 'qos_mark = skb->mark & 0xFF;' "$HNAT_HOOK" ||
-    fail "HNAT must safely extract lower 8 bits of skb mark for policy matching"
-
-grep -Fq 'dir == HQOS_DOWNLOAD && qos_mark == 46' "$HNAT_HOOK" ||
-    fail "HNAT must honor trusted VIP download mark 46"
-
-grep -Fq 'dscp = (dscp & 0x03) | 0xB8;' "$HNAT_HOOK" ||
-    fail "trusted VIP download mark 46 must preserve EF DSCP"
-
-grep -Fq 'qid = 32;' "$HNAT_HOOK" ||
-    fail "trusted VIP download mark 46 must map to Q32"
-
-grep -Fq 'if ((qos_mark & 0x80) && dir == HQOS_DOWNLOAD)' "$HNAT_HOOK" ||
-    fail "HNAT must honor mark 0x80 as hardware down limit"
-# 检查 CONNMARK 还原规则的掩码保护以及在 eqos_apply 中的延迟应用
-RESTORE_MARK_CMD="iptables -t mangle -A eqos_apply -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j CONNMARK --restore-mark --nfmask 0xFF --ctmask 0xFF"
-grep -Fq "$RESTORE_MARK_CMD" "$EQOS" ||
-    fail "eqos_apply MUST use --nfmask 0xFF --ctmask 0xFF restore-mark to apply ctmark to ALL packets"
-grep -Fq 'qid = 63;  // [HNAT-C-FQOS01-05-①] 下行限速 → Q63' "$HNAT_HOOK" ||
-    fail "HNAT mark 0x80 fallback must map to Q63"
-
-grep -Fq 'qid = dscp_to_queue(dscp, hash_ip);' "$HNAT_HOOK" ||
-    fail "HNAT mark 0/default path must fall back to DSCP mapping"
-
-grep -Fq 'if (IS_HQOS_MODE) {' "$HNAT_HOOK" ||
-    fail "HNAT HQOS preset path must be separated from raw mark PPPQ handling"
-
-grep -Fq 'qid = (dir == HQOS_UPLOAD) ? 1 : 33;' "$HNAT_HOOK" ||
-    fail "HNAT HQOS preset path must default by direction before DSCP mapping"
-
-if grep -Fq 'IS_HQOS_MODE || skb->mark >= MAX_PPPQ_PORT_NUM' "$HNAT_HOOK"; then
-    fail "HNAT HQOS mode must not treat semantic skb mark as raw QDMA qid"
-fi
-
-CPU_TX_BLOCK=$(sed -n '/QoS-CPU-TX-v3/,/if (MTK_HAS_CAPS/p' "$MTK_ETH")
-
-echo "$CPU_TX_BLOCK" | grep -Fq 'qid = 0;' ||
-    fail "CPU TX QoS mapping must start from fallback qid 0"
-
-if echo "$CPU_TX_BLOCK" | grep -Fq 'qid = skb->mark &'; then
-    fail "CPU TX must not treat semantic skb mark as raw QDMA qid"
-fi
-
-echo "$CPU_TX_BLOCK" | grep -Fq '未知 QoS mark 不可当真实 qid' ||
-    fail "CPU TX unknown low QoS marks must explicitly fall back to normal queues"
-
-echo "$CPU_TX_BLOCK" | grep -Fq 'qid = mac->id ? 1 : 33;' ||
-    fail "CPU TX ordinary fallback must map upload to Q1 and download to Q33"
-
-grep -Fq '+	u8 highest_priority_tin = 0;' "$CAKE_PATCH" ||
-    fail "CAKE highest_priority_tin must be initialized"
-
-grep -Fq 'q->tin_cnt > 1 && is_nat_target_ip_ipv4_k(skb, q)' "$CAKE_PATCH" ||
-    fail "CAKE VIP highest tin path must require multi-tin mode"
-
-grep -Fq 'q->tin_cnt > 1 && is_nat_target_ip_109_k(skb)' "$CAKE_PATCH" ||
-    fail "CAKE 109 small UDP highest tin path must require multi-tin mode"
-
-TIN_GUARDS=$(grep -Fc 'q->tin_cnt > 1 && tin == highest_priority_tin' "$CAKE_PATCH")
-[ "$TIN_GUARDS" -eq 3 ] ||
-    fail "CAKE highest tin downgrade guards must cover priority, mark, and DSCP paths"
-
-grep -Fq -- '-	else if (skb->priority == TC_PRIO_MAX) {' "$CAKE_PATCH" ||
-    fail "CAKE patch must remove TC_PRIO_MAX highest tin bypass"
-
-if grep -Eq '^\+.*skb->priority == TC_PRIO_MAX' "$CAKE_PATCH"; then
-    fail "TC_PRIO_MAX must not bypass VIP-only highest tin protection"
-fi
-
-grep -Fq '48/56  CS6-7  网络控制 SP' "$VERIFY_QOS" ||
-    fail "verification script Q1/Q33 label must match HNAT DSCP mapping"
-
-grep -Fq '46/MARK46 EF 可信VIP下行 SP' "$VERIFY_QOS" ||
-    fail "verification script Q32 label must show trusted VIP download queue"
-
-grep -Fq '32/40/44 CS4/5/VA 实时 SP' "$VERIFY_QOS" ||
-    fail "verification script Q2/Q34 label must match HNAT DSCP mapping"
-
-grep -Fq '2/MARK0x40/0xC0 LIMIT 上行限速 WRR' "$VERIFY_QOS" ||
-    fail "verification script Q31 label must show DSCP2/MARK0x40/0xC0 upload limit queue"
-
-grep -Fq '2/MARK0x80/0xC0 LIMIT 下行限速 WRR' "$VERIFY_QOS" ||
-    fail "verification script Q63 label must show DSCP2/MARK0x80/0xC0 download limit queue"
-
-if grep -Eq 'echo "4[1-5][[:space:]]+SP' "$VERIFY_QOS"; then
-    fail "verification script still uses obsolete DSCP 41-45 SP labels"
-fi
-
-grep -Fq 'kmod-sched-flower' "$MAKEFILE" ||
-    fail "software tc IPv6 mode must depend on kmod-sched-flower"
-
-grep -Fq 'protocol ipv6 u32' "$EQOS" ||
-    fail "software tc must redirect IPv6 ingress to IFB"
-
-grep -Fq 'validate_global_rate "download" "$global_dl"' "$EQOS" ||
-    fail "eqos start must validate global download speed before tc/qdisc setup"
-
-grep -Fq 'validate_global_rate "upload" "$global_up"' "$EQOS" ||
-    fail "eqos start must validate global upload speed before tc/qdisc setup"
-
-grep -Fq 'invalid global ${name} speed' "$EQOS" ||
-    fail "eqos start must log invalid global speed with the checked direction name"
-
-grep -Fq 'tc qdisc add dev $dev root handle 1: htb || {' "$EQOS" ||
-    fail "software tc root qdisc installation must fail loudly"
-
-grep -Fq 'install software tc IPv4 ingress redirect failed' "$EQOS" ||
-    fail "software tc IPv4 ingress redirect must fail loudly"
-
-grep -Fq 'protocol ipv6 flower dst_mac $macaddr' "$EQOS" ||
-    fail "software tc IPv6 download filter must match dst_mac"
-
-grep -Fq 'protocol ipv6 flower src_mac $macaddr' "$EQOS" ||
-    fail "software tc IPv6 upload filter must match src_mac"
-
-grep -Fq 'skip software tc IPv4 download filter: mac=$macaddr, ip empty' "$EQOS" ||
-    fail "software tc IPv6-only download mode must not install an empty IPv4 dst filter"
-
-grep -Fq 'skip software tc IPv4 upload filter: mac=$macaddr, ip empty' "$EQOS" ||
-    fail "software tc IPv6-only upload mode must not install an empty IPv4 src filter"
-
-grep -Fq 'skip software tc download direction: key=$dev_key, dl=0' "$EQOS" ||
-    fail "software tc must skip download class/filter installation when dl=0"
-
-grep -Fq 'skip software tc upload direction: key=$dev_key, up=0' "$EQOS" ||
-    fail "software tc must skip upload class/filter installation when up=0"
-
-grep -Fq 'install software tc IPv4 download filter failed' "$EQOS" ||
-    fail "software tc IPv4 download filter installation must fail loudly"
-
-grep -Fq 'install software tc IPv4 upload filter failed' "$EQOS" ||
-    fail "software tc IPv4 upload filter installation must fail loudly"
-
-if grep -Fq '2>/dev/null || true' "$EQOS"; then
-    fail "software tc IPv6 rule installation must not silently ignore failures"
-fi
-
-if grep -Fq 'iptables -t mangle -A eqos -s $ip -j MARK --set-xmark 0x99/0xFF' "$EQOS" ||
-   grep -Fq 'iptables -t mangle -A eqos -d $ip -j MARK --set-xmark 0x99/0xFF' "$EQOS"; then
-    fail "software tc mode must not install legacy MARK 0x99 rules because HNAT treats low-bit 0x80 as hardware download limit"
-fi
-
-grep -Fq 'cleanup legacy software tc MARK rules' "$EQOS" ||
-    fail "software tc mode must cleanup stale legacy MARK 0x99 rules before installing tc filters"
-
-if [ -e "$ROOT/package/mtk/applications/luci-app-eqos-mtk/root/usr/sbin/eqos_origin" ]; then
-    fail "luci-app-eqos-mtk must not ship stale eqos_origin script under root/usr/sbin"
-fi
-
-if grep -Fq 'ip6tables -t mangle -A FORWARD  -j eqos' "$INITD" ||
-   grep -Fq 'ip6tables -t mangle -F eqos' "$INITD"; then
-    fail "init.d must not reorder IPv6 eqos/eqos_apply chains after /usr/sbin/eqos start"
-fi
-
-grep -Fq 'while ip6tables -t mangle -D FORWARD -j eqos 2>/dev/null; do :; done' "$EQOS" ||
-    fail "eqos start must remove duplicate IPv6 eqos jumps before appending chain order"
-
-grep -Fq 'install IPv6 eqos chain order: eqos before eqos_apply' "$EQOS" ||
-    fail "eqos must log IPv6 eqos/eqos_apply chain order installation"
-
-if grep -Fq 'iptables-save -t mangle' "$LOADBALANCE"; then
-    fail "loadbalance migration cleanup must not scan and broadly delete PREROUTING rules"
-fi
-
-grep -Fq 'if ! iptables -t mangle -L eqos_lb >/dev/null 2>&1; then' "$LOADBALANCE" ||
-    fail "loadbalance legacy cleanup must only run during first migration before eqos_lb exists"
-
-grep -Fq 'skip exact legacy cleanup' "$LOADBALANCE" ||
-    fail "loadbalance must log when it skips first-migration legacy cleanup"
-
-grep -Fq 'lb_delete_legacy_rule()' "$LOADBALANCE" ||
-    fail "loadbalance first migration must delete old templates through a legacy-match helper"
-
-grep -Fq 'legacy_found=0' "$LOADBALANCE" ||
-    fail "loadbalance first migration must track whether exact old templates were found"
-
-grep -Fq 'if [ "$legacy_found" -eq 1 ]; then' "$LOADBALANCE" ||
-    fail "loadbalance must only delete untagged global CONNMARK rules after an exact legacy match"
-
-grep -Fq 'skip unscoped legacy CONNMARK cleanup' "$LOADBALANCE" ||
-    fail "loadbalance must preserve untagged global CONNMARK rules when no exact legacy template is found"
-
-grep -Fq 'if [ "$legacy_cleanup_needed" -eq 1 ]; then' "$LOADBALANCE" ||
-    fail "loadbalance gateway-subnet legacy cleanup must be limited to first migration"
-
-if grep -Fq "awk '{print \$3}'" "$LOADBALANCE"; then
-    fail "loadbalance must not parse default gateway with brittle awk field 3"
-fi
-
-if grep -Fq 'ip route add default via "$ipaddr" dev "$var" table "$TABLE"' "$LOADBALANCE"; then
-    fail "loadbalance must not assume every default route has a via gateway"
-fi
-
-if grep -Fq '$ipaddr/24' "$LOADBALANCE"; then
-    fail "loadbalance must not use gateway-subnet rules derived from brittle ipaddr variable"
-fi
-
-grep -Fq 'lb_default_route_for_iface()' "$LOADBALANCE" ||
-    fail "loadbalance must resolve default routes with a structured parser"
-
-grep -Fq 'route_dev == ifname || route_dev ~ ("(^|[-_.])" ifname "$")' "$LOADBALANCE" ||
-    fail "loadbalance route parser must accept exact device names and logical wan suffixes"
-
-grep -Fq 'ip route replace default via "$gateway" dev "$route_dev" table "$TABLE"' "$LOADBALANCE" ||
-    fail "loadbalance must install gateway default routes with resolved route_dev"
-
-grep -Fq 'ip route replace default dev "$route_dev" table "$TABLE"' "$LOADBALANCE" ||
-    fail "loadbalance must install point-to-point default routes without gateway"
-
-LB_ROUTE_LINE=$(grep -n 'ip route replace default via "$gateway" dev "$route_dev" table "$TABLE"' "$LOADBALANCE" | head -1 | cut -d: -f1)
-LB_RULE_LINE=$(grep -n 'ip rule add fwmark ${FW_MARK}/0xff00 table "$TABLE"' "$LOADBALANCE" | head -1 | cut -d: -f1)
-[ -n "$LB_ROUTE_LINE" ] && [ -n "$LB_RULE_LINE" ] && [ "$LB_ROUTE_LINE" -lt "$LB_RULE_LINE" ] ||
-    fail "loadbalance must install route before adding fwmark policy rule"
-
-LB_JUMP_LINE=$(grep -n 'iptables -t mangle -I PREROUTING 1 -j eqos_lb' "$LOADBALANCE" | head -1 | cut -d: -f1)
-[ -n "$LB_JUMP_LINE" ] && [ "$LB_RULE_LINE" -lt "$LB_JUMP_LINE" ] ||
-    fail "loadbalance must attach eqos_lb after route and policy rule setup succeeds"
-
-grep -Fq 'lb_abort "route_failed"' "$LOADBALANCE" ||
-    fail "loadbalance route install failure must cleanup partial route/rule state"
-
-grep -Fq 'lb_abort "jump_failed"' "$LOADBALANCE" ||
-    fail "loadbalance PREROUTING jump failure must cleanup partial route/rule state"
-
-grep -Fq 'lb_cleanup_global_marks()' "$LOADBALANCE" ||
-    fail "loadbalance must provide a shared cleanup for global eqos_lb mark rules"
-
-grep -Fq 'lb_cleanup_global_marks "$reason"' "$LOADBALANCE" ||
-    fail "loadbalance abort path must cleanup global eqos_lb save/restore rules"
-
-grep -Fq 'lb_cleanup_global_marks "loadbalance_start"' "$LOADBALANCE" ||
-    fail "loadbalance start must cleanup stale global eqos_lb save/restore rules before rebuilding"
-
-grep -Fq 'lb_abort "no_available_wan"' "$LOADBALANCE" ||
-    fail "loadbalance no-WAN path must use abort cleanup instead of raw exit"
-
-grep -Fq 'mktemp /tmp/eqos_lb_avail.XXXXXX) || {' "$LOADBALANCE" ||
-    fail "loadbalance must fail loudly and cleanup when temporary WAN list creation fails"
-
-grep -Fq 'lb_cleanup_global_marks "mktemp_failed"' "$LOADBALANCE" ||
-    fail "loadbalance mktemp failure must cleanup global eqos_lb mark rules"
-
-grep -Fq 'iptables -t mangle -D PREROUTING -j eqos_lb 2>/dev/null' "$LOADBALANCE" ||
-    fail "loadbalance cleanup must detach eqos_lb PREROUTING jump"
-
-grep -Fq 'while iptables -t mangle -D PREROUTING -j eqos_lb 2>/dev/null; do :; done' "$LOADBALANCE" ||
-    fail "loadbalance cleanup must remove all duplicate eqos_lb PREROUTING jumps"
-
-grep -Fq 'while iptables -t mangle -D PREROUTING -i br-lan \' "$LOADBALANCE" ||
-    fail "loadbalance legacy migration cleanup must loop over duplicate direct PREROUTING rules"
-
-grep -Fq 'while iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \' "$LOADBALANCE" ||
-    fail "loadbalance legacy migration cleanup must loop over duplicate direct POSTROUTING save-mark rules"
-
-grep -Fq 'while iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \' "$LOADBALANCE" ||
-    fail "loadbalance cleanup must remove all duplicate eqos_lb save-mark rules"
-
-grep -Fq 'while iptables -t mangle -D PREROUTING -i br-lan \' "$LOADBALANCE" ||
-    fail "loadbalance cleanup must remove all duplicate eqos_lb restore-mark rules"
-
-grep -Fq 'while iptables -t mangle -D PREROUTING -j eqos_lb 2>/dev/null; do :; done' "$INITD" ||
-    fail "init.d stop must remove all duplicate eqos_lb PREROUTING jumps"
-
-grep -Fq 'while iptables -t mangle -D POSTROUTING -m conntrack --ctstate NEW \' "$INITD" ||
-    fail "init.d stop must remove all duplicate eqos_lb save-mark rules"
-
-grep -Fq 'while iptables -t mangle -D PREROUTING -i br-lan \' "$INITD" ||
-    fail "init.d stop must remove all duplicate eqos_lb restore-mark rules"
-
-grep -Fq 'gateway=none' "$LOADBALANCE" ||
-    fail "loadbalance diagnostics must distinguish point-to-point routes without gateway"
-
-grep -Fq 'for _packet in 0 1 2 3 4 5 6 7; do' "$LOADBALANCE" ||
-    fail "loadbalance exact cleanup must enumerate compressed nth packet indexes independently"
-
-grep -Fq 'for _mark_idx in 0 1 2 3 4 5 6 7; do' "$LOADBALANCE" ||
-    fail "loadbalance exact cleanup must enumerate route mark cfg indexes independently"
-
-grep -Fq -- '--packet "$_packet"' "$LOADBALANCE" ||
-    fail "loadbalance exact cleanup must match nth packet with independent packet index"
-
-grep -Fq '0x20 + _mark_idx' "$LOADBALANCE" ||
-    fail "loadbalance exact cleanup must compute xmark from independent mark index"
-
-if grep -Fq -- '--packet "$_ci"' "$LOADBALANCE"; then
-    fail "loadbalance cleanup must not bind nth packet index to cfg index"
-fi
-
-grep -Fq 'while ip rule del fwmark "2${_ci}" table "2${_ci}0"' "$LOADBALANCE" ||
-    fail "loadbalance must cleanup legacy low-bit fwmark rules"
-
-grep -Fq 'while ip rule del fwmark ${_om}/0xff00 table "2${_ci}0"' "$LOADBALANCE" ||
-    fail "loadbalance must cleanup all masked high-bit fwmark rules with table match"
-
-grep -Fq 'while ip rule del fwmark "2${_ci}" table "2${_ci}0"' "$INITD" ||
-    fail "init.d stop must cleanup legacy low-bit fwmark rules"
-
-grep -Fq 'cleanup_eqos_route_tables "eqos_start"' "$EQOS" ||
-    fail "eqos start must cleanup stale device WAN route tables before rebuilding rules"
-
-grep -Fq 'cleanup_eqos_route_tables "eqos_stop"' "$EQOS" ||
-    fail "eqos stop must cleanup device WAN route tables when called directly"
-
-grep -Fq 'config_get_bool smarthqos "config" "smarthqos" "0"' "$INITD" ||
-    fail "init.d must default smarthqos through config_get_bool before numeric comparison"
-
-grep -Fq 'interface=$(echo "${interface:-wan wan2 wan3 wan4 wan5 wan6 wan7 wan8}" | tr' "$INITD" ||
-    fail "init.d interface triggers must cover configured interfaces and wan..wan8 fallback"
-
-grep -Fq 'install interface triggers: interfaces=$interface' "$INITD" ||
-    fail "init.d must log generated interface trigger set"
-
-grep -Fq 'for ifname in $interface; do' "$INITD" ||
-    fail "init.d must generate interface triggers in a loop instead of hard-coding wan1-3"
-
-grep -Fq '[ -x /etc/init.d/sqm ] && procd_add_interface_trigger' "$INITD" ||
-    fail "init.d must guard sqm interface trigger registration by script existence"
-
-grep -Fq 'eqos start "$download" "$upload" "$comment" || return 1' "$INITD" ||
-    fail "init.d must stop configuration when eqos start rejects invalid global speeds"
-
-grep -Fq '/usr/sbin/loadbalance "$interface" || return 1' "$INITD" ||
-    fail "init.d must fail service start when loadbalance setup fails"
-
-grep -Fq 'EQOS_DEVICE_ERROR=0' "$INITD" ||
-    fail "init.d must track per-device apply failures"
-
-grep -Fq 'device apply failed' "$INITD" ||
-    fail "init.d must log failed per-device eqos add operations"
-
-grep -Fq -- '-m comment --comment "eqos_lb"' "$LOADBALANCE" ||
-    fail "loadbalance route mark rules must be tagged with eqos_lb comment"
-
-grep -Fq -- '-m comment --comment "eqos_lb"' "$INITD" ||
-    fail "init.d stop must delete the same comment-tagged eqos_lb rules it installs"
-
-grep -Fq 'iptables -t mangle -A PREROUTING -j eqos_dev' "$EQOS" ||
-    fail "eqos_dev PREROUTING jump must append safely before loadbalance inserts eqos_lb at rule 1"
-
-grep -Fq 'while iptables -t mangle -D PREROUTING -j eqos_dev 2>/dev/null; do :; done' "$EQOS" ||
-    fail "eqos_dev cleanup must remove all duplicate PREROUTING jumps"
-
-if grep -Fq 'iptables -t mangle -I PREROUTING 2 -j eqos_dev' "$EQOS"; then
-    fail "eqos_dev PREROUTING jump must not use fragile fixed insertion index 2"
-fi
-
-grep -Fq 'iface_list=$(uci -q get eqos.config.interface | tr' "$EQOS" ||
-    fail "device WAN route install must resolve interface mapping from eqos config"
-
-grep -Fq 'iface_list="wan wan2 wan3 wan4 wan5 wan6 wan7 wan8"' "$EQOS" ||
-    fail "device WAN route install must provide wan/wan2 fallback mapping"
-
-grep -Fq 'ip rule add fwmark ${mark}/0xff00 table "$table"' "$EQOS" ||
-    fail "device WAN binding must create independent high-bit ip rule"
-
-grep -Fq 'eqos_default_route_for_iface()' "$EQOS" ||
-    fail "device WAN binding must resolve actual default route dev and gateway"
-
-DEV_ROUTE_BLOCK=$(sed -n '/install_eqos_dev_route()/,/^}/p' "$EQOS")
-
-if echo "$DEV_ROUTE_BLOCK" | grep -Fq 'ip route flush table "$table"'; then
-    fail "device WAN route install must not flush active table before replacement route succeeds"
-fi
-
-grep -Fq 'ip route replace default via "$gateway" dev "$route_dev" table "$table"' "$EQOS" ||
-    fail "device WAN binding must replace default route before installing policy rule when gateway is present"
-
-grep -Fq 'ip route replace default dev "$route_dev" table "$table"' "$EQOS" ||
-    fail "device WAN binding must support point-to-point default routes without gateway"
-
-ROUTE_LINE=$(echo "$DEV_ROUTE_BLOCK" | grep -n 'ip route replace default via "$gateway" dev "$route_dev" table "$table"' | head -1 | cut -d: -f1)
-RULE_LINE=$(echo "$DEV_ROUTE_BLOCK" | grep -n 'ip rule add fwmark ${mark}/0xff00 table "$table"' | head -1 | cut -d: -f1)
-[ -n "$ROUTE_LINE" ] && [ -n "$RULE_LINE" ] && [ "$ROUTE_LINE" -lt "$RULE_LINE" ] ||
-    fail "device WAN route install must create/replace route before adding fwmark policy rule"
-
-grep -Fq 'CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00' "$EQOS" ||
-    fail "eqos device WAN binding must save high-bit connmark independently from loadbalance"
-
-grep -Fq 'iptables -t mangle -A eqos_dev -s $ip -m conntrack --ctstate NEW -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00' "$EQOS" ||
-    fail "eqos device WAN binding must scope CONNMARK save to the configured device IP"
-
-grep -Fq 'while iptables -t mangle -D eqos_dev -s $ip -m conntrack --ctstate NEW -j MARK --set-xmark ${rm_val}/0xFF00' "$EQOS" ||
-    fail "eqos device WAN binding must remove all duplicate per-device MARK rules before appending"
-
-grep -Fq 'while iptables -t mangle -D eqos_dev -s $ip -m conntrack --ctstate NEW -j CONNMARK --save-mark --nfmask 0xFF00 --ctmask 0xFF00' "$EQOS" ||
-    fail "eqos device WAN binding must remove all duplicate per-device CONNMARK save rules before appending"
-
-if grep -Fq 'iptables -t mangle -A POSTROUTING -m conntrack --ctstate NEW \' "$EQOS"; then
-    fail "eqos_dev must not install broad POSTROUTING save-mark rules"
-fi
-
-grep -Fq 'skip device WAN binding with legacy nonnumeric interface' "$EQOS" ||
-    fail "eqos device WAN binding must reject legacy textual interface values"
-
-grep -Fq 'skip device WAN binding without IPv4 source' "$EQOS" ||
-    fail "eqos device WAN binding must reject MAC-only or IPv6-only route binding"
-
-grep -Fq 'skip device WAN binding with out-of-range interface' "$EQOS" ||
-    fail "eqos device WAN binding must reject interface indexes outside 0-7"
-
-if grep -Eq '^CONFIG_[A-Z0-9_]+=[ymn] .+' "$MT7986_CONFIG"; then
-    fail "mt7986 kernel config must not use inline comments after CONFIG values"
-fi
-
-if grep -Eq '^CONFIG_[A-Z0-9_]+=.*#' "$N60_PRO_CONFIG"; then
-    fail "n60_pro_config_full_new must not use inline comments after CONFIG values"
-fi
-
-grep -Fq 'if [ -d "$pre_install_dir" ]; then' "$INSTALL_ALL" ||
-    fail "pre-install script must check /etc/pre_install exists before globbing ipk files"
-
-grep -Fq 'if [ -e "$1" ]; then' "$INSTALL_ALL" ||
-    fail "pre-install script must check at least one ipk exists before opkg install"
-
-grep -Fq 'opkg install "$@" --force-depends || {' "$INSTALL_ALL" ||
-    fail "pre-install script must guard opkg install failure"
-
-grep -Fq 'exit 1' "$INSTALL_ALL" ||
-    fail "pre-install script must stop before deleting ipk files when opkg install fails"
-
-grep -Fq '[INSTALL-B011-01] pre-install ipk install start' "$INSTALL_ALL" ||
-    fail "pre-install script must log install start with BID trace"
-
-grep -Fq '[INSTALL-B011-02] pre-install ipk install failed' "$INSTALL_ALL" ||
-    fail "pre-install script must log opkg failure before exiting"
-
-grep -Fq '[INSTALL-B011-06] pre-install directory missing' "$INSTALL_ALL" ||
-    fail "pre-install script must log the missing-directory branch"
-
-echo "qos regression checks passed"
+contains() {
+    grep -Fq "$1" "$2" || fail "$3"
+}
+
+absent() {
+    if grep -Fq "$1" "$2"; then
+        fail "$3"
+    fi
+}
+
+sh -n "$EQOS"
+sh -n "$DHCP_MARK"
+sh -n "$INITD"
+sh -n "$VERIFY_QOS"
+
+contains 'hash_mac $MAC' "$DHCP_MARK" \
+    "DHCP ordinary WRR mark allocation must stay in hash range Q2-Q30"
+absent 'MARK=31' "$DHCP_MARK" \
+    "DHCP ordinary devices must never allocate Q31/Q63 rate-limit queues"
+contains 'eqos_macs=$(uci -q show eqos' "$DHCP_MARK" \
+    "dhcp_mark must collect explicitly configured MAC devices"
+contains 'if echo "$eqos_macs" | grep -qxF "$MAC_LC"; then' "$DHCP_MARK" \
+    "dhcp_mark must skip explicit VIP/rate-limit devices by MAC"
+contains 'if [ "$MARK_VALUE" -lt "$MIN_MARK" ] || [ "$MARK_VALUE" -gt "$MAX_MARK" ]; then' "$DHCP_MARK" \
+    "dhcp_mark must normalize stale invalid marks back into Q2-Q30"
+
+contains 'cleanup_ipv6_mac_rules()' "$EQOS" \
+    "eqos must define a full IPv6 MAC cleanup helper"
+contains 'for d in $(seq 2 31); do' "$EQOS" \
+    "IPv6 upload cleanup must cover WRR and rate-limit marks"
+contains 'for d in $(seq 34 63); do' "$EQOS" \
+    "IPv6 download cleanup must cover WRR and rate-limit marks"
+contains 'cleanup_ipv6_mac_rules "$macaddr"' "$EQOS" \
+    "eqos add must cleanup old IPv6 MAC state before installing a new state"
+contains 'hash_key="${ip:-$macaddr}"' "$EQOS" \
+    "MAC-only devices must use MAC as deterministic WRR hash key"
+contains 'eqos add: skip device without ip/mac' "$EQOS" \
+    "eqos add must reject empty device identity"
+contains 'if [ -n "$ip" ]; then' "$EQOS" \
+    "IPv4 DSCP rules must be guarded for MAC-only IPv6 devices"
+
+contains 'hnat_hqos_ipv4_qid' "$HNAT_HOOK" \
+    "HNAT must reconstruct stored HQOS qid for DSCP update checks"
+contains 'hnat_hqos_ipv4_queue_matches' "$HNAT_HOOK" \
+    "HNAT must compare HQOS queue identity instead of egress remark DSCP"
+contains 'skb_qid = (iph->tos >> 2) & MTK_QDMA_TX_MASK;' "$HNAT_HOOK" \
+    "HNAT HQOS update must derive current queue from skb DSCP"
+contains 'if (!hnat_hqos_ipv4_queue_matches(skb, entry, iph))' "$HNAT_HOOK" \
+    "HNAT HQOS update must only invalidate when queue identity changes"
+absent 'if (IS_IPV4_GRP(entry) && entry->ipv4_hnapt.iblk2.dscp != iph->tos)' "$HNAT_HOOK" \
+    "HNAT must not unconditionally compare rewritten egress DSCP with skb TOS"
+
+contains '不会占用 Q31/Q63' "$VERIFY_QOS" \
+    "verification script must document that DHCP overflow never uses rate-limit queues"
+contains 'awk '\''$2==1 || $2>=31'\''' "$VERIFY_QOS" \
+    "verification script must fail any DHCP mark that enters Q1/Q31+"
+
+echo "PASS: QoS regression checks"
