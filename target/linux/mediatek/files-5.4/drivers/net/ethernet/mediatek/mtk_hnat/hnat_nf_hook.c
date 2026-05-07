@@ -28,15 +28,7 @@
 #include <net/netfilter/nf_conntrack_acct.h>
 #include <net/netfilter/nf_conntrack_core.h>
 
-/* nf_conntrack_find_get is EXPORT_SYMBOL_GPL in nf_conntrack_core.c.
- * Its declaration lives in nf_conntrack_core.h but may not be visible
- * to out-of-tree modules depending on kernel config guards.  Declare it
- * explicitly so the compiler sees the correct prototype.
- */
-extern struct nf_conntrack_tuple_hash *
-nf_conntrack_find_get(struct net *net,
-		      const struct nf_conntrack_zone *zone,
-		      const struct nf_conntrack_tuple *tuple);
+
 
 #include "nf_hnat_mtk.h"
 #include "hnat.h"
@@ -1069,98 +1061,29 @@ drop:
 	return NF_DROP;
 }
 
-/* mtk_hnat_tproxy_connmark_check_v4 - called from mtk_hnat_br_nf_local_in.
+/* mtk_hnat_tproxy_connmark_check_v4 was removed (B-013).
  *
- * This hook is registered at NF_BR_PRI_FIRST (INT_MIN), which runs
- * BEFORE bridge conntrack (INT_MIN+1).  The ct is NOT yet attached to
- * the current skb, so nf_ct_get() would always return NULL here.
+ * The function called nf_conntrack_find_get() (hash-table lookup + spinlock)
+ * for every HNAT-tagged UDP packet from the bridge, causing CPU saturation
+ * under all-port UDP relay (gaming + IoT) and crashing SSR Plus / Xray.
  *
- * Instead we use nf_conntrack_find_get() to look up the hash table for
- * a ct entry established by the *previous* packet.  If that entry has
- * ct->mark & 0x8000 (set by the tproxy prerouting hook at -149 on the
- * first packet), we zero the FOE UNBIND entry immediately, closing the
- * ASIC-observable window to zero.
+ * The function's stated purpose - zeroing FOE entries for established TPROXY
+ * flows before the IP stack sees them - is redundant because:
  *
- * First-packet path: find_get returns NULL → no ct yet → falls through.
- * Reference: nf_conntrack_find_get is EXPORT_SYMBOL_GPL in
- *            net/netfilter/nf_conntrack_core.c, declared extern above.
+ *   1. TPROXY flows go to LOCAL_IN, not FORWARD.  HNAT hardware can only BIND
+ *      flows it observes on the FORWARD/POSTROUTING path.  A LOCAL_IN (TPROXY)
+ *      flow therefore stays UNBIND forever; there is nothing to zero.
+ *
+ *   2. The IP-layer hook mtk_hnat_tproxy_protection_v4 (priority MANGLE+1 =
+ *      -149) already zeros FOE entries for every packet carrying the iptables
+ *      TPROXY mark (skb->mark & 0x8000).  That hook is the correct and
+ *      sufficient interception point.
+ *
+ * Removing the bridge hook call eliminates the nf_conntrack_find_get() cost
+ * entirely (≈0 overhead for TPROXY UDP flows), restoring UDP stability
+ * without any functional regression.
  */
-static void mtk_hnat_tproxy_connmark_check_v4(struct sk_buff *skb,
-					      const struct nf_hook_state *state)
-{
-	struct iphdr *iph;
-	struct udphdr *uh;
-	struct nf_conntrack_tuple tuple;
-	struct nf_conntrack_tuple_hash *h;
-	struct nf_conn *ct;
-	struct foe_entry *entry;
 
-	if (!is_magic_tag_valid(skb) || !skb_hnat_is_hashed(skb)) {
-		pr_debug("[HNAT-CMK-1] skip: magic_valid=%d hashed=%d\n",
-			 is_magic_tag_valid(skb), skb_hnat_is_hashed(skb));
-		return;
-	}
-
-	iph = ip_hdr(skb);
-	if (iph->protocol != IPPROTO_UDP) {
-		pr_debug("[HNAT-CMK-2] skip: proto=%u (not UDP)\n", iph->protocol);
-		return;
-	}
-
-	if (!skb_transport_header_was_set(skb)) {
-		pr_debug("[HNAT-CMK-3] skip: transport header not set\n");
-		return;
-	}
-
-	uh = udp_hdr(skb);
-
-	/* Build original-direction 5-tuple for conntrack hash lookup. */
-	memset(&tuple, 0, sizeof(tuple));
-	tuple.src.l3num      = AF_INET;
-	tuple.dst.protonum   = IPPROTO_UDP;
-	tuple.src.u3.ip      = iph->saddr;
-	tuple.dst.u3.ip      = iph->daddr;
-	tuple.src.u.udp.port = uh->source;
-	tuple.dst.u.udp.port = uh->dest;
-
-	pr_debug("[HNAT-CMK-4] find_get src=%pI4:%u -> dst=%pI4:%u foe_idx=%u\n",
-		 &tuple.src.u3.ip, ntohs(tuple.src.u.udp.port),
-		 &tuple.dst.u3.ip, ntohs(tuple.dst.u.udp.port),
-		 skb_hnat_entry(skb));
-
-	/*
-	 * nf_conntrack_find_get() searches the global conntrack hash table.
-	 * It takes a reference; we must call nf_ct_put() when done.
-	 */
-	h = nf_conntrack_find_get(state->net, &nf_ct_zone_dflt, &tuple);
-	if (!h) {
-		pr_debug("[HNAT-CMK-5] find_get=NULL: first packet, no ct yet\n");
-		return; /* first packet: no ct entry yet */
-	}
-
-	ct = nf_ct_tuplehash_to_ctrack(h);
-	pr_debug("[HNAT-CMK-6] ct=%p mark=0x%x bit15=%d\n",
-		 ct, READ_ONCE(ct->mark), !!(READ_ONCE(ct->mark) & 0x8000));
-
-	if (READ_ONCE(ct->mark) & 0x8000) {
-		/*
-		 * Established tproxy flow: zero the UNBIND FOE entry right now,
-		 * before any concurrent packet can observe the UNBIND state.
-		 * This closes the ASIC-observable window to zero.
-		 */
-		entry = &hnat_priv->foe_table_cpu[skb_hnat_ppe(skb)][skb_hnat_entry(skb)];
-		pr_debug("[HNAT-CMK-7] ZEROING foe idx=%u state=%u (tproxy connmark hit)\n",
-			 skb_hnat_entry(skb), entry_hnat_state(entry));
-		memset(entry, 0, sizeof(struct foe_entry));
-		hnat_cache_ebl(1);
-		pr_debug("[HNAT-CMK-8] FOE zeroed and cache flushed OK\n");
-	} else {
-		pr_debug("[HNAT-CMK-7] ct mark 0x8000 NOT set, no action\n");
-	}
-
-	nf_ct_put(ct); /* release reference taken by nf_conntrack_find_get */
-	pr_debug("[HNAT-CMK-9] done, ct ref released\n");
-}
 
 static unsigned int
 mtk_hnat_ipv4_nf_pre_routing(void *priv, struct sk_buff *skb,
@@ -1310,12 +1233,9 @@ mtk_hnat_br_nf_local_in(void *priv, struct sk_buff *skb,
 			return NF_ACCEPT;
 	}
 
-	/*
-	 * For established tproxy flows (SSR Plus UDP proxy), zero the FOE entry
-	 * immediately if conntrack mark 0x8000 is set, so the HNAT ASIC never
-	 * observes the UNBIND state on this or any subsequent packet.
-	 */
-	mtk_hnat_tproxy_connmark_check_v4(skb, state);
+	/* TPROXY FOE zeroing is handled by mtk_hnat_tproxy_protection_v4 at
+	 * IP PREROUTING priority MANGLE+1 (-149), after iptables sets the
+	 * 0x8000 TPROXY mark.  No bridge-hook interception needed (B-013). */
 
 	return NF_ACCEPT;
 drop:
@@ -2972,12 +2892,27 @@ static unsigned int mtk_hnat_tproxy_protection_v4(
 	 *   hardware cannot keep offloading tproxy-intercepted flows.
 	 */
 	entry = &hnat_priv->foe_table_cpu[skb_hnat_ppe(skb)][skb_hnat_entry(skb)];
-	pr_debug("[HNAT-TPX-4] TPROXY hit: src=%pI4 dst=%pI4 proto=%u foe_idx=%u state=%u mark=0x%x\n",
-		 &iph->saddr, &iph->daddr, iph->protocol,
-		 skb_hnat_entry(skb), entry_hnat_state(entry), skb->mark);
-	memset(entry, 0, sizeof(struct foe_entry));
-	hnat_cache_ebl(1);
-	pr_debug("[HNAT-TPX-5] FOE zeroed and cache flushed OK\n");
+	{
+		/* Save state BEFORE zeroing: hnat_cache_ebl is only needed when
+		 * the ASIC has a cached (BIND) entry to invalidate.  TPROXY flows
+		 * go to LOCAL_IN and never reach BIND via FORWARD/POSTROUTING, so
+		 * they are always UNBIND here.  Calling hnat_cache_ebl() per-packet
+		 * for UNBIND entries causes 100-1000 cache flushes/sec for gaming
+		 * UDP, destabilising HNAT hardware and crashing Xray/SSR Plus.
+		 * Only flush when transitioning BIND→INVALID (ASIC sample path).
+		 */
+		u8 foe_state = entry_hnat_state(entry);
+		pr_debug("[HNAT-TPX-4] TPROXY hit: src=%pI4 dst=%pI4 proto=%u foe_idx=%u state=%u mark=0x%x\n",
+			 &iph->saddr, &iph->daddr, iph->protocol,
+			 skb_hnat_entry(skb), foe_state, skb->mark);
+		memset(entry, 0, sizeof(struct foe_entry));
+		if (foe_state == BIND) {
+			hnat_cache_ebl(1);
+			pr_debug("[HNAT-TPX-5] BIND→INVALID: cache flushed\n");
+		} else {
+			pr_debug("[HNAT-TPX-5] UNBIND→INVALID: cache flush skipped\n");
+		}
+	}
 
 	/*
 	 * Persist the tproxy status in conntrack mark so that the
