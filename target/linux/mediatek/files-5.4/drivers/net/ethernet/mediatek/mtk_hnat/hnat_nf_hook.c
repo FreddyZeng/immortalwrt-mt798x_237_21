@@ -2938,10 +2938,20 @@ static unsigned int mtk_hnat_tproxy_protection_v4(
 		return NF_ACCEPT;
 	}
 
-	/* Only care about IPv4 UDP with tproxy mark (bit 15 set) */
+	/* Protect both TCP and UDP tproxy flows.
+	 *
+	 * Original code only guarded UDP. TCP TPROXY flows (e.g. VMESS+WS+TLS
+	 * intercepted via xt_TPROXY) carry the same mark bit 15 (0x8000) and
+	 * are equally at risk of HNAT binding their FOE entry, which would
+	 * cause hardware to bypass Xray and deliver raw encrypted tunnel data
+	 * directly to LAN clients.  Extend the guard to all IP protocols that
+	 * carry mark bit 15; non-TCP/UDP protocols will naturally never be
+	 * tproxy-marked so there is no false-positive risk.
+	 */
 	iph = ip_hdr(skb);
-	if (iph->protocol != IPPROTO_UDP) {
-		pr_debug("[HNAT-TPX-2] skip: proto=%u (not UDP)\n", iph->protocol);
+	if (iph->protocol != IPPROTO_UDP && iph->protocol != IPPROTO_TCP) {
+		pr_debug("[HNAT-TPX-2] skip: proto=%u (not TCP/UDP)\n",
+			 iph->protocol);
 		return NF_ACCEPT;
 	}
 
@@ -2951,8 +2961,8 @@ static unsigned int mtk_hnat_tproxy_protection_v4(
 		return NF_ACCEPT;
 	}
 
-	/* tproxy has intercepted this UDP flow: unconditionally zero the FOE
-	 * entry regardless of its current state (UNBIND or BIND).
+	/* tproxy has intercepted this TCP/UDP flow: unconditionally zero the
+	 * FOE entry regardless of its current state (UNBIND or BIND).
 	 *
 	 * Why unconditional (no entry_state check):
 	 *   BIND-state packets are occasionally sent back to CPU by HNAT
@@ -2962,8 +2972,8 @@ static unsigned int mtk_hnat_tproxy_protection_v4(
 	 *   hardware cannot keep offloading tproxy-intercepted flows.
 	 */
 	entry = &hnat_priv->foe_table_cpu[skb_hnat_ppe(skb)][skb_hnat_entry(skb)];
-	pr_debug("[HNAT-TPX-4] TPROXY hit: src=%pI4 dst=%pI4 foe_idx=%u state=%u mark=0x%x\n",
-		 &iph->saddr, &iph->daddr,
+	pr_debug("[HNAT-TPX-4] TPROXY hit: src=%pI4 dst=%pI4 proto=%u foe_idx=%u state=%u mark=0x%x\n",
+		 &iph->saddr, &iph->daddr, iph->protocol,
 		 skb_hnat_entry(skb), entry_hnat_state(entry), skb->mark);
 	memset(entry, 0, sizeof(struct foe_entry));
 	hnat_cache_ebl(1);
