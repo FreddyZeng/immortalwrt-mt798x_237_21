@@ -2915,11 +2915,14 @@ static unsigned int mtk_hnat_tproxy_protection_v4(
 	}
 
 	/*
-	 * Persist the tproxy status in conntrack mark so that the
-	 * mtk_hnat_tproxy_connmark_check_v4 hook (called from INT_MIN+1)
-	 * can detect this flow on the next packet and zero the FOE entry
-	 * BEFORE the ASIC has any chance to observe the UNBIND state.
-	 * This eliminates the theoretical UNBIND-visible race window.
+	 * Persist the TPROXY status in conntrack mark (B-013).
+	 *
+	 * With mtk_hnat_tproxy_connmark_check_v4 removed, this write is kept
+	 * for CONNMARK --restore-mark compatibility: if iptables restores
+	 * ct->mark into skb->mark in a later PREROUTING rule, subsequent
+	 * packets of this flow will carry 0x8000 automatically without
+	 * re-matching the TPROXY target.  The write is a single WRITE_ONCE
+	 * (no lock) and is harmless when CONNMARK is not in use.
 	 */
 	{
 		enum ip_conntrack_info ctinfo;
