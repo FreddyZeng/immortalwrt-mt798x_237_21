@@ -2881,26 +2881,26 @@ static unsigned int mtk_hnat_tproxy_protection_v4(
 		return NF_ACCEPT;
 	}
 
-	/* tproxy has intercepted this TCP/UDP flow: unconditionally zero the
-	 * FOE entry regardless of its current state (UNBIND or BIND).
+	/* Zero the FOE entry unconditionally (BIND or UNBIND).
 	 *
-	 * Why unconditional (no entry_state check):
-	 *   BIND-state packets are occasionally sent back to CPU by HNAT
-	 *   hardware for re-validation ("sample" path).  If we skip zeroing
-	 *   for BIND entries, those flows stay hardware-offloaded indefinitely
-	 *   and tproxy never sees them again.  Zeroing always guarantees the
-	 *   hardware cannot keep offloading tproxy-intercepted flows.
+	 * TPROXY flows go to LOCAL_IN, so HNAT hardware can never BIND them
+	 * through the normal FORWARD/POSTROUTING path.  In the common case the
+	 * entry is UNBIND; zeroing it is a no-cost safety measure that
+	 * guarantees the hardware cannot accidentally retain a stale entry.
+	 *
+	 * The rare exception is the ASIC "sample" path: the hardware
+	 * occasionally sends a BIND-state packet to the CPU for re-validation.
+	 * Zeroing unconditionally ensures those are also evicted, preventing
+	 * hardware from bypassing TPROXY on subsequent packets.
+	 *
+	 * hnat_cache_ebl(1) is only needed when the ASIC actually has a
+	 * cached BIND entry to invalidate.  Calling it per-packet for UNBIND
+	 * entries (the common case) causes ~1000 unnecessary ASIC cache
+	 * flushes/second under all-port UDP relay, destabilising the hardware
+	 * and crashing SSR Plus / Xray (B-013).  Check the pre-zeroing state.
 	 */
 	entry = &hnat_priv->foe_table_cpu[skb_hnat_ppe(skb)][skb_hnat_entry(skb)];
 	{
-		/* Save state BEFORE zeroing: hnat_cache_ebl is only needed when
-		 * the ASIC has a cached (BIND) entry to invalidate.  TPROXY flows
-		 * go to LOCAL_IN and never reach BIND via FORWARD/POSTROUTING, so
-		 * they are always UNBIND here.  Calling hnat_cache_ebl() per-packet
-		 * for UNBIND entries causes 100-1000 cache flushes/sec for gaming
-		 * UDP, destabilising HNAT hardware and crashing Xray/SSR Plus.
-		 * Only flush when transitioning BIND→INVALID (ASIC sample path).
-		 */
 		u8 foe_state = entry_hnat_state(entry);
 		pr_debug("[HNAT-TPX-4] TPROXY hit: src=%pI4 dst=%pI4 proto=%u foe_idx=%u state=%u mark=0x%x\n",
 			 &iph->saddr, &iph->daddr, iph->protocol,
