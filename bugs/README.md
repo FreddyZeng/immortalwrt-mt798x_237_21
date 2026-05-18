@@ -17,3 +17,5 @@
 | [B-013](B-013.md) | 限速设备在命中游戏/VIP 高优先规则后 DSCP=31/63 最终覆盖缺失，Q31/Q63 限速器被旁路 | F-QOS01 | C-FQOS01-10 | ✅ 已修复 |
 | [B-014](B-014.md) | TProxy/SSR Plus bit 0x8000 冲突、DHCP hotplug 非幂等安装、IPv6 fallback 位置错误、接口触发不过滤 | F-QOS01 | C-FQOS01-11 | ✅ 已修复 |
 | [B-015](B-015.md) | loadbalance grep $var 前缀匹配：pppoe-wan 误匹配 pppoe-wan2，路由表 200 使用错误网关 | F-QOS01 | C-FQOS01-12 | ✅ 已修复 |
+| [B-016](B-016.md) | init.d/eqos cleanup_loadbalance_rules 内同类 grep 前缀匹配 Bug | F-QOS01 | C-FQOS01-13 | ✅ 已修复 |
+| [B-017](B-017.md) | tproxy_protection_v4 写 ct->mark=0x8000 经 CONNMARK --restore-mark 传播，反复清零 HNAT FOE，偶发 TCP 连接延迟抖动 | F-QOS01 | C-FQOS01-14 | ✅ 已修复 |

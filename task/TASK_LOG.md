@@ -160,3 +160,22 @@
 - **PRD 同步**: ✅ N/A（loadbalance 实现细节）
 - **方案同步**: ✅ N/A
 - **测试同步**: ✅ test/qos-regression.sh — `absent 'grep default | grep $var'` 断言
+
+## [2026-05-18] C-FQOS01-14 | commit: pending
+
+- **FID**: F-QOS01
+- **BID**: B-017
+- **CID**: C-FQOS01-14
+- **类型**: fix
+- **范围**: hnat_nf_hook.c tproxy_protection_v4
+- **描述**: 移除 tproxy_protection_v4 中 `ct->mark |= 0x8000` 写入块（B-017）。
+  该写入通过 SSR Plus CONNMARK --restore-mark 规则将 0x8000 传播到同一连接所有后续 ESTABLISHED 数据包，
+  导致 tproxy_protection_v4 在每个 ESTABLISHED 包上重复 memset(FOE,0)，HNAT 永远无法 BIND 这些流量，
+  偶发产生 TCP 连接延迟抖动（浏览器访问 URL 短时间无响应，新打开 URL 恢复）。
+  tproxy_protection_v4 已通过 skb->mark & 0x8000 直接判断（iptables TPROXY 设置），
+  无需将状态持久化到 ct->mark；原消费者 mtk_hnat_tproxy_connmark_check_v4 已于 8fb160ffb5 删除。
+- **改动文件**: target/linux/mediatek/files-5.4/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
+- **日志 TAG**: [HNAT-TPX-B017-01]
+- **PRD 同步**: ✅ N/A（内核路径优化）
+- **方案同步**: ✅ N/A
+- **测试同步**: ✅ 验证：建立 TCP 连接后多个数据包 FOE 条目保持 BIND 状态

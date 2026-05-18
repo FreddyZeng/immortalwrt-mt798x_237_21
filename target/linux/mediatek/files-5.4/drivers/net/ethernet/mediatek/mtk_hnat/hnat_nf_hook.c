@@ -2881,63 +2881,81 @@ static unsigned int mtk_hnat_tproxy_protection_v4(
 		return NF_ACCEPT;
 	}
 
-	/* Zero the FOE entry unconditionally (BIND or UNBIND).
+	/* Zero the FOE entry ONLY if it is in BIND state (B-017 root-cause fix).
 	 *
-	 * TPROXY flows go to LOCAL_IN, so HNAT hardware can never BIND them
-	 * through the normal FORWARD/POSTROUTING path.  In the common case the
-	 * entry is UNBIND; zeroing it is a no-cost safety measure that
-	 * guarantees the hardware cannot accidentally retain a stale entry.
+	 * Why only BIND:
+	 *   TPROXY flows are delivered to LOCAL_IN, bypassing FORWARD/POSTROUTING.
+	 *   HNAT can only BIND a flow it observes on FORWARD/POSTROUTING, so a
+	 *   TPROXY flow's own FOE entry is ALWAYS UNBIND — it can never be BIND
+	 *   through the TPROXY path.
 	 *
-	 * The rare exception is the ASIC "sample" path: the hardware
-	 * occasionally sends a BIND-state packet to the CPU for re-validation.
-	 * Zeroing unconditionally ensures those are also evicted, preventing
-	 * hardware from bypassing TPROXY on subsequent packets.
+	 *   The ONLY case where we MUST zero is when HNAT hardware has already
+	 *   BIND-accelerated a 5-tuple that was later re-routed through TPROXY
+	 *   (ASIC "sample" path: hardware sends a BIND-state packet to CPU for
+	 *   re-validation).  Zeroing that BIND entry evicts it from hardware so
+	 *   subsequent packets are not accelerated past the proxy.
 	 *
-	 * hnat_cache_ebl(1) is only needed when the ASIC actually has a
-	 * cached BIND entry to invalidate.  Calling it per-packet for UNBIND
-	 * entries (the common case) causes ~1000 unnecessary ASIC cache
-	 * flushes/second under all-port UDP relay, destabilising the hardware
-	 * and crashing SSR Plus / Xray (B-013).  Check the pre-zeroing state.
+	 * Why UNBIND must NOT be zeroed (B-017):
+	 *   FOE slots are assigned by a hash of the 5-tuple.  A TPROXY SYN and
+	 *   an unrelated direct-connect (non-proxy) TCP connection can hash to the
+	 *   SAME FOE slot.  If we zero the UNBIND slot for the TPROXY packet, we
+	 *   accidentally evict the direct-connect connection's UNBIND entry before
+	 *   it can accumulate enough packets to reach HIT_UNBIND_RATE_REACH and
+	 *   transition to BIND.  The direct-connect flow is forced to CPU path
+	 *   indefinitely → intermittent latency spikes whenever such a hash
+	 *   collision occurs ("偶发延迟").
+	 *
+	 *   For UNBIND entries: the FOE slot holds no ASIC-visible state, so
+	 *   there is nothing to evict.  We can safely return NF_ACCEPT.
+	 *
+	 * hnat_cache_ebl(1) is only needed for BIND→INVALID transitions.
 	 */
 	entry = &hnat_priv->foe_table_cpu[skb_hnat_ppe(skb)][skb_hnat_entry(skb)];
 	{
 		u8 foe_state = entry_hnat_state(entry);
-		pr_debug("[HNAT-TPX-4] TPROXY hit: src=%pI4 dst=%pI4 proto=%u foe_idx=%u state=%u mark=0x%x\n",
+		pr_debug("[HNAT-TPX-4-B017] TPROXY hit: src=%pI4 dst=%pI4 proto=%u foe_idx=%u state=%u mark=0x%x\n",
 			 &iph->saddr, &iph->daddr, iph->protocol,
 			 skb_hnat_entry(skb), foe_state, skb->mark);
+
+		if (foe_state != BIND) {
+			/* UNBIND/INVALID: nothing to evict, TPROXY flow cannot be
+			 * hardware-accelerated anyway.  Return without touching the slot
+			 * so other connections sharing this hash are not disrupted. */
+			pr_debug("[HNAT-TPX-5-B017] UNBIND/INVALID: skip memset (no ASIC state to evict)\n");
+			goto done;
+		}
+
+		/* BIND state: ASIC has this flow accelerated — zero it out so the
+		 * hardware stops forwarding packets that should go through TPROXY. */
 		memset(entry, 0, sizeof(struct foe_entry));
-		if (foe_state == BIND) {
-			hnat_cache_ebl(1);
-			pr_debug("[HNAT-TPX-5] BIND→INVALID: cache flushed\n");
-		} else {
-			pr_debug("[HNAT-TPX-5] UNBIND→INVALID: cache flush skipped\n");
-		}
+		hnat_cache_ebl(1);
+		pr_debug("[HNAT-TPX-5-B017] BIND→INVALID: evicted + cache flushed\n");
 	}
+done:
 
-	/*
-	 * Persist the TPROXY status in conntrack mark (B-013).
+	/* B-017: Remove ct->mark |= 0x8000 write.
 	 *
-	 * With mtk_hnat_tproxy_connmark_check_v4 removed, this write is kept
-	 * for CONNMARK --restore-mark compatibility: if iptables restores
-	 * ct->mark into skb->mark in a later PREROUTING rule, subsequent
-	 * packets of this flow will carry 0x8000 automatically without
-	 * re-matching the TPROXY target.  The write is a single WRITE_ONCE
-	 * (no lock) and is harmless when CONNMARK is not in use.
+	 * Reason 1 (dead code): The only consumer of this write was
+	 * mtk_hnat_tproxy_connmark_check_v4(), which was deleted in commit
+	 * 8fb160ffb5.  No code in this driver reads ct->mark for the 0x8000 bit
+	 * anymore.  Keeping the write is pure overhead.
+	 *
+	 * Reason 2 (potential CONNMARK side-effect): eqos/loadbalance install:
+	 *   POSTROUTING -m conntrack --ctstate NEW -j CONNMARK --save-mark
+	 * This saves skb->mark into ct->mark for every NEW packet.  For TPROXY
+	 * flows the NEW packet is delivered LOCAL_IN (not POSTROUTING), so
+	 * save-mark does not fire and ct->mark retains the 0x8000 we write here.
+	 * Subsequently, if loadbalance is active without the tproxy_mark_guard
+	 * (init.d/eqos L78 restore-mark path has no ! --mark 0x8000/0x8000),
+	 * 0x8000 can leak into skb->mark of ESTABLISHED packets on some code
+	 * paths, causing tproxy_protection_v4 to fire again per packet and
+	 * repeatedly memset(FOE, 0), preventing HNAT from ever binding those
+	 * flows (intermittent latency, B-017).
+	 *
+	 * tproxy_protection_v4 already gates on skb->mark & 0x8000 set by
+	 * iptables TPROXY at MANGLE(-150) — no ct->mark persistence needed.
 	 */
-	{
-		enum ip_conntrack_info ctinfo;
-		struct nf_conn *ct = nf_ct_get(skb, &ctinfo);
-
-		if (ct) {
-			WRITE_ONCE(ct->mark, ct->mark | 0x8000);
-			pr_debug("[HNAT-TPX-6] ct=%p mark written: 0x%x -> 0x%x\n",
-				 ct, ct->mark & ~0x8000u, READ_ONCE(ct->mark));
-		} else {
-			pr_debug("[HNAT-TPX-6] ct=NULL (first packet), connmark not set\n");
-		}
-	}
-
-	pr_debug("[HNAT-TPX-7] done, returning NF_ACCEPT\n");
+	pr_debug("[HNAT-TPX-B017-01] done (ct->mark write removed: dead code + CONNMARK leak prevention)\n");
 	return NF_ACCEPT;
 }
 

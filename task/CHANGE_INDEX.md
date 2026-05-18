@@ -4,8 +4,8 @@
 > 格式参考: smart-commit SKILL.md §5.3
 
 <!-- 下一个 FID 编号: F-002 -->
-<!-- 下一个 BID 编号: B-016 -->
-<!-- 下一个 CID 编号: C-FQOS01-13 -->
+<!-- 下一个 BID 编号: B-018 -->
+<!-- 下一个 CID 编号: C-FQOS01-15 -->
 
 ---
 
@@ -32,6 +32,8 @@
   | C-FQOS01-10 | pending | - | 2026-05-06 | 确定性 DSCP 架构终态：纯 DSCP 标记（不用 CONNMARK 做 QoS）；eqos add 三路分支（VIP/限速/WRR）；Branch 2 FORWARD 最终覆盖规则 Q31/Q63 防游戏/VIP 旁路；/tmp/rl_forward_ips 幂等清理；smarthqos Q2-30 shaper | ✅ 已完成 |
   | C-FQOS01-11 | pending | - | 2026-05-06 | TProxy/SSR Plus bit 0x8000 全链路保护：loadbalance+eqos add PREROUTING 规则添加 TPROXY_MARK_GUARD；DHCP hotplug cmp -s 幂等安装；IPv6 fallback mark 移至 config_foreach 之后；iface trigger 仅处理配置接口 | ✅ 已完成 |
   | C-FQOS01-12 | pending | - | 2026-05-06 | loadbalance grep 前缀匹配修复→ip route show default dev；iptables -D 静默 2>/dev/null；qos-test.md loadbalance sh→bash 修正；B-015 Bug 文档补充 | ✅ 已完成 |
+  | C-FQOS01-13 | pending | - | 2026-05-18 | init.d/eqos cleanup_loadbalance_rules 同类前缀匹配修复（B-016） | ✅ 已完成 |
+  | C-FQOS01-14 | pending | - | 2026-05-18 | hnat_nf_hook: tproxy_protection_v4 双修复：① UNBIND FOE 跳过 memset 防止 hash 碰撞破坏直连连接；② 移除 ct->mark 死代码写入（B-017） | ✅ 已完成 |
 - Bugs:
   | BID | 描述 | 引入者 | 修复者 | 状态 |
   |-----|------|--------|--------|------|
@@ -50,5 +52,7 @@
   | B-013 | 限速设备在命中游戏/VIP 高优先规则后 DSCP=31/63 最终覆盖缺失，Q31/Q63 限速器被旁路 | C-FQOS01-09 | C-FQOS01-10 | 已修复 |
   | B-014 | TProxy/SSR Plus bit 0x8000 冲突、DHCP hotplug 非幂等安装、IPv6 fallback 位置错误、接口触发不过滤 | C-FQOS01-09 | C-FQOS01-11 | 已修复 |
   | B-015 | loadbalance grep $var 前缀匹配：pppoe-wan 误匹配 pppoe-wan2，路由表 200 使用错误网关 | 初始版本 | C-FQOS01-12 | 已修复 |
+  | B-016 | init.d/eqos cleanup_loadbalance_rules 同类 grep 前缀匹配 Bug | 初始版本 | C-FQOS01-13 | 已修复 |
+  | B-017 | tproxy_protection_v4 对 UNBIND FOE 执行 memset 破坏 hash 碰撞连接；ct->mark 死代码写入 | d24cb19a3f | C-FQOS01-14 | 已修复 |
 
 <!-- 新增 Feature 在此下方添加 -->
