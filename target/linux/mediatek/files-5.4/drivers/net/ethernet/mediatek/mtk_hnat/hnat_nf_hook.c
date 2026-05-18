@@ -2875,6 +2875,18 @@ static unsigned int mtk_hnat_tproxy_protection_v4(
 		return NF_ACCEPT;
 	}
 
+	/* Non-first IP fragments carry no L4 header, so iptables TPROXY cannot
+	 * match them and will never set mark bit 15.  Skip early so that the
+	 * skb_header_pointer() call for port comparison below is always
+	 * reachable with a valid L4 header, making the !pptr path unreachable
+	 * (B-017 final: eliminates the conservative-evict fragment edge-case).
+	 */
+	if (unlikely(iph->frag_off & htons(IP_OFFSET))) {
+		pr_debug("[HNAT-TPX-2b] skip: non-first fragment (frag_off=0x%x, no L4 ports)\n",
+			 ntohs(iph->frag_off) & IP_OFFSET);
+		return NF_ACCEPT;
+	}
+
 	if (!(skb->mark & 0x8000)) {
 		pr_debug("[HNAT-TPX-3] skip: mark=0x%x (bit15 not set, not tproxy)\n",
 			 skb->mark);
@@ -2957,9 +2969,15 @@ static unsigned int mtk_hnat_tproxy_protection_v4(
 			pptr = skb_header_pointer(skb, iph->ihl * 4,
 						  sizeof(_ports), &_ports);
 			if (unlikely(!pptr)) {
-				/* Fragment/truncated: IPs matched, conservatively
-				 * evict to maintain proxy security guarantee */
-				pr_debug("[HNAT-TPX-5-B017] BIND IP match, L4 unavail: evict (conservative)\n");
+				/* This path is logically unreachable: packets with
+				 * mark & 0x8000 were TPROXY-intercepted by iptables,
+				 * which requires readable L4 ports.  Non-first fragments
+				 * (no L4 header) are rejected above.  If we somehow
+				 * arrive here the skb is malformed — do NOT evict an
+				 * innocent BIND entry without port verification. */
+				WARN_ONCE(1, "hnat: tproxy_protection: BIND IP match but L4 unavailable (malformed skb?), skip eviction\n");
+				pr_debug("[HNAT-TPX-5-B017] BIND IP match, L4 unavail (unreachable): skip\n");
+				goto done;
 			} else {
 				u16 pkt_sport = ntohs(pptr->src);
 				u16 pkt_dport = ntohs(pptr->dst);
