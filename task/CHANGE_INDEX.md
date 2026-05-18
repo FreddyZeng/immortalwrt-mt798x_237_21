@@ -5,7 +5,7 @@
 
 <!-- 下一个 FID 编号: F-002 -->
 <!-- 下一个 BID 编号: B-018 -->
-<!-- 下一个 CID 编号: C-FQOS01-15 -->
+<!-- 下一个 CID 编号: C-FQOS01-16 -->
 
 ---
 
@@ -33,7 +33,8 @@
   | C-FQOS01-11 | pending | - | 2026-05-06 | TProxy/SSR Plus bit 0x8000 全链路保护：loadbalance+eqos add PREROUTING 规则添加 TPROXY_MARK_GUARD；DHCP hotplug cmp -s 幂等安装；IPv6 fallback mark 移至 config_foreach 之后；iface trigger 仅处理配置接口 | ✅ 已完成 |
   | C-FQOS01-12 | pending | - | 2026-05-06 | loadbalance grep 前缀匹配修复→ip route show default dev；iptables -D 静默 2>/dev/null；qos-test.md loadbalance sh→bash 修正；B-015 Bug 文档补充 | ✅ 已完成 |
   | C-FQOS01-13 | pending | - | 2026-05-18 | init.d/eqos cleanup_loadbalance_rules 同类前缀匹配修复（B-016） | ✅ 已完成 |
-  | C-FQOS01-14 | pending | - | 2026-05-18 | hnat_nf_hook: tproxy_protection_v4 双修复：① UNBIND FOE 跳过 memset 防止 hash 碰撞破坏直连连接；② 移除 ct->mark 死代码写入（B-017） | ✅ 已完成 |
+  | C-FQOS01-14 | 8de5f767fe | - | 2026-05-18 | hnat_nf_hook: tproxy_protection_v4 双修复：① UNBIND FOE 跳过 memset 防止 hash 碰撞破坏直连连接；② 移除 ct->mark 死代码写入（B-017） | ✅ 已完成 |
+  | C-FQOS01-15 | pending | - | 2026-05-18 | hnat_nf_hook: tproxy_protection_v4 三层 guard 彻底修复——加入 IPv4 SIP+DIP 比对，hash 碰撞的直连 BIND 连接完全零干扰（B-017 边缘情况根治） | ✅ 已完成 |
 - Bugs:
   | BID | 描述 | 引入者 | 修复者 | 状态 |
   |-----|------|--------|--------|------|

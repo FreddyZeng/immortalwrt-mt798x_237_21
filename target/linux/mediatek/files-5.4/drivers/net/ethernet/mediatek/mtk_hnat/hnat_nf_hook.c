@@ -2881,34 +2881,28 @@ static unsigned int mtk_hnat_tproxy_protection_v4(
 		return NF_ACCEPT;
 	}
 
-	/* Zero the FOE entry ONLY if it is in BIND state (B-017 root-cause fix).
+	/* Zero the FOE entry ONLY when this entry belongs to the current TPROXY
+	 * 5-tuple.  Three-tier guard (B-017 complete fix):
 	 *
-	 * Why only BIND:
-	 *   TPROXY flows are delivered to LOCAL_IN, bypassing FORWARD/POSTROUTING.
-	 *   HNAT can only BIND a flow it observes on FORWARD/POSTROUTING, so a
-	 *   TPROXY flow's own FOE entry is ALWAYS UNBIND — it can never be BIND
-	 *   through the TPROXY path.
+	 * Tier 1 — State guard (UNBIND/INVALID → skip):
+	 *   TPROXY flows go LOCAL_IN, HNAT never BINDs them via POSTROUTING.
+	 *   Their FOE slot is always UNBIND.  Touching an UNBIND slot is
+	 *   unnecessary and can reset a colliding direct-connect connection's
+	 *   packet counter, preventing it from ever reaching BIND.
 	 *
-	 *   The ONLY case where we MUST zero is when HNAT hardware has already
-	 *   BIND-accelerated a 5-tuple that was later re-routed through TPROXY
-	 *   (ASIC "sample" path: hardware sends a BIND-state packet to CPU for
-	 *   re-validation).  Zeroing that BIND entry evicts it from hardware so
-	 *   subsequent packets are not accelerated past the proxy.
+	 * Tier 2 — Ownership guard (BIND but different 5-tuple → skip):
+	 *   FOE slots are shared by hash.  A TPROXY SYN and a direct-connect
+	 *   (non-proxy) flow can hash to the SAME slot.  If that direct-connect
+	 *   flow is already in BIND state, zeroing it disrupts hardware
+	 *   acceleration for an innocent connection (B-017 edge-case).
+	 *   We compare entry SIP+DIP with the packet's saddr+daddr:
+	 *     match   → this BIND belongs to the TPROXY 5-tuple (flow changed
+	 *               from direct to proxy) → must evict to stop ASIC bypass
+	 *     no match → hash collision, belongs to a different flow → skip
 	 *
-	 * Why UNBIND must NOT be zeroed (B-017):
-	 *   FOE slots are assigned by a hash of the 5-tuple.  A TPROXY SYN and
-	 *   an unrelated direct-connect (non-proxy) TCP connection can hash to the
-	 *   SAME FOE slot.  If we zero the UNBIND slot for the TPROXY packet, we
-	 *   accidentally evict the direct-connect connection's UNBIND entry before
-	 *   it can accumulate enough packets to reach HIT_UNBIND_RATE_REACH and
-	 *   transition to BIND.  The direct-connect flow is forced to CPU path
-	 *   indefinitely → intermittent latency spikes whenever such a hash
-	 *   collision occurs ("偶发延迟").
-	 *
-	 *   For UNBIND entries: the FOE slot holds no ASIC-visible state, so
-	 *   there is nothing to evict.  We can safely return NF_ACCEPT.
-	 *
-	 * hnat_cache_ebl(1) is only needed for BIND→INVALID transitions.
+	 * Tier 3 — Cache flush guard (only on actual BIND eviction):
+	 *   hnat_cache_ebl(1) is expensive; call it only when we truly zero a
+	 *   BIND entry (i.e. tiers 1+2 both pass).
 	 */
 	entry = &hnat_priv->foe_table_cpu[skb_hnat_ppe(skb)][skb_hnat_entry(skb)];
 	{
@@ -2917,19 +2911,36 @@ static unsigned int mtk_hnat_tproxy_protection_v4(
 			 &iph->saddr, &iph->daddr, iph->protocol,
 			 skb_hnat_entry(skb), foe_state, skb->mark);
 
+		/* Tier 1: UNBIND/INVALID — no ASIC state, nothing to evict */
 		if (foe_state != BIND) {
-			/* UNBIND/INVALID: nothing to evict, TPROXY flow cannot be
-			 * hardware-accelerated anyway.  Return without touching the slot
-			 * so other connections sharing this hash are not disrupted. */
-			pr_debug("[HNAT-TPX-5-B017] UNBIND/INVALID: skip memset (no ASIC state to evict)\n");
+			pr_debug("[HNAT-TPX-5-B017] UNBIND/INVALID: skip (no ASIC state)\n");
 			goto done;
 		}
 
-		/* BIND state: ASIC has this flow accelerated — zero it out so the
-		 * hardware stops forwarding packets that should go through TPROXY. */
+		/* Tier 2: BIND — compare SIP+DIP to detect hash collision.
+		 * Only IPv4 HNAPT entries carry sip/dip at fixed offsets that
+		 * are safely readable here (the packet is IPv4, confirmed above).
+		 * Non-IPv4 BIND entries (IPv6 tunnel, etc.) are left untouched;
+		 * those flows cannot be TPROXY-marked anyway. */
+		if (!IS_IPV4_GRP(entry)) {
+			pr_debug("[HNAT-TPX-5-B017] BIND non-IPv4 entry: skip\n");
+			goto done;
+		}
+		if (entry->ipv4_hnapt.sip != iph->saddr ||
+		    entry->ipv4_hnapt.dip != iph->daddr) {
+			pr_debug("[HNAT-TPX-5-B017] BIND collision: entry sip=%pI4 dip=%pI4 != pkt sip=%pI4 dip=%pI4 — skip\n",
+				 &entry->ipv4_hnapt.sip, &entry->ipv4_hnapt.dip,
+				 &iph->saddr, &iph->daddr);
+			goto done;
+		}
+
+		/* Tier 3: 5-tuple matches — this BIND belongs to THIS TPROXY
+		 * flow.  Evict it so the ASIC stops hardware-accelerating
+		 * packets that must go through the proxy. */
 		memset(entry, 0, sizeof(struct foe_entry));
 		hnat_cache_ebl(1);
-		pr_debug("[HNAT-TPX-5-B017] BIND→INVALID: evicted + cache flushed\n");
+		pr_debug("[HNAT-TPX-5-B017] BIND match evicted: sip=%pI4 dip=%pI4 + cache flushed\n",
+			 &iph->saddr, &iph->daddr);
 	}
 done:
 

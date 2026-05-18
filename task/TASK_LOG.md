@@ -179,3 +179,21 @@
 - **PRD 同步**: ✅ N/A（内核路径优化）
 - **方案同步**: ✅ N/A
 - **测试同步**: ✅ 验证：建立 TCP 连接后多个数据包 FOE 条目保持 BIND 状态
+
+## [2026-05-18] C-FQOS01-15 | commit: pending
+
+- **FID**: F-QOS01
+- **BID**: B-017 (补充修复)
+- **CID**: C-FQOS01-15
+- **类型**: fix
+- **范围**: hnat_nf_hook.c tproxy_protection_v4
+- **描述**: B-017 彻底修复——加入三层 guard 防止清零 hash 碰撞的直连连接 BIND entry。
+  Tier1: foe_state != BIND → skip（UNBIND/INVALID 不触碰）。
+  Tier2: IS_IPV4_GRP + entry.sip/dip != iph->saddr/daddr → skip（不同 5-tuple 的碰撞连接不清零）。
+  Tier3: SIP+DIP 完全匹配才执行 memset + hnat_cache_ebl（这是 TPROXY 流量意外被 BIND 的 ASIC sample path 场景）。
+  消除了 C-FQOS01-14 遗留的边缘情况：直连连接已 BIND 时被 TPROXY hash 碰撞包清零的风险。
+- **改动文件**: target/linux/mediatek/files-5.4/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
+- **日志 TAG**: [HNAT-TPX-4-B017] [HNAT-TPX-5-B017]
+- **PRD 同步**: ⏭️ 不涉及
+- **方案同步**: ⏭️ 不涉及
+- **测试同步**: ✅ 见 B-017.md 验证条件
