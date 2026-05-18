@@ -2917,29 +2917,71 @@ static unsigned int mtk_hnat_tproxy_protection_v4(
 			goto done;
 		}
 
-		/* Tier 2: BIND — compare SIP+DIP to detect hash collision.
-		 * Only IPv4 HNAPT entries carry sip/dip at fixed offsets that
-		 * are safely readable here (the packet is IPv4, confirmed above).
-		 * Non-IPv4 BIND entries (IPv6 tunnel, etc.) are left untouched;
-		 * those flows cannot be TPROXY-marked anyway. */
+		/* Tier 2: BIND ownership — full IPv4 5-tuple comparison.
+		 *
+		 * BYTE ORDER NOTE: FOE entry sip/dip/sport/dport are stored in
+		 * HOST byte order (the HNAT binding code calls ntohl/ntohs when
+		 * copying from packet headers into the FOE table — see lines
+		 * 1924-1925 where existing code does htonl(foe->ipv4_hnapt.sip)
+		 * to convert back to network byte order for use).
+		 * iph->saddr/daddr are in NETWORK byte order (__be32).
+		 * → Must use ntohl() on iph fields before comparing with entry.
+		 *
+		 * pptr->src/dst from skb_header_pointer are in NETWORK byte
+		 * order (__be16) → must use ntohs() before comparing with
+		 * entry->ipv4_hnapt.sport/dport (host byte order u16).
+		 *
+		 * Only IS_IPV4_GRP entries have sip/dip/sport/dport fields at
+		 * these offsets.  Non-IPv4 BIND entries (IPv6 tunnel, etc.)
+		 * cannot carry TPROXY mark=0x8000, so skip them safely. */
 		if (!IS_IPV4_GRP(entry)) {
 			pr_debug("[HNAT-TPX-5-B017] BIND non-IPv4 entry: skip\n");
 			goto done;
 		}
-		if (entry->ipv4_hnapt.sip != iph->saddr ||
-		    entry->ipv4_hnapt.dip != iph->daddr) {
-			pr_debug("[HNAT-TPX-5-B017] BIND collision: entry sip=%pI4 dip=%pI4 != pkt sip=%pI4 dip=%pI4 — skip\n",
-				 &entry->ipv4_hnapt.sip, &entry->ipv4_hnapt.dip,
-				 &iph->saddr, &iph->daddr);
-			goto done;
+		{
+			struct tcpudphdr _ports;
+			const struct tcpudphdr *pptr;
+			u32 pkt_sip = ntohl(iph->saddr);
+			u32 pkt_dip = ntohl(iph->daddr);
+
+			if (entry->ipv4_hnapt.sip != pkt_sip ||
+			    entry->ipv4_hnapt.dip != pkt_dip) {
+				pr_debug("[HNAT-TPX-5-B017] BIND IP collision: entry=%pI4h->%pI4h pkt=%pI4->%pI4 skip\n",
+					 &entry->ipv4_hnapt.sip,
+					 &entry->ipv4_hnapt.dip,
+					 &iph->saddr, &iph->daddr);
+				goto done;
+			}
+
+			/* IPs match — also compare ports for full 5-tuple */
+			pptr = skb_header_pointer(skb, iph->ihl * 4,
+						  sizeof(_ports), &_ports);
+			if (unlikely(!pptr)) {
+				/* Fragment/truncated: IPs matched, conservatively
+				 * evict to maintain proxy security guarantee */
+				pr_debug("[HNAT-TPX-5-B017] BIND IP match, L4 unavail: evict (conservative)\n");
+			} else {
+				u16 pkt_sport = ntohs(pptr->src);
+				u16 pkt_dport = ntohs(pptr->dst);
+
+				if (entry->ipv4_hnapt.sport != pkt_sport ||
+				    entry->ipv4_hnapt.dport != pkt_dport) {
+					pr_debug("[HNAT-TPX-5-B017] BIND port collision: entry=%u->%u pkt=%u->%u skip\n",
+						 entry->ipv4_hnapt.sport,
+						 entry->ipv4_hnapt.dport,
+						 pkt_sport, pkt_dport);
+					goto done;
+				}
+			}
 		}
 
-		/* Tier 3: 5-tuple matches — this BIND belongs to THIS TPROXY
-		 * flow.  Evict it so the ASIC stops hardware-accelerating
-		 * packets that must go through the proxy. */
+		/* Tier 3: Full 5-tuple matched — this BIND entry belongs to
+		 * THIS exact TPROXY flow (flow changed direct→proxy while ASIC
+		 * had it hardware-accelerated).  Evict it so subsequent packets
+		 * are delivered through the proxy instead of bypassing it. */
 		memset(entry, 0, sizeof(struct foe_entry));
 		hnat_cache_ebl(1);
-		pr_debug("[HNAT-TPX-5-B017] BIND match evicted: sip=%pI4 dip=%pI4 + cache flushed\n",
+		pr_debug("[HNAT-TPX-5-B017] BIND 5-tuple matched: evicted sip=%pI4 dip=%pI4 + cache flushed\n",
 			 &iph->saddr, &iph->daddr);
 	}
 done:
