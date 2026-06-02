@@ -1,6 +1,7 @@
 --- a/net/sched/sch_cake.c
 +++ b/net/sched/sch_cake.c
-@@ -2534,7 +2534,7 @@
+@@ -2531,7 +2531,7 @@
+ 
  		if (i > 5) {
  			if (i == 7) {
 -				cake_set_rate(b, q->rate_bps * 10 / 10, mtu, us_to_ns(q->target),
@@ -8,7 +9,26 @@
  					      us_to_ns(10000));
  			} else {
  				cake_set_rate(b, rate, mtu, us_to_ns(q->target),
-@@ -2647,7 +2647,7 @@
+@@ -2540,7 +2540,7 @@
+ 		} else {
+ 			if (i == 2) {
+ 				cake_set_rate(b, q->rate_bps * 9 / 10, mtu, us_to_ns(q->target),
+-					      us_to_ns(10000));
++					      us_to_ns(100000));
+ 			} else {
+ 				cake_set_rate(b, rate, mtu, us_to_ns(q->target),
+ 					      us_to_ns(100000));
+@@ -2549,6 +2549,8 @@
+ 
+ 		if (i == 7) {
+ 			b->tin_quantum = 65535;
++		} else if (i == 2) {
++			b->tin_quantum = 65535;
+ 		} else {
+ 			b->tin_quantum = max_t(u16, 1U, quantum);
+ 		}
+@@ -2644,7 +2644,7 @@
+ 
  		if (i > 5) {
  			if (i == 7) {
 -				cake_set_rate(b, q->rate_bps * 10 / 10, mtu, us_to_ns(q->target),
@@ -16,7 +36,7 @@
  					      us_to_ns(10000));
  			} else {
  				cake_set_rate(b, rate, mtu, us_to_ns(q->target),
-@@ -2958,8 +2958,8 @@
+@@ -2955,8 +2955,8 @@
  
  	q->rate_bps = 0; /* unlimited by default */
  
@@ -27,3 +47,14 @@
  			       * for 5 to 10% of interval
  			       */
  	q->rate_flags |= CAKE_FLAG_SPLIT_GSO;
+--- a/include/uapi/linux/netfilter_ipv4.h
++++ b/include/uapi/linux/netfilter_ipv4.h
+@@ -28,7 +28,7 @@
+ #endif /* ! __KERNEL__ */
+ 
+ enum nf_ip_hook_priorities {
+-	NF_IP_PRI_FIRST = INT_MIN + 10,
++	NF_IP_PRI_FIRST = INT_MIN,
+ 	NF_IP_PRI_RAW_BEFORE_DEFRAG = -450,
+ 	NF_IP_PRI_CONNTRACK_DEFRAG = -400,
+ 	NF_IP_PRI_RAW = -300,
