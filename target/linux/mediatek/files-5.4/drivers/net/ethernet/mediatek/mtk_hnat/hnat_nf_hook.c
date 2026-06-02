@@ -2494,8 +2494,11 @@ static void mtk_hnat_dscp_update(struct sk_buff *skb, struct foe_entry *entry)
 				entry_qid_v6 = entry->ipv6_5t_route.iblk2.qid &
 					       MTK_QDMA_TX_MASK;
 #else
-				entry_qid_v6 = (entry->ipv6_5t_route.iblk2.qid & 0xf) |
-					       ((entry->ipv6_5t_route.iblk2.port_mg & 0x3) << 4);
+				if (hnat_priv->data->version == MTK_HNAT_V1)
+					entry_qid_v6 = entry->ipv6_5t_route.iblk2.qid & 0xf;
+				else
+					entry_qid_v6 = (entry->ipv6_5t_route.iblk2.qid & 0xf) |
+						       ((entry->ipv6_5t_route.iblk2.port_mg & 0x3) << 4);
 #endif
 				if (!ip6_tc) {
 					/* tos=0 → Q0 fast-match (same logic as IPv4 BUG-10) */
