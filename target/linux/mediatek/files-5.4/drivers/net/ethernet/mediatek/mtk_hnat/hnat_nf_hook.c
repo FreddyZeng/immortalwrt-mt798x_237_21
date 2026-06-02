@@ -3076,13 +3076,13 @@ static struct nf_hook_ops mtk_hnat_nf_ops[] __read_mostly = {
 		.hook = mtk_hnat_ipv4_nf_pre_routing,
 		.pf = NFPROTO_IPV4,
 		.hooknum = NF_INET_PRE_ROUTING,
-		.priority = NF_IP_PRI_FIRST + 1,
+		.priority = INT_MIN + 11,
 	},
 	{
 		.hook = mtk_hnat_ipv6_nf_pre_routing,
 		.pf = NFPROTO_IPV6,
 		.hooknum = NF_INET_PRE_ROUTING,
-		.priority = NF_IP_PRI_FIRST + 1,
+		.priority = INT_MIN + 11,
 	},
 	{
 		.hook = mtk_hnat_ipv6_nf_post_routing,
