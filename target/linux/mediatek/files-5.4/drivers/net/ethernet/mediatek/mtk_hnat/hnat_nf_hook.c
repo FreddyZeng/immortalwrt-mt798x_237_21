@@ -1965,6 +1965,7 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 		 * qid  63   : rate-limited device download  → BE   (DSCP  0, 0x00)
 		 */
 		if (IS_HQOS_MODE && hnat_priv->dscp_en &&
+		    entry.ipv4_hnapt.iblk2.fqos &&
 		    qid >= 32 && qid <= 63) {
 			__be32 _sip = htonl(foe->ipv4_hnapt.sip);
 			__be32 _dip = htonl(foe->ipv4_hnapt.dip);
@@ -2478,14 +2479,43 @@ static void mtk_hnat_dscp_update(struct sk_buff *skb, struct foe_entry *entry)
 		break;
 	case ETH_P_IPV6:
 		ip6h = ipv6_hdr(skb);
-		if ((IS_IPV6_3T_ROUTE(entry) || IS_IPV6_5T_ROUTE(entry)) &&
-			(entry->ipv6_5t_route.iblk2.dscp !=
-			(ip6h->priority << 4 | (ip6h->flow_lbl[0] >> 4)))) {
-			pr_debug("[HNAT-DSCP-V6] DSCP mismatch→evict foe_idx=%u entry_dscp=0x%02x ip6_dscp=0x%02x\n",
-				 skb_hnat_entry(skb),
-				 entry->ipv6_5t_route.iblk2.dscp,
-				 (ip6h->priority << 4 | (ip6h->flow_lbl[0] >> 4)));
-			flag = true;
+		if (IS_IPV6_3T_ROUTE(entry) || IS_IPV6_5T_ROUTE(entry)) {
+			if (IS_HQOS_MODE && hnat_priv->dscp_en) {
+				/* In HQOS mode, the dscp field stores QID encoding.
+				 * Compare QID derived from IPv6 traffic class against
+				 * the entry's stored QID, mirroring the IPv4 path.
+				 * Without this, every IPv6 keepalive would evict the
+				 * FOE entry, preventing hardware acceleration (BUG-9).
+				 */
+				u8 ip6_tc = (ip6h->priority << 4 |
+					     (ip6h->flow_lbl[0] >> 4));
+				u32 skb_qid_v6 = (ip6_tc >> 2) & MTK_QDMA_TX_MASK;
+				u32 entry_qid_v6;
+#if defined(CONFIG_MEDIATEK_NETSYS_V2)
+				entry_qid_v6 = entry->ipv6_5t_route.iblk2.qid &
+					       MTK_QDMA_TX_MASK;
+#else
+				entry_qid_v6 = (entry->ipv6_5t_route.iblk2.qid & 0xf) |
+					       ((entry->ipv6_5t_route.iblk2.port_mg & 0x3) << 4);
+#endif
+				if (!ip6_tc) {
+					/* tos=0 → Q0 fast-match (same logic as IPv4 BUG-10) */
+					pr_debug("[HNAT-QM-V6] tc=0 fast-match: entry_qid=%u foe_idx=%u\n",
+						 entry_qid_v6, skb_hnat_entry(skb));
+				} else if (entry_qid_v6 != skb_qid_v6) {
+					pr_debug("[HNAT-DSCP-V6] QID mismatch→evict foe_idx=%u tc=0x%02x skb_qid=%u entry_qid=%u\n",
+						 skb_hnat_entry(skb), ip6_tc,
+						 skb_qid_v6, entry_qid_v6);
+					flag = true;
+				}
+			} else if (entry->ipv6_5t_route.iblk2.dscp !=
+				   (ip6h->priority << 4 | (ip6h->flow_lbl[0] >> 4))) {
+				pr_debug("[HNAT-DSCP-V6] DSCP mismatch→evict foe_idx=%u entry_dscp=0x%02x ip6_dscp=0x%02x\n",
+					 skb_hnat_entry(skb),
+					 entry->ipv6_5t_route.iblk2.dscp,
+					 (ip6h->priority << 4 | (ip6h->flow_lbl[0] >> 4)));
+				flag = true;
+			}
 		}
 		break;
 	default:

@@ -1,0 +1,13 @@
+--- a/net/sched/sch_cake.c
++++ b/net/sched/sch_cake.c
+@@ -2550,7 +2550,9 @@
+ 
+ 		if (i == 7) {
+ 			b->tin_quantum = 65535;
+-		} else {
++		} else if (i == 2) {
++			b->tin_quantum = 65535;
++		} else {
+ 			b->tin_quantum = max_t(u16, 1U, quantum);
+ 		}
+ 
