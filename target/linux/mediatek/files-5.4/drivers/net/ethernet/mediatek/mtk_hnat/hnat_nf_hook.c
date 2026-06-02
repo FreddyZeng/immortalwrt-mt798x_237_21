@@ -1965,7 +1965,6 @@ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
 		 * qid  63   : rate-limited device download  → BE   (DSCP  0, 0x00)
 		 */
 		if (IS_HQOS_MODE && hnat_priv->dscp_en &&
-		    entry.ipv4_hnapt.iblk2.fqos &&
 		    qid >= 32 && qid <= 63) {
 			__be32 _sip = htonl(foe->ipv4_hnapt.sip);
 			__be32 _dip = htonl(foe->ipv4_hnapt.dip);

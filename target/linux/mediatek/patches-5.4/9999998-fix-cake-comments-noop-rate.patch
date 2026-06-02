@@ -8,7 +8,7 @@
  					      us_to_ns(10000));
  			} else {
  				cake_set_rate(b, rate, mtu, us_to_ns(q->target),
-@@ -2645,7 +2645,7 @@
+@@ -2647,7 +2647,7 @@
  		if (i > 5) {
  			if (i == 7) {
 -				cake_set_rate(b, q->rate_bps * 10 / 10, mtu, us_to_ns(q->target),
@@ -16,7 +16,7 @@
  					      us_to_ns(10000));
  			} else {
  				cake_set_rate(b, rate, mtu, us_to_ns(q->target),
-@@ -2956,8 +2956,8 @@
+@@ -2958,8 +2958,8 @@
  
  	q->rate_bps = 0; /* unlimited by default */
  
